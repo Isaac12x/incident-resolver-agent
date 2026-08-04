@@ -941,6 +941,17 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     worktree = storage.root / "worktrees" / task.task_id
     worktree.mkdir(parents=True)
     (worktree / "AGENTS.md").write_text("repository rules")
+    custom_skill = worktree / ".agents" / "skills" / "checkout-diagnostics" / "SKILL.md"
+    custom_skill.parent.mkdir(parents=True)
+    custom_skill.write_text(
+        "---\n"
+        "name: checkout-diagnostics\n"
+        'description: "Diagnose checkout failures"\n'
+        "triggers:\n"
+        '  - "checkout returns 500"\n'
+        "---\n\n"
+        "# Checkout Diagnostics\n\nInspect anonymous checkout session boundaries.\n"
+    )
     storage.append_memory("remember this")
     calls: list[str] = []
     output_types: list[type[object] | None] = []
@@ -987,10 +998,17 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "Required Repository Graph Check" in calls[0]
     assert "# /graphify" in calls[0]
     assert "# Incident Investigation" in calls[0]
+    assert "Preflight Skill Resolution" in calls[0]
+    assert "# Checkout Diagnostics" in calls[0]
     assert "# Coding" in calls[1] and "# Testing" in calls[1] and "# GitHub" in calls[1]
     assert "# Review Comments" in calls[2]
     assert output_types == [InvestigationResult, FixResult, ReviewResult]
     assert len(storage.messages(task.conversation_id)) == 6
+    skill_events = [
+        event for event in storage.events(task.task_id) if event.type == "agent.skills_resolved"
+    ]
+    assert len(skill_events) == 3
+    assert "checkout-diagnostics" in skill_events[0].data["loaded"]
 
 
 @pytest.mark.asyncio

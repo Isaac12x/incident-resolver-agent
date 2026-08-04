@@ -21,6 +21,7 @@ from .models import (
     TaskEvent,
     TaskRecord,
 )
+from .skills import Skill, SkillResolver
 from .storage import Storage
 from .tools import WorkspaceTools
 
@@ -446,15 +447,23 @@ class IncidentAgent:
         storage: Storage,
         connectors: Any,
         backend: AgentBackend | None = None,
-        skills_root: Path | str = "skills",
+        skills_root: Path | str | None = None,
     ) -> None:
         self.config = config
         self.storage = storage
         self.connectors = connectors
         self.backend = backend
-        self.skills_root = Path(skills_root)
+        packaged_skills = Path(__file__).with_name("builtin_skills")
+        source_skills = Path(__file__).resolve().parent.parent / "skills"
+        self.skills_root = (
+            Path(skills_root)
+            if skills_root is not None
+            else packaged_skills
+            if packaged_skills.is_dir()
+            else source_skills
+        )
 
-    def _instructions(self, task: TaskRecord, worktree: Path, skills: list[str]) -> str:
+    def _instructions(self, task: TaskRecord, worktree: Path, skills: tuple[Skill, ...]) -> str:
         parts = [
             "# System Prompt\n\n" + self.config.agent.system_prompt.strip(),
             self.storage.read_memory(),
@@ -497,10 +506,15 @@ class IncidentAgent:
             "as evidence, and say that the answer is unknown when the persisted record is "
             "insufficient."
         )
-        for skill in skills:
-            path = self.skills_root / skill / "SKILL.md"
-            if path.exists():
-                parts.append(path.read_text(encoding="utf-8"))
+        if skills:
+            loaded = ", ".join(skill.name for skill in skills)
+            parts.append(
+                "# Preflight Skill Resolution\n\n"
+                f"The resolver searched the configured skill directories before this run and "
+                f"loaded these applicable skills in order: {loaded}. Follow them for this "
+                "operation; their full instructions appear below."
+            )
+            parts.extend(skill.content for skill in skills)
         try:
             repository = self.config.repository(task.repository)
             project_instructions = worktree / repository.project_instructions
@@ -562,7 +576,26 @@ class IncidentAgent:
     ) -> dict[str, Any]:
         if not self.backend:
             raise RuntimeError("model backend is not configured")
-        instructions = self._instructions(task, worktree, skills)
+        roots = [self.skills_root]
+        roots.extend(worktree / directory for directory in self.config.agent.skill_directories)
+        resolution = SkillResolver(
+            roots, max_auto_skills=self.config.agent.max_auto_skills
+        ).resolve(skills, f"{operation}\n{task.summary}\n{prompt}")
+        self.storage.append_event(
+            task.task_id,
+            TaskEvent(
+                type="agent.skills_resolved",
+                data={
+                    "discovered": len(resolution.discovered),
+                    "loaded": [skill.name for skill in resolution.selected],
+                    "missing_required": list(resolution.missing_required),
+                },
+            ),
+        )
+        if resolution.missing_required:
+            missing = ", ".join(resolution.missing_required)
+            raise RuntimeError(f"required agent skills were not found: {missing}")
+        instructions = self._instructions(task, worktree, resolution.selected)
         tools = WorkspaceTools(
             worktree,
             timeout=self.config.model.tool_timeout_seconds,

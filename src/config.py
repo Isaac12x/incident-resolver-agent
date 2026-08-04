@@ -173,11 +173,20 @@ class TriggerConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    skill_directories: list[str] = Field(
+        default_factory=lambda: ["skills", ".agents/skills", ".claude/skills", ".codex/skills"]
+    )
+    max_auto_skills: int = Field(8, ge=0, le=32)
 
     @model_validator(mode="after")
     def system_prompt_is_required(self) -> AgentConfig:
         if not self.system_prompt.strip():
             raise ValueError("system_prompt cannot be blank")
+        if any(
+            not directory.strip() or Path(directory).is_absolute() or ".." in Path(directory).parts
+            for directory in self.skill_directories
+        ):
+            raise ValueError("skill_directories must contain only repository-relative paths")
         return self
 
 

@@ -10,8 +10,9 @@ tasks remain inspectable and recoverable while the process is running or after a
 - Atomic task queues under `.agent/tasks` with append-only events and SQLite conversation history.
 - Incident deduplication and restart recovery without an external queue.
 - Per-task Git worktrees backed by one bare mirror per configured repository.
-- A bounded OpenAI Agents SDK coding runtime with repository instructions, skills, memory, MCP tool
-  adapters, workspace-constrained file tools, and any local or hosted OpenAI-compatible endpoint.
+- A bounded OpenAI Agents SDK coding runtime with repository instructions, preflight skill
+  discovery, memory, MCP tool adapters, workspace-constrained file tools, and any local or hosted
+  OpenAI-compatible endpoint.
 - Concise live agent progress in the terminal by default, including bounded reasoning summaries,
   sanitized tool activity, and run status without raw model JSON or complete tool output.
 - GitHub webhook signature verification, delivery deduplication, authorized review routing, and
@@ -66,6 +67,40 @@ supports OpenAI and hosted compatible APIs. The TUI never asks for or writes sec
 The Safety tab also contains the complete system prompt. That prompt and the positive goals,
 negative goals, guardrails, and safeguards are assembled into every investigation, implementation,
 and review agent run as a binding instruction contract.
+
+### Adding skills
+
+The harness searches for nested `SKILL.md` files before every agent operation. Bundled lifecycle
+skills are loaded first, then relevant additional skills are selected by matching their name,
+description, and triggers against the operation and incident context. Repository-local skills can
+be added without Python changes under any of these directories:
+
+```text
+skills/<skill-name>/SKILL.md
+.agents/skills/<skill-name>/SKILL.md
+.claude/skills/<skill-name>/SKILL.md
+.codex/skills/<skill-name>/SKILL.md
+```
+
+Use frontmatter so the resolver can find the skill quickly:
+
+```markdown
+---
+name: database-performance
+description: "Diagnose slow database access during incidents"
+triggers:
+  - "slow database query"
+  - "query timeout"
+---
+
+# Database Performance
+
+Your operating instructions...
+```
+
+The directories and automatic-load limit are configurable as `agent.skill_directories` and
+`agent.max_auto_skills` in `.agent/config.toml`. Each run records an `agent.skills_resolved` event
+with the discovered count and loaded skill names.
 
 Concise agent progress is enabled by default and printed while an agent is running. Raw model JSON,
 complete SDK events, tool arguments, and tool output stay out of the console. Use the Model tab's

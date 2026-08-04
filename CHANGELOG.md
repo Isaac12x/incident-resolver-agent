@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Discover nested built-in and repository-local `SKILL.md` files before every agent operation,
+  automatically load contextual matches alongside required lifecycle skills, and record the
+  preflight resolution in the task event log.
 - Require operation-specific structured model output and accept the Agents SDK's validated Pydantic
   results, preventing successful local incident fixes from exhausting retries as invalid JSON.
 - Show concise agent progress in the terminal by default: bounded reasoning summaries, sanitized
