@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Rewrite repository history to remove `codedb.snapshot` and consolidate all commits older than
-  three hours into one pre-cutoff commit.
+- Rewrite repository history to remove `codedb.snapshot` and `handoff.md`, and consolidate all
+  commits older than three hours into one pre-cutoff commit.
 - Discover nested built-in and repository-local `SKILL.md` files before every agent operation,
   automatically load contextual matches alongside required lifecycle skills, and record the
   preflight resolution in the task event log.
