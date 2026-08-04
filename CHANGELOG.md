@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Require operation-specific structured model output and accept the Agents SDK's validated Pydantic
+  results, preventing successful local incident fixes from exhausting retries as invalid JSON.
 - Show concise agent progress in the terminal by default: bounded reasoning summaries, sanitized
   tool names and targets, tool success/failure, and run status. Keep raw model JSON, complete SDK
   events, tool arguments, and tool output hidden, with a persisted TUI toggle for a quiet console.

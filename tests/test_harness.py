@@ -943,16 +943,26 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     (worktree / "AGENTS.md").write_text("repository rules")
     storage.append_memory("remember this")
     calls: list[str] = []
+    output_types: list[type[object] | None] = []
 
-    async def backend(instructions, prompt, tools, connector_tools):  # noqa: ANN001, ANN202
-        calls.append(instructions + prompt)
-        if len(calls) == 1:
-            return {"root_cause": "bug", "evidence": ["trace"], "proposed_fix": "fix"}
-        if len(calls) == 2:
-            return {"changed": True, "summary": "fixed", "tests_passed": True}
-        return {"changed": False, "summary": "answered", "tests_passed": True}
+    class Backend(OpenAIAgentsBackend):
+        async def __call__(
+            self,
+            instructions,
+            prompt,
+            tools,
+            connector_tools,
+            output_type=None,  # noqa: ANN001
+        ):  # noqa: ANN202
+            calls.append(instructions + prompt)
+            output_types.append(output_type)
+            if len(calls) == 1:
+                return {"root_cause": "bug", "evidence": ["trace"], "proposed_fix": "fix"}
+            if len(calls) == 2:
+                return {"changed": True, "summary": "fixed", "tests_passed": True}
+            return {"changed": False, "summary": "answered", "tests_passed": True}
 
-    agent = IncidentAgent(config, storage, ConnectorManager([]), backend)
+    agent = IncidentAgent(config, storage, ConnectorManager([]), Backend(config))
     assert (await agent.investigate(task, worktree)).root_cause == "bug"
     storage.write_artifact(task.task_id, "investigation.md", "investigation")
     assert (await agent.implement_fix(task, worktree)).changed
@@ -979,6 +989,7 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "# Incident Investigation" in calls[0]
     assert "# Coding" in calls[1] and "# Testing" in calls[1] and "# GitHub" in calls[1]
     assert "# Review Comments" in calls[2]
+    assert output_types == [InvestigationResult, FixResult, ReviewResult]
     assert len(storage.messages(task.conversation_id)) == 6
 
 
@@ -1177,7 +1188,13 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
     )
     monkeypatch.setitem(sys.modules, "agents", fake_agents)
     backend = OpenAIAgentsBackend(config)
-    result = await backend("instructions", "resolve", workspace, [mcp_server, connector_tool])
+    result = await backend(
+        "instructions",
+        "resolve",
+        workspace,
+        [mcp_server, connector_tool],
+        output_type=FixResult,
+    )
     assert result == {"changed": True}
 
     config.model.show_execution_details = True
@@ -1193,8 +1210,18 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
     assert "complete model tool output stays hidden" not in progress
 
     config.model.show_execution_details = False
-    SDKRunner.outputs = [{"changed": True}, 3, "not json", "[]"]
-    assert await backend("instructions", "resolve", workspace, []) == {"changed": True}
+    SDKRunner.outputs = [
+        FixResult(changed=True, summary="fix complete", tests_passed=True),
+        3,
+        "not json",
+        "[]",
+    ]
+    assert await backend("instructions", "resolve", workspace, [], output_type=FixResult) == {
+        "changed": True,
+        "summary": "fix complete",
+        "tests_passed": True,
+        "blocked_reason": None,
+    }
     with pytest.raises(RuntimeError, match="non-JSON"):
         await backend("instructions", "resolve", workspace, [])
     with pytest.raises(RuntimeError, match="invalid JSON"):

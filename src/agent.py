@@ -10,6 +10,8 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from .config import Config
 from .models import (
     FixResult,
@@ -227,6 +229,7 @@ class OpenAIAgentsBackend:
         prompt: str,
         workspace: WorkspaceTools,
         connector_tools: list[Any],
+        output_type: type[BaseModel] | None = None,
     ) -> dict[str, Any]:
         from agents import Agent, ModelSettings, Runner, function_tool
         from openai.types.shared import Reasoning
@@ -380,11 +383,12 @@ class OpenAIAgentsBackend:
         agent = Agent(
             name="Incident Resolver",
             instructions=instructions
-            + "\n\nReturn only one JSON object matching the fields requested by the operation.",
+            + "\n\nReturn only the structured result requested by the operation.",
             model=self._model(agents_module) if agents_module else self.config.model.name,
             model_settings=model_settings,
             tools=sdk_tools,
             mcp_servers=mcp_servers,
+            output_type=output_type,
             reset_tool_choice=True,
         )
         progress = _ConsoleProgress(self.config.model.show_execution_details)
@@ -413,7 +417,9 @@ class OpenAIAgentsBackend:
                     max_turns=self.config.model.max_turns_per_iteration,
                 )
             output = result.final_output
-            if isinstance(output, dict):
+            if isinstance(output, BaseModel):
+                decoded = output.model_dump(mode="json")
+            elif isinstance(output, dict):
                 decoded = output
             elif not isinstance(output, str):
                 raise RuntimeError("model returned a non-JSON result")
@@ -572,6 +578,19 @@ class IncidentAgent:
         connector_tools = await self.connectors.tools_for(capabilities)
         prompt = await self._graph_context(task, worktree, tools) + prompt
         self.storage.add_message(task.conversation_id, "user", f"{operation}: {prompt}")
+        if isinstance(self.backend, OpenAIAgentsBackend):
+            output_types: dict[str, type[BaseModel]] = {
+                "investigate": InvestigationResult,
+                "implement_fix": FixResult,
+                "address_review": ReviewResult,
+            }
+            return await self.backend(
+                instructions,
+                prompt,
+                tools,
+                connector_tools,
+                output_type=output_types[operation],
+            )
         return await self.backend(instructions, prompt, tools, connector_tools)
 
     def _cache_response(self, task: TaskRecord, response: dict[str, Any]) -> None:
