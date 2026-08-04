@@ -1,7 +1,6 @@
 # Incident Harness Skill Resolver
 
-Read `DESIGN.md` before changing the project. Read a matching skill before acting; when several
-skills apply, follow them in lifecycle order.
+Read a matching skill before acting; when several skills apply, follow them in lifecycle order.
 
 ## Brain operations
 

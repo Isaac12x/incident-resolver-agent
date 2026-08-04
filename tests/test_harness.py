@@ -54,6 +54,7 @@ from src.tooling import (
     capture_structured_tree,
     clone_and_index_repository,
     github_login,
+    initialise_runtime_tree,
     list_github_repositories,
     repository_name_from_url,
     repository_slug,
@@ -170,6 +171,17 @@ def test_compatible_model_and_safety_configuration_round_trip(tmp_path: Path) ->
     assert load_config(path) == config
 
 
+def test_empty_seeded_configuration_is_replaced_with_defaults(tmp_path: Path) -> None:
+    path = tmp_path / ".agent" / "config.toml"
+    path.parent.mkdir()
+    path.touch()
+
+    config = load_config(path)
+
+    assert config.runtime_root == path.parent
+    assert path.read_text(encoding="utf-8").startswith('runtime_root = "')
+
+
 def test_repository_tooling_delegates_to_seed_and_graph_commands(tmp_path: Path) -> None:
     calls: list[tuple[list[str], Path]] = []
 
@@ -185,6 +197,38 @@ def test_repository_tooling_delegates_to_seed_and_graph_commands(tmp_path: Path)
     assert calls[1][0][:2] == ["graphify", "extract"]
     assert calls[2][0][:2] == ["code-review-graph", "build"]
     assert all(cwd == tmp_path.resolve() for _, cwd in calls)
+
+
+def test_runtime_initialisation_delegates_to_seed_template(tmp_path: Path) -> None:
+    calls: list[tuple[list[str], Path]] = []
+
+    def runner(command, *, cwd, **_kwargs):  # noqa: ANN001, ANN202
+        calls.append((command, cwd))
+        return subprocess.CompletedProcess(command, 0, "created\n", "")
+
+    result = initialise_runtime_tree(tmp_path, runner=runner)
+
+    assert result.succeeded
+    assert calls == [
+        (
+            [
+                "seed",
+                "create",
+                "--template",
+                str(Path("src/runtime.tree").resolve()),
+                "--base",
+                str(tmp_path.resolve()),
+                "runtime_root=.agent",
+            ],
+            tmp_path.resolve(),
+        )
+    ]
+
+
+def test_packaged_runtime_seed_matches_project_spec() -> None:
+    assert Path("src/runtime.tree").read_text(encoding="utf-8") == Path(
+        ".seed/specs/runtime.tree"
+    ).read_text(encoding="utf-8")
 
 
 def test_repository_tooling_validates_paths_and_reports_failures(tmp_path: Path) -> None:
@@ -736,6 +780,7 @@ def test_server_health_submission_resources_and_github_security(
 
 
 def test_cli_parsing() -> None:
+    assert parse_arguments(["init"]).command == "init"
     assert parse_arguments(["serve", "--no-worker"]).no_worker
     assert parse_arguments(["worker"]).command == "worker"
     assert parse_arguments(["run", "incident.json"]).incident == Path("incident.json")
@@ -1796,6 +1841,25 @@ def test_application_loads_dotenv_without_overriding_process_environment(
 
     assert application.github.webhook_secret == "from-file"
     assert os.environ["OPENAI_API_KEY"] == "from-process"
+
+
+def test_cli_initialises_missing_runtime_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    success = ToolResult(("seed", "create"), 0, "created\n", "")
+    with patch("src.__main__.initialise_runtime_tree", return_value=success) as initialise:
+        main(["init"])
+    initialise.assert_called_once_with()
+    assert capsys.readouterr().out == "created\n"
+
+    with (
+        patch("src.__main__.initialise_runtime_tree", return_value=success) as initialise,
+        patch("src.__main__.run_tui") as tui,
+    ):
+        main(["tui"])
+    initialise.assert_called_once_with()
+    tui.assert_called_once()
 
 
 def test_cli_tree_index_output_and_failures(tmp_path: Path, capsys) -> None:

@@ -26,11 +26,17 @@ tasks remain inspectable and recoverable while the process is running or after a
 Python 3.12 or newer and `uv` are recommended.
 
 ```bash
-cp .env.example .env
+cp .env.example .env        # set up env variables
 uv sync
-uv run incident-agent tui
+uv run incident-agent init  # recreate the local .agent tree with seed-cli
+uv run incident-agent tui   # configure
 uv run incident-agent serve
 ```
+
+The committed `.seed/specs/runtime.tree` is the source of truth for the untracked runtime layout.
+`init` creates or repairs the complete `.agent/` skeleton through `seed-cli`. Runtime commands also
+run the same bootstrap automatically when `.agent/` is absent, so a fresh checkout is ready on its
+first invocation without committing local configuration, sessions, logs, repositories, or tasks.
 
 The runtime loads `.env` from the current working directory without overriding variables already
 exported by the shell. The fixed variables are documented in `.env.example`; custom model and MCP
@@ -57,7 +63,7 @@ uv run incident-agent mcp
 uv run incident-agent run tests/fixtures/incident.json
 ```
 
-The first command creates `.agent/config.toml`. The TUI has separate tabs for model, runtime,
+The initialization command creates `.agent/config.toml`. The TUI has separate tabs for model, runtime,
 repositories, connections, and safety. In the Model tab choose `local` or `remote`, set the
 provider label, model name, OpenAI-compatible base URL, and the names of environment variables
 holding credentials. Local mode supports Ollama, vLLM, LM Studio, and similar servers; remote mode
@@ -115,6 +121,22 @@ GET  /a2a/tasks/{task_id}
 POST /a2a/tasks/{task_id}/cancel
 ```
 
+## Local execution
+
+To execute the agent locally against a local repo and a local incident when the codebase is configured you can follow the steps outlined below:
+
+```bash
+ mkdir -p .agents/repositories
+ git clone <repository-url> .agent/repositories/company--application
+ uv run incident-agent run PATH_TO_YOUR_FIXTURE
+```
+
+The incident’s repository must be company/application. The harness will
+create a local branch, commit the fix, and write the result under:
+
+`.agent/tasks/completed/<task-id>/`
+
+
 ## Verification
 
 ```bash
@@ -128,8 +150,28 @@ source file as well as at least 90% aggregate coverage.
 
 ## Architecture
 
-The implementation follows [DESIGN.md](DESIGN.md): one asyncio event loop, small responsibility-based
-modules, filesystem task queues, SQLite only for model conversation sessions, and no additional
-workflow framework or service layers.
+The implementation is simply by design and consists of basically: one asyncio event loop, small responsibility-based
+modules following a single responsibility principle (SRP), filesystem task queues, SQLite conversation-history storage, and no additional workflow framework or service layers.
 
-I avoided creating a whole memory system and the need for compaction as I'm treating the agent loop as ephimeral and the memory itself as lookup + insert in context.
+
+## Known limitations, pitfalls and non-goals
+
+This was built as a time-boxed prototype (over a 3hr window). And so I left pieces out that would make the agent-harness work better. I list them below in order of importance:
+
+- Memory system (3 layer). This also removes the need for compaction (in conversation) as I'm treating the agent loop as ephimeral and the memory itself as lookup + insert in context.
+- Sub-agents. This would be ideal to span multiple agents to do research, multiple approach proposals to a fix and discussions of the fix. There is no RL loop (context-aware reinforcement learning) to improve long-horizon reasoning whcih improves the output.
+- Sub-tasks. The tasks stay on the main thread which will fill the context quicker. Sub-tasks paired with sub-agents would be my default choice.
+- Stronger tool calling with RL into the main loop, find-research-install tools as needed and retries.
+- Evals.
+- Logs and observability as primitives.
+- Workspaces, guardrails and other safety protocols. Instead relying on the using the .agent folder as the worflow.
+- Security.
+- Versioning and construction. For the system prompt, skills and connections.
+- Extensibility other than by the use of skills.
+
+
+I have solved some of these pitfalls using graphify and code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
+
+I have used skills written by others alongside those that I created for this exercise.
+
+Some paths have not been fully tested, the

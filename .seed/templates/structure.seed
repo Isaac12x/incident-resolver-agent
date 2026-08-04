@@ -1,57 +1,73 @@
-agent-harness/
-├── pyproject.toml
-├── uv.lock
-├── README.md
+incident-harness/
 ├── .env.example
-├── .gitignore
-│   ├── AGENTS.md                 # Optional project instructions
-│   ├── skills/
-│   │   ├── incident-investigation/
-│   │   │   └── SKILL.md
-│   │   ├── coding/
-│   │   │   └── SKILL.md
-│   │   ├── testing/
-│   │   │   └── SKILL.md
-│   │   ├── github/
-│   │   │   └── SKILL.md
-│   │   ├── deployment-verification/
-│   │   │   └── SKILL.md
-│   │   ├── review-comments/
-│   │   │   └── SKILL.md
-│   │   └── ...
+├── .seed/
+│   ├── checksums.json
+│   ├── snapshots/
+│   │   └── snap_1785825541318/
+│   │       └── manifest.json
+│   ├── specs/
+│   │   ├── current.tree
+│   │   ├── runtime.tree
+│   │   └── v1.tree
+│   └── templates/
+│       └── structure.seed
+├── AGENTS.md
+├── CHANGELOG.md
+├── LICENSE.md
+├── README.md
+├── codedb.snapshot
+├── handoff.md
+├── pyproject.toml
+├── skills/
+│   ├── incident-investigation/
+│   │   └── SKILL.md
+│   ├── coding/
+│   │   └── SKILL.md
+│   ├── testing/
+│   │   └── SKILL.md
+│   ├── github/
+│   │   └── SKILL.md
+│   ├── deployment-verification/
+│   │   └── SKILL.md
+│   ├── review-comments/
+│   │   └── SKILL.md
+│   └── ...
 ├── src/
 │   ├── __init__.py
 │   ├── __main__.py
+│   ├── agent.py
 │   ├── app.py
 │   ├── config.py
-│   ├── models.py
-│   ├── storage.py
-│   ├── agent.py
-│   ├── tools.py
-│   ├── workflow.py
 │   ├── connectors.py
 │   ├── github.py
-│   ├── verify.py
+│   ├── models.py
+│   ├── runtime.tree
 │   ├── server.py
-│   └── tui.py
-├──  tests/
-│    ├── test_harness.py
-│    └── fixtures/
-│        ├── incident.json
-│        ├── github_review_comment.json
-│        ├── github_deployment.json
-│        └── github_deployment_status.json
+│   ├── storage.py
+│   ├── tooling.py
+│   ├── tools.py
+│   ├── tui.py
+│   ├── verify.py
+│   └── workflow.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_conversation_recall.py
+│   ├── test_harness.py
+│   ├── test_synthetic_fixtures.py
+│   └── fixtures/
+│       └── ...
+├── uv.lock
 └── .agent/
     ├── config.toml
     ├── sessions.sqlite3
     ├── memory/
     │   ├── global.md
     │   └── repositories/
-    │       └──<app-git>.md
+    │       └── ...
     ├── repositories/
-    │   └── <app-git>.git/
+    │   └── ...
     ├── worktrees/
-    │   └── <worktree-id>/
+    │   └── ...
     ├── tasks/
     │   ├── pending/
     │   ├── active/
@@ -59,10 +75,8 @@ agent-harness/
     │   ├── completed/
     │   ├── blocked/
     │   └── failed/
-    │
     ├── locks/
-    │   ├── worker.lock
-    │   └──<app-git>.lock
-    │
+    │   └── ...
     └── logs/
-        └── agent.jsonl
+        ├── agent.jsonl
+        └── ...

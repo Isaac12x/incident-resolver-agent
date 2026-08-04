@@ -1,4 +1,4 @@
-.agent/
+/.agent/
 .venv/
 dist/
 *.egg-info/
