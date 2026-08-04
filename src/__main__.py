@@ -13,7 +13,7 @@ import uvicorn
 from .app import Application
 from .models import Incident, TaskState
 from .server import create_server
-from .tooling import build_repository_graphs, capture_structured_tree
+from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
 from .tui import run_tui
 
 
@@ -21,6 +21,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="incident-agent")
     parser.add_argument("--config", type=Path, default=Path(".agent/config.toml"))
     commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init", help="create or repair the local .agent runtime tree")
     serve = commands.add_parser("serve", help="start the HTTP server")
     serve.add_argument("--no-worker", action="store_true")
     commands.add_parser("worker", help="run only the durable task worker")
@@ -61,6 +62,19 @@ async def _run_direct(application: Application, path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
+    should_initialise = args.command == "init" or (
+        args.command not in {"index", "tree"} and not Path(".agent").is_dir()
+    )
+    if should_initialise:
+        result = initialise_runtime_tree()
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if not result.succeeded:
+            raise SystemExit(result.returncode or 1)
+        if args.command == "init":
+            if result.stdout:
+                print(result.stdout, end="")
+            return
     if args.command == "tui":
         run_tui(args.config)
         return

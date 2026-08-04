@@ -289,7 +289,7 @@ class Config(BaseModel):
 
 
 def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True) -> Config:
-    if not path.exists():
+    if not path.exists() or path.stat().st_size == 0:
         config = Config(runtime_root=path.parent)
         if create:
             save_config(config, path)

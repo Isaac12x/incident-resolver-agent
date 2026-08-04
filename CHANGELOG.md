@@ -5,6 +5,9 @@
 - Discover nested built-in and repository-local `SKILL.md` files before every agent operation,
   automatically load contextual matches alongside required lifecycle skills, and record the
   preflight resolution in the task event log.
+- Keep `.agent/` strictly untracked, commit a valid `.seed` runtime template, and add an idempotent
+  `incident-agent init`/first-run bootstrap that recreates the complete runtime skeleton through
+  `seed-cli`.
 - Require operation-specific structured model output and accept the Agents SDK's validated Pydantic
   results, preventing successful local incident fixes from exhausting retries as invalid JSON.
 - Show concise agent progress in the terminal by default: bounded reasoning summaries, sanitized

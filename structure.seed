@@ -1,57 +1,82 @@
-.env.example
-.gitignore
-AGENTS.md
-CHANGELOG.md
-LICENSE.md
-README.md
-DESIGN.md
-codedb.snapshot
-handoff.md
-pyproject.toml
-skills/
-skills/coding/
-skills/coding/SKILL.md
-skills/deployment-verification/
-skills/deployment-verification/SKILL.md
-skills/github/
-skills/github/SKILL.md
-skills/graphify/
-skills/graphify/SKILL.md
-skills/graphify/add-watch.md
-skills/graphify/exports.md
-skills/graphify/extraction-specs.md
-skills/graphify/github-and-merge.md
-skills/graphify/hooks.md
-skills/graphify/query.md
-skills/graphify/transcribe.md
-skills/graphify/update.md
-skills/incident-investigation/
-skills/incident-investigation/SKILL.md
-skills/review-comments/
-skills/review-comments/SKILL.md
-skills/testing/
-skills/testing/SKILL.md
-src/
-src/__init__.py
-src/__main__.py
-src/agent.py
-src/app.py
-src/config.py
-src/connectors.py
-src/github.py
-src/models.py
-src/server.py
-src/storage.py
-src/tooling.py
-src/tools.py
-src/tui.py
-src/verify.py
-src/workflow.py
-tests/
-tests/fixtures/
-tests/fixtures/github_deployment.json
-tests/fixtures/github_deployment_status.json
-tests/fixtures/github_review_comment.json
-tests/fixtures/incident.json
-tests/test_harness.py
-uv.lock
+incident-harness/
+├── .env.example
+├── .seed/
+│   ├── checksums.json
+│   ├── snapshots/
+│   │   └── snap_1785825541318/
+│   │       └── manifest.json
+│   ├── specs/
+│   │   ├── current.tree
+│   │   ├── runtime.tree
+│   │   └── v1.tree
+│   └── templates/
+│       └── structure.seed
+├── AGENTS.md
+├── CHANGELOG.md
+├── LICENSE.md
+├── README.md
+├── codedb.snapshot
+├── handoff.md
+├── pyproject.toml
+├── skills/
+│   ├── incident-investigation/
+│   │   └── SKILL.md
+│   ├── coding/
+│   │   └── SKILL.md
+│   ├── testing/
+│   │   └── SKILL.md
+│   ├── github/
+│   │   └── SKILL.md
+│   ├── deployment-verification/
+│   │   └── SKILL.md
+│   ├── review-comments/
+│   │   └── SKILL.md
+│   └── ...
+├── src/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── agent.py
+│   ├── app.py
+│   ├── config.py
+│   ├── connectors.py
+│   ├── github.py
+│   ├── models.py
+│   ├── runtime.tree
+│   ├── server.py
+│   ├── storage.py
+│   ├── tooling.py
+│   ├── tools.py
+│   ├── tui.py
+│   ├── verify.py
+│   └── workflow.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_conversation_recall.py
+│   ├── test_harness.py
+│   ├── test_synthetic_fixtures.py
+│   └── fixtures/
+│       └── ...
+├── uv.lock
+└── .agent/
+    ├── config.toml
+    ├── sessions.sqlite3
+    ├── memory/
+    │   ├── global.md
+    │   └── repositories/
+    │       └── ...
+    ├── repositories/
+    │   └── ...
+    ├── worktrees/
+    │   └── ...
+    ├── tasks/
+    │   ├── pending/
+    │   ├── active/
+    │   ├── waiting/
+    │   ├── completed/
+    │   ├── blocked/
+    │   └── failed/
+    ├── locks/
+    │   └── ...
+    └── logs/
+        ├── agent.jsonl
+        └── ...

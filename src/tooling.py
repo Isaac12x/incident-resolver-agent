@@ -52,6 +52,8 @@ class RepositorySetupResult:
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
+RUNTIME_SEED_SPEC = Path(__file__).with_name("runtime.tree")
+
 
 def _validate_base(base: Path | str) -> Path:
     path = Path(base).expanduser().resolve()
@@ -93,6 +95,35 @@ def capture_structured_tree(
     destination.parent.mkdir(parents=True, exist_ok=True)
     return _run(
         ("seed", "capture", "--base", str(root), "--out", str(destination)),
+        cwd=root,
+        runner=runner,
+    )
+
+
+def initialise_runtime_tree(
+    base: Path | str = ".",
+    *,
+    spec: Path | str | None = None,
+    runner: CommandRunner = subprocess.run,
+) -> ToolResult:
+    """Create or repair the local ``.agent`` skeleton through seed-cli."""
+    root = _validate_base(base)
+    project_spec = root / ".seed" / "specs" / "runtime.tree"
+    seed_spec = Path(spec).expanduser().resolve() if spec else project_spec
+    if not seed_spec.is_file() and spec is None:
+        seed_spec = RUNTIME_SEED_SPEC.resolve()
+    if not seed_spec.is_file():
+        raise FileNotFoundError(seed_spec)
+    return _run(
+        (
+            "seed",
+            "create",
+            "--template",
+            str(seed_spec),
+            "--base",
+            str(root),
+            "runtime_root=.agent",
+        ),
         cwd=root,
         runner=runner,
     )
