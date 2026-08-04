@@ -1,0 +1,16 @@
+{
+  "external_id": "LOKI-CHECKOUT-1842",
+  "source": "loki",
+  "repository": "company/application",
+  "environment": "production",
+  "summary": "Checkout API returns HTTP 500",
+  "description": "Loki recorded correlated 500 responses and a null session lookup.",
+  "evidence": [
+    {
+      "kind": "loki_log",
+      "content": "status=500 request_id=req-synthetic-7f3a trace_id=trace-synthetic-1842",
+      "metadata": {"app": "checkout-api", "query": "{app=\\\"checkout-api\\\"} |= \\\"status=500\\\""}
+    }
+  ],
+  "received_at": "2026-08-04T08:28:01Z"
+}

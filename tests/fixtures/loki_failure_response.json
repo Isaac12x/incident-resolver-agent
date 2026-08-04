@@ -1,0 +1,40 @@
+{
+  "status": "success",
+  "data": {
+    "resultType": "streams",
+    "result": [
+      {
+        "stream": {
+          "app": "checkout-api",
+          "component": "checkout",
+          "env": "production",
+          "level": "error",
+          "namespace": "payments",
+          "pod": "checkout-api-7f9d8c6b4d-synthetic"
+        },
+        "values": [
+          [
+            "1783345679000000000",
+            "{\"timestamp\":\"2026-08-04T08:27:59.000Z\",\"level\":\"error\",\"message\":\"checkout request failed\",\"request_id\":\"req-synthetic-7f3a\",\"trace_id\":\"trace-synthetic-1842\",\"status\":500,\"route\":\"POST /v1/checkout\",\"error\":\"AttributeError: session.customer_id\"}"
+          ],
+          [
+            "1783345679000000001",
+            "{\"timestamp\":\"2026-08-04T08:27:58.981Z\",\"level\":\"info\",\"message\":\"session lookup returned anonymous session\",\"request_id\":\"req-synthetic-7f3a\",\"trace_id\":\"trace-synthetic-1842\"}"
+          ],
+          [
+            "1783345679000000002",
+            "{\"timestamp\":\"2026-08-04T08:27:59.012Z\",\"level\":\"info\",\"message\":\"request completed\",\"request_id\":\"req-synthetic-7f3a\",\"status\":500,\"duration_ms\":31}"
+          ]
+        ]
+      }
+    ],
+    "stats": {
+      "summary": {
+        "bytesProcessedPerSecond": 1240,
+        "linesProcessedPerSecond": 3,
+        "totalBytesProcessed": "1240",
+        "totalLinesProcessed": "3"
+      }
+    }
+  }
+}

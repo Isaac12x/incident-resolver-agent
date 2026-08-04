@@ -1,0 +1,36 @@
+{
+  "event_id": "fedcba9876543210fedcba9876543210",
+  "project": "checkout-api",
+  "environment": "production",
+  "level": "error",
+  "message": "Checkout failed for anonymous session",
+  "logger": "checkout.api",
+  "platform": "python",
+  "timestamp": "2026-08-04T08:27:59.000Z",
+  "release": "checkout-api@2026.08.04.1",
+  "transaction": "POST /v1/checkout",
+  "tags": [
+    ["environment", "production"],
+    ["service", "checkout-api"],
+    ["http.status_code", "500"]
+  ],
+  "contexts": {
+    "runtime": {"name": "CPython", "version": "3.12.4"},
+    "trace": {"trace_id": "trace-synthetic-1842", "span_id": "span-synthetic-002"}
+  },
+  "exception": {
+    "values": [
+      {
+        "type": "AttributeError",
+        "value": "'NoneType' object has no attribute 'customer_id'",
+        "mechanism": {"type": "excepthook", "handled": false}
+      }
+    ]
+  },
+  "request": {
+    "method": "POST",
+    "url": "https://api.example.test/v1/checkout",
+    "headers": {"x-request-id": "req-synthetic-7f3a"},
+    "data": {"cart_id": "cart-synthetic-42", "authenticated": false}
+  }
+}

@@ -1,0 +1,93 @@
+{
+  "action": "created",
+  "installation": {"uuid": "synthetic-installation-001"},
+  "data": {
+    "issue": {
+      "id": "987654321",
+      "shortId": "CHECKOUT-1842",
+      "title": "AttributeError: 'NoneType' object has no attribute 'customer_id'",
+      "culprit": "checkout/session.py in create_checkout",
+      "level": "error",
+      "status": "unresolved",
+      "platform": "python",
+      "project": {
+        "id": "10101",
+        "slug": "checkout-api",
+        "name": "Checkout API"
+      },
+      "environment": "production",
+      "firstSeen": "2026-08-04T08:14:21.000Z",
+      "lastSeen": "2026-08-04T08:27:59.000Z",
+      "count": "37",
+      "userCount": 31,
+      "permalink": "https://sentry.example.test/issues/987654321",
+      "metadata": {
+        "type": "AttributeError",
+        "value": "'NoneType' object has no attribute 'customer_id'"
+      },
+      "tags": [
+        ["environment", "production"],
+        ["release", "checkout-api@2026.08.04.1"],
+        ["transaction", "POST /v1/checkout"]
+      ]
+    },
+    "event": {
+      "event_id": "0123456789abcdef0123456789abcdef",
+      "timestamp": "2026-08-04T08:27:59.000Z",
+      "release": "checkout-api@2026.08.04.1",
+      "transaction": "POST /v1/checkout",
+      "request": {
+        "method": "POST",
+        "url": "https://api.example.test/v1/checkout",
+        "headers": {
+          "x-request-id": "req-synthetic-7f3a"
+        }
+      },
+      "contexts": {
+        "trace": {
+          "trace_id": "trace-synthetic-1842",
+          "span_id": "span-synthetic-001"
+        }
+      },
+      "exception": {
+        "values": [
+          {
+            "type": "AttributeError",
+            "value": "'NoneType' object has no attribute 'customer_id'",
+            "stacktrace": {
+              "frames": [
+                {
+                  "filename": "checkout/session.py",
+                  "function": "create_checkout",
+                  "lineno": 84,
+                  "context_line": "customer_id = session.customer_id"
+                },
+                {
+                  "filename": "checkout/routes.py",
+                  "function": "checkout",
+                  "lineno": 42,
+                  "context_line": "return create_checkout(request)",
+                  "in_app": true
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "breadcrumbs": {
+        "values": [
+          {
+            "timestamp": "2026-08-04T08:27:58.981Z",
+            "category": "http",
+            "message": "POST /v1/session returned 200"
+          },
+          {
+            "timestamp": "2026-08-04T08:27:59.000Z",
+            "category": "http",
+            "message": "POST /v1/checkout returned 500"
+          }
+        ]
+      }
+    }
+  }
+}

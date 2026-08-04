@@ -1,0 +1,31 @@
+{
+  "external_id": "CHECKOUT-1842",
+  "source": "sentry",
+  "repository": "company/application",
+  "environment": "production",
+  "summary": "Checkout requests return HTTP 500 for anonymous sessions",
+  "description": "Synthetic incident correlated between Sentry issue CHECKOUT-1842 and Loki logs using request and trace identifiers.",
+  "evidence": [
+    {
+      "kind": "sentry_issue",
+      "url": "https://sentry.example.test/issues/987654321",
+      "content": "AttributeError in checkout/session.py:84",
+      "metadata": {
+        "issue_id": "987654321",
+        "release": "checkout-api@2026.08.04.1",
+        "event_id": "0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "kind": "loki_log",
+      "content": "checkout request failed status=500 request_id=req-synthetic-7f3a trace_id=trace-synthetic-1842",
+      "metadata": {
+        "query": "{app=\"checkout-api\", env=\"production\"} |= \"status=500\"",
+        "stream": "checkout-api/checkout",
+        "request_id": "req-synthetic-7f3a",
+        "trace_id": "trace-synthetic-1842"
+      }
+    }
+  ],
+  "received_at": "2026-08-04T08:30:00.000Z"
+}

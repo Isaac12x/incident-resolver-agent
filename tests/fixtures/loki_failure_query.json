@@ -1,0 +1,7 @@
+{
+  "query": "{app=\"checkout-api\", env=\"production\"} |= \"status=500\"",
+  "start": "2026-08-04T08:20:00.000Z",
+  "end": "2026-08-04T08:30:00.000Z",
+  "limit": 100,
+  "direction": "backward"
+}

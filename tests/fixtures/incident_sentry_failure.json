@@ -1,0 +1,17 @@
+{
+  "external_id": "SENTRY-CHECKOUT-1842",
+  "source": "sentry",
+  "repository": "company/application",
+  "environment": "production",
+  "summary": "Checkout API raises AttributeError",
+  "description": "Sentry reports an unhandled anonymous-session checkout failure.",
+  "evidence": [
+    {
+      "kind": "sentry_issue",
+      "content": "AttributeError: session.customer_id",
+      "url": "https://sentry.example.test/issues/987654321",
+      "metadata": {"issue_id": "987654321", "release": "checkout-api@2026.08.04.1"}
+    }
+  ],
+  "received_at": "2026-08-04T08:28:00Z"
+}
