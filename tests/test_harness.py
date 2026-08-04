@@ -1703,6 +1703,65 @@ async def test_workflow_requires_agent_reported_tests_to_pass(
 
 
 @pytest.mark.asyncio
+async def test_failed_model_response_is_not_recalled_or_published(
+    config: Config, incident: Incident
+) -> None:
+    config.model.max_task_iterations = 3
+    config.repositories[0].publish_mode = "github"
+    storage = Storage(config.runtime_root)
+    responses = iter(
+        [
+            {"changed": True},
+            {"changed": True, "summary": "fixed", "tests_passed": True},
+        ]
+    )
+
+    async def backend(_instructions, _prompt, _tools, _connector_tools):  # noqa: ANN001, ANN202
+        return next(responses)
+
+    class TrackingGitHub(FakeGitHub):
+        def __init__(self, config):  # noqa: ANN001, ANN202
+            super().__init__(config)
+            self.create_calls = 0
+
+        async def create_pull_request(self, task):  # noqa: ANN001, ANN201
+            self.create_calls += 1
+            return await super().create_pull_request(task)
+
+    agent = IncidentAgent(config, storage, ConnectorManager([]), backend)
+    github = TrackingGitHub(config.github)
+    workflow = WorkflowEngine(
+        config,
+        storage,
+        agent,
+        github,
+        FakeVerifier(config),
+    )
+    task = storage.create_task(incident)
+    (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
+    storage.transition(task.task_id, TaskState.REPRODUCING)
+
+    retry = await workflow.process(task.task_id)
+
+    assert retry.state == TaskState.REPRODUCING
+    messages = storage.messages(task.conversation_id)
+    assert len(messages) == 1 and messages[0][0] == "user"
+    assert github.create_calls == 0
+
+    implementing = await workflow.process(task.task_id)
+    assert implementing.state == TaskState.IMPLEMENTING
+    assert storage.messages(task.conversation_id)[-1] == (
+        "assistant",
+        "{'changed': True, 'summary': 'fixed', 'tests_passed': True}",
+    )
+
+    assert (await workflow.process(task.task_id)).state == TaskState.TESTING_LOCAL
+    assert (await workflow.process(task.task_id)).state == TaskState.PUBLISHING_PR
+    assert (await workflow.process(task.task_id)).state == TaskState.WAITING_FOR_DEPLOYMENT
+    assert github.create_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_failed_deployment_blocks_at_budget(config: Config, incident: Incident) -> None:
     config.model.max_task_iterations = 1
     storage = Storage(config.runtime_root)

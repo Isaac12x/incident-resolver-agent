@@ -394,9 +394,11 @@ class IncidentAgent:
         connector_tools = await self.connectors.tools_for(capabilities)
         prompt = await self._graph_context(task, worktree, tools) + prompt
         self.storage.add_message(task.conversation_id, "user", f"{operation}: {prompt}")
-        result = await self.backend(instructions, prompt, tools, connector_tools)
-        self.storage.add_message(task.conversation_id, "assistant", str(result))
-        return result
+        return await self.backend(instructions, prompt, tools, connector_tools)
+
+    def _cache_response(self, task: TaskRecord, response: dict[str, Any]) -> None:
+        """Persist only a model response that passed the operation schema."""
+        self.storage.add_message(task.conversation_id, "assistant", str(response))
 
     async def investigate(self, task: TaskRecord, worktree: Path) -> InvestigationResult:
         incident = self.storage.load_incident(task.task_id)
@@ -408,7 +410,9 @@ class IncidentAgent:
             ["graphify", "incident-investigation"],
             {"incidents", "errors", "logs", "traces", "metrics"},
         )
-        return InvestigationResult.model_validate(result)
+        validated = InvestigationResult.model_validate(result)
+        self._cache_response(task, result)
+        return validated
 
     async def implement_fix(self, task: TaskRecord, worktree: Path) -> FixResult:
         investigation = self.storage.task_directory(task.task_id) / "investigation.md"
@@ -420,7 +424,9 @@ class IncidentAgent:
             ["graphify", "coding", "testing", "github"],
             {"logs", "runtime"},
         )
-        return FixResult.model_validate(result)
+        validated = FixResult.model_validate(result)
+        self._cache_response(task, result)
+        return validated
 
     async def address_review(
         self, task: TaskRecord, comments: list[ReviewComment], worktree: Path
@@ -433,4 +439,6 @@ class IncidentAgent:
             ["graphify", "review-comments", "coding", "testing"],
             set(),
         )
-        return ReviewResult.model_validate(result)
+        validated = ReviewResult.model_validate(result)
+        self._cache_response(task, result)
+        return validated
