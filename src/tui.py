@@ -170,7 +170,7 @@ class ConfigurationApp(App[None]):
                     id="model-parallel-tools",
                 ),
                 Checkbox(
-                    "Show live model execution details in the terminal",
+                    "Show concise live agent progress in the terminal",
                     value=model.show_execution_details,
                     id="model-show-execution-details",
                 ),

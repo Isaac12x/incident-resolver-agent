@@ -25,6 +25,159 @@ from .tools import WorkspaceTools
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
 
 
+class _ConsoleProgress:
+    """Render compact agent activity without leaking model or tool payloads."""
+
+    _DETAIL_LIMIT = 160
+    _REASONING_LIMIT = 2_000
+
+    def __init__(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self._reasoning_characters = 0
+        self._reasoning_open = False
+        self._reasoning_streamed = False
+        self._active_tools: list[str] = []
+
+    @staticmethod
+    def _field(value: Any, name: str, default: Any = None) -> Any:
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    @classmethod
+    def _compact(cls, value: Any, limit: int | None = None) -> str:
+        text = " ".join(str(value or "").split())
+        maximum = limit or cls._DETAIL_LIMIT
+        return text if len(text) <= maximum else text[: maximum - 1].rstrip() + "…"
+
+    @classmethod
+    def _reasoning_text(cls, value: Any) -> str:
+        """Extract provider reasoning summaries without opaque signatures."""
+        parts = cls._field(value, "summary") or cls._field(value, "content") or []
+        texts: list[str] = []
+        for part in parts if isinstance(parts, list) else [parts]:
+            text = cls._field(part, "text")
+            if text:
+                texts.append(str(text))
+        return "\n".join(texts)
+
+    @classmethod
+    def _tool_call(cls, value: Any) -> tuple[str, str]:
+        name = str(cls._field(value, "name", "tool") or "tool")
+        arguments = cls._field(value, "arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            return name, ""
+
+        preferred_keys = {
+            "shell": ("command",),
+            "read_file": ("path",),
+            "write_file": ("path",),
+            "replace_in_file": ("path",),
+            "rg_conversation_history": ("pattern",),
+            "graphify_query": ("question",),
+            "code_graph_search": ("query",),
+            "code_graph_query": ("target", "pattern"),
+            "code_graph_impact": ("changed_files",),
+        }
+        keys = preferred_keys.get(name, ("path", "command", "query", "target"))
+        detail = next((arguments[key] for key in keys if arguments.get(key) is not None), "")
+        if isinstance(detail, list):
+            detail = ", ".join(str(item) for item in detail)
+        return name, cls._compact(detail)
+
+    def _close_reasoning(self) -> None:
+        if self.enabled and self._reasoning_open:
+            print(flush=True)
+        self._reasoning_open = False
+
+    def _line(self, marker: str, message: str) -> None:
+        if not self.enabled:
+            return
+        self._close_reasoning()
+        print(f"{marker} {message}", flush=True)
+
+    def _reasoning_delta(self, delta: str) -> None:
+        if not self.enabled or self._reasoning_characters >= self._REASONING_LIMIT:
+            return
+        if not self._reasoning_open:
+            print("  thinking  ", end="", flush=True)
+            self._reasoning_open = True
+        remaining = self._REASONING_LIMIT - self._reasoning_characters
+        rendered = delta[:remaining]
+        print(rendered, end="", flush=True)
+        self._reasoning_characters += len(rendered)
+        self._reasoning_streamed = True
+        if len(delta) > remaining:
+            print("…", end="", flush=True)
+
+    def start(self, *, model: str, max_turns: int, tool_count: int) -> None:
+        self._line(
+            "•",
+            f"Incident Resolver · {model} · {tool_count} tools · {max_turns} turns max",
+        )
+
+    def complete(self) -> None:
+        self._line("✓", "Agent run completed")
+
+    def fail(self, error: Exception) -> None:
+        message = self._compact(str(error)) or type(error).__name__
+        self._line("!", f"Agent run failed: {message}")
+
+    def event(self, event: Any) -> None:
+        """Render only operator-useful summaries from SDK stream events."""
+        if not self.enabled:
+            return
+        event_type = str(self._field(event, "type", type(event).__name__))
+        if event_type == "raw_response_event":
+            data = self._field(event, "data", event)
+            data_type = str(self._field(data, "type", type(data).__name__))
+            delta = self._field(data, "delta")
+            if "reasoning_summary" in data_type and isinstance(delta, str):
+                self._reasoning_delta(delta)
+            # Final response deltas are structured workflow data, not terminal prose.
+            return
+
+        if event_type == "run_item_stream_event":
+            name = str(self._field(event, "name", "run item"))
+            item = self._field(event, "item")
+            raw_item = self._field(item, "raw_item", item)
+            if name == "reasoning_item_created":
+                reasoning = self._reasoning_text(raw_item)
+                if reasoning and not self._reasoning_streamed:
+                    self._line("•", f"Thinking: {self._compact(reasoning)}")
+            elif name == "tool_called":
+                tool_name, detail = self._tool_call(raw_item)
+                self._active_tools.append(tool_name)
+                self._line("→", f"{tool_name}: {detail}" if detail else tool_name)
+            elif name == "tool_output":
+                tool_name = self._active_tools.pop(0) if self._active_tools else "Tool"
+                output = self._field(item, "output", "")
+                try:
+                    result = json.loads(output) if isinstance(output, str) else output
+                except json.JSONDecodeError:
+                    result = None
+                returncode = self._field(result, "returncode") if result is not None else None
+                if isinstance(returncode, int) and returncode != 0:
+                    self._line("!", f"{tool_name} failed (exit {returncode})")
+                else:
+                    self._line("✓", f"{tool_name} completed")
+            elif name == "handoff_requested":
+                target = self._field(raw_item, "target") or self._field(raw_item, "name")
+                suffix = f": {self._compact(target)}" if target else ""
+                self._line("→", f"Handoff requested{suffix}")
+            return
+
+        if event_type == "agent_updated_stream_event":
+            agent = self._field(event, "new_agent")
+            name = self._field(agent, "name", "agent")
+            self._line("→", f"Agent: {self._compact(name)}")
+
+
 class OpenAIAgentsBackend:
     """Default runtime backed by the OpenAI Agents SDK.
 
@@ -36,85 +189,6 @@ class OpenAIAgentsBackend:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._compatible_client: Any | None = None
-        self._open_trace_label: str | None = None
-
-    @staticmethod
-    def _trace_value(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value
-        if hasattr(value, "model_dump"):
-            value = value.model_dump(mode="json")
-        try:
-            return json.dumps(value, indent=2, default=str, ensure_ascii=False)
-        except (TypeError, ValueError):
-            return str(value)
-
-    def _trace(self, label: str, value: Any = "", *, stream: bool = False) -> None:
-        """Write provider and SDK execution details to the terminal when enabled."""
-        if not self.config.model.show_execution_details:
-            return
-        if stream:
-            if self._open_trace_label != label:
-                self._close_trace()
-                print(f"\n[{label}] ", end="", flush=True)
-                self._open_trace_label = label
-            print(self._trace_value(value), end="", flush=True)
-            return
-        self._close_trace()
-        print(f"\n[{label}]\n{self._trace_value(value)}", flush=True)
-
-    def _close_trace(self) -> None:
-        if self._open_trace_label is not None:
-            print(flush=True)
-            self._open_trace_label = None
-
-    @staticmethod
-    def _reasoning_text(value: Any) -> str:
-        """Extract provider reasoning summaries without printing opaque signatures."""
-        if isinstance(value, dict):
-            parts = value.get("summary") or value.get("content") or []
-        else:
-            parts = getattr(value, "summary", None) or getattr(value, "content", None) or []
-        texts: list[str] = []
-        for part in parts if isinstance(parts, list) else [parts]:
-            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
-            if text:
-                texts.append(str(text))
-        return "\n".join(texts)
-
-    def _trace_event(self, event: Any) -> None:
-        event_type = getattr(event, "type", type(event).__name__)
-        if event_type == "raw_response_event":
-            data = getattr(event, "data", event)
-            data_type = str(getattr(data, "type", type(data).__name__))
-            delta = getattr(data, "delta", None)
-            if isinstance(delta, str):
-                label = "reasoning" if "reasoning" in data_type else "model output"
-                self._trace(label, delta, stream=True)
-            else:
-                self._trace(f"model event: {data_type}", data)
-            return
-        if event_type == "run_item_stream_event":
-            name = str(getattr(event, "name", "run item"))
-            item = getattr(event, "item", None)
-            raw_item = getattr(item, "raw_item", item)
-            if name == "reasoning_item_created":
-                self._trace("reasoning", self._reasoning_text(raw_item) or "reasoning item created")
-            elif name == "tool_called":
-                tool_name = getattr(raw_item, "name", None)
-                self._trace(f"tool call: {tool_name or 'unknown'}", raw_item)
-            elif name == "tool_output":
-                self._trace("tool output", getattr(item, "output", raw_item))
-            else:
-                self._trace(name, raw_item)
-            return
-        if event_type == "agent_updated_stream_event":
-            agent = getattr(event, "new_agent", None)
-            self._trace("agent updated", {"name": getattr(agent, "name", "unknown")})
-            return
-        self._trace(event_type, event)
 
     def _uses_compatible_client(self) -> bool:
         model = self.config.model
@@ -313,42 +387,47 @@ class OpenAIAgentsBackend:
             mcp_servers=mcp_servers,
             reset_tool_choice=True,
         )
-        self._trace(
-            "agent run started",
-            {
-                "model": self.config.model.name,
-                "max_turns": self.config.model.max_turns_per_iteration,
-                "tool_count": len(sdk_tools) + len(mcp_servers),
-            },
+        progress = _ConsoleProgress(self.config.model.show_execution_details)
+        progress.start(
+            model=self.config.model.name,
+            max_turns=self.config.model.max_turns_per_iteration,
+            tool_count=len(sdk_tools) + len(mcp_servers),
         )
         stream_runner = getattr(Runner, "run_streamed", None)
-        if self.config.model.show_execution_details and callable(stream_runner):
-            result = stream_runner(
-                agent,
-                prompt,
-                max_turns=self.config.model.max_turns_per_iteration,
-            )
-            async for event in result.stream_events():
-                self._trace_event(event)
-            self._close_trace()
-        else:
-            result = await Runner.run(
-                agent,
-                prompt,
-                max_turns=self.config.model.max_turns_per_iteration,
-            )
-        self._trace("agent run completed", {"output_type": type(result.final_output).__name__})
-        output = result.final_output
-        if isinstance(output, dict):
-            return output
-        if not isinstance(output, str):
-            raise RuntimeError("model returned a non-JSON result")
         try:
-            decoded = json.loads(output)
-        except json.JSONDecodeError as error:
-            raise RuntimeError("model returned invalid JSON") from error
-        if not isinstance(decoded, dict):
-            raise RuntimeError("model JSON result must be an object")
+            if self.config.model.show_execution_details and callable(stream_runner):
+                result = stream_runner(
+                    agent,
+                    prompt,
+                    max_turns=self.config.model.max_turns_per_iteration,
+                )
+                try:
+                    async for event in result.stream_events():
+                        progress.event(event)
+                finally:
+                    progress._close_reasoning()  # noqa: SLF001
+            else:
+                result = await Runner.run(
+                    agent,
+                    prompt,
+                    max_turns=self.config.model.max_turns_per_iteration,
+                )
+            output = result.final_output
+            if isinstance(output, dict):
+                decoded = output
+            elif not isinstance(output, str):
+                raise RuntimeError("model returned a non-JSON result")
+            else:
+                try:
+                    decoded = json.loads(output)
+                except json.JSONDecodeError as error:
+                    raise RuntimeError("model returned invalid JSON") from error
+                if not isinstance(decoded, dict):
+                    raise RuntimeError("model JSON result must be an object")
+        except Exception as error:
+            progress.fail(error)
+            raise
+        progress.complete()
         return decoded
 
 

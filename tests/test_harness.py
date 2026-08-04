@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from textual.widgets import Button, Input, Select, Static, TabbedContent, TextArea
 
 from src.__main__ import _run_direct, _worker, main, parse_arguments
-from src.agent import IncidentAgent, OpenAIAgentsBackend
+from src.agent import IncidentAgent, OpenAIAgentsBackend, _ConsoleProgress
 from src.app import Application
 from src.config import (
     AgentConfig,
@@ -1020,7 +1020,7 @@ async def test_agent_preloads_both_fresh_repository_graphs(
 
 
 @pytest.mark.asyncio
-async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatch) -> None:
+async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatch, capsys) -> None:
     assert OpenAIAgentsBackend(Config())._model(None) == "gpt-5"  # noqa: SLF001
     config.model = ModelConfig(
         mode="local",
@@ -1136,6 +1136,12 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
                     ),
                 )
                 yield types.SimpleNamespace(
+                    type="raw_response_event",
+                    data=types.SimpleNamespace(
+                        type="response.output_text.delta", delta='{"changed":true}'
+                    ),
+                )
+                yield types.SimpleNamespace(
                     type="run_item_stream_event",
                     name="tool_called",
                     item=types.SimpleNamespace(
@@ -1145,7 +1151,15 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
                 yield types.SimpleNamespace(
                     type="run_item_stream_event",
                     name="tool_output",
-                    item=types.SimpleNamespace(output="tool finished"),
+                    item=types.SimpleNamespace(
+                        output=json.dumps(
+                            {
+                                "returncode": 0,
+                                "stdout": "complete model tool output stays hidden",
+                                "stderr": "",
+                            }
+                        )
+                    ),
                 )
 
             return types.SimpleNamespace(
@@ -1169,6 +1183,14 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
     config.model.show_execution_details = True
     streamed = await backend("instructions", "resolve", workspace, [])
     assert streamed == {"changed": True}
+    progress = capsys.readouterr().out
+    assert "• Incident Resolver · local-model" in progress
+    assert "thinking  inspect" in progress
+    assert "→ shell: pwd" in progress
+    assert "✓ shell completed" in progress
+    assert "✓ Agent run completed" in progress
+    assert '{"changed":true}' not in progress
+    assert "complete model tool output stays hidden" not in progress
 
     config.model.show_execution_details = False
     SDKRunner.outputs = [{"changed": True}, 3, "not json", "[]"]
@@ -1181,54 +1203,147 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         await backend("instructions", "resolve", workspace, [])
 
 
-def test_execution_trace_formats_sdk_events(config: Config, capsys) -> None:
-    backend = OpenAIAgentsBackend(config)
-    assert backend._trace_value(None) == ""  # noqa: SLF001
-    assert backend._trace_value(
-        types.SimpleNamespace(model_dump=lambda mode: {"mode": mode})
-    ) == '{\n  "mode": "json"\n}'  # noqa: SLF001
-    assert OpenAIAgentsBackend._reasoning_text(  # noqa: SLF001
-        types.SimpleNamespace(summary=[types.SimpleNamespace(text="private reasoning")])
-    ) == "private reasoning"
+def test_console_progress_summarizes_sdk_events_without_raw_payloads(capsys) -> None:
+    progress = _ConsoleProgress(True)
+    assert (
+        _ConsoleProgress._reasoning_text(  # noqa: SLF001
+            types.SimpleNamespace(summary=[types.SimpleNamespace(text="private reasoning")])
+        )
+        == "private reasoning"
+    )
+    assert _ConsoleProgress._compact("x" * 200).endswith("…")  # noqa: SLF001
 
-    backend._trace("model output", "a", stream=True)  # noqa: SLF001
-    backend._trace("model output", "b", stream=True)  # noqa: SLF001
-    backend._trace_event(  # noqa: SLF001
+    progress.start(model="test-model", max_turns=30, tool_count=4)
+    progress.event(
         types.SimpleNamespace(
             type="raw_response_event",
-            data=types.SimpleNamespace(type="response.completed"),
+            data=types.SimpleNamespace(
+                type="response.reasoning_summary_text.delta", delta="Inspecting safely."
+            ),
         )
     )
-    backend._trace_event(  # noqa: SLF001
+    progress.event(
+        types.SimpleNamespace(
+            type="raw_response_event",
+            data=types.SimpleNamespace(
+                type="response.output_text.delta", delta="RAW FINAL MODEL JSON"
+            ),
+        )
+    )
+    progress.event(
         types.SimpleNamespace(
             type="run_item_stream_event",
             name="reasoning_item_created",
-            item=types.SimpleNamespace(raw_item={"summary": [{"text": "thinking"}]}),
+            item=types.SimpleNamespace(raw_item={"summary": [{"text": "duplicate summary"}]}),
         )
     )
-    backend._trace_event(  # noqa: SLF001
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="tool_called",
+            item=types.SimpleNamespace(
+                raw_item={
+                    "name": "write_file",
+                    "arguments": json.dumps(
+                        {"path": "src/example.py", "content": "SECRET FULL FILE CONTENT"}
+                    ),
+                }
+            ),
+        )
+    )
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="tool_output",
+            item=types.SimpleNamespace(output="written"),
+        )
+    )
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="tool_called",
+            item=types.SimpleNamespace(
+                raw_item={"name": "shell", "arguments": '{"command":"pytest -q"}'}
+            ),
+        )
+    )
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="tool_output",
+            item=types.SimpleNamespace(output='{"returncode":2,"stderr":"FULL FAILURE OUTPUT"}'),
+        )
+    )
+    progress.event(
         types.SimpleNamespace(
             type="run_item_stream_event",
             name="handoff_requested",
             item=types.SimpleNamespace(raw_item={"target": "reviewer"}),
         )
     )
-    backend._trace_event(  # noqa: SLF001
+    progress.event(
         types.SimpleNamespace(
             type="agent_updated_stream_event",
             new_agent=types.SimpleNamespace(name="reviewer"),
         )
     )
-    backend._trace_event(types.SimpleNamespace(type="custom_event"))  # noqa: SLF001
+    progress.event(types.SimpleNamespace(type="custom_event"))
+    progress.complete()
     output = capsys.readouterr().out
-    assert "[model output] ab" in output
-    assert "[model event: response.completed]" in output
-    assert "[reasoning]" in output and "thinking" in output
-    assert "[handoff_requested]" in output and "[agent updated]" in output
+    assert "• Incident Resolver · test-model · 4 tools · 30 turns max" in output
+    assert "thinking  Inspecting safely." in output
+    assert "→ write_file: src/example.py" in output
+    assert "✓ write_file completed" in output
+    assert "→ shell: pytest -q" in output
+    assert "! shell failed (exit 2)" in output
+    assert "→ Handoff requested: reviewer" in output
+    assert "→ Agent: reviewer" in output
+    assert "✓ Agent run completed" in output
+    assert "RAW FINAL MODEL JSON" not in output
+    assert "SECRET FULL FILE CONTENT" not in output
+    assert "FULL FAILURE OUTPUT" not in output
+    assert "duplicate summary" not in output
+    assert "custom_event" not in output
 
-    config.model.show_execution_details = False
-    backend._trace("hidden", "not printed")  # noqa: SLF001
+    quiet = _ConsoleProgress(False)
+    quiet.start(model="hidden", max_turns=1, tool_count=0)
+    quiet.event(types.SimpleNamespace(type="custom_event"))
+    quiet.complete()
     assert capsys.readouterr().out == ""
+
+
+def test_console_progress_handles_fallbacks_and_failures(capsys) -> None:
+    progress = _ConsoleProgress(True)
+    assert progress._tool_call({"name": "tool", "arguments": "not-json"}) == (  # noqa: SLF001
+        "tool",
+        "",
+    )
+    assert progress._tool_call(  # noqa: SLF001
+        {"name": "code_graph_impact", "arguments": {"changed_files": ["a.py", "b.py"]}}
+    ) == ("code_graph_impact", "a.py, b.py")
+    assert progress._tool_call(  # noqa: SLF001
+        types.SimpleNamespace(name="custom", arguments=["opaque"])
+    ) == ("custom", "")
+
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="reasoning_item_created",
+            item=types.SimpleNamespace(raw_item={"content": [{"text": "Planning next step"}]}),
+        )
+    )
+    progress.event(
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="tool_output",
+            item=types.SimpleNamespace(output="not-json"),
+        )
+    )
+    progress.fail(RuntimeError("provider disconnected with a very short error"))
+    output = capsys.readouterr().out
+    assert "• Thinking: Planning next step" in output
+    assert "✓ Tool completed" in output
+    assert "! Agent run failed: provider disconnected" in output
 
 
 def test_openai_compatible_model_uses_configured_endpoint_and_env(monkeypatch) -> None:

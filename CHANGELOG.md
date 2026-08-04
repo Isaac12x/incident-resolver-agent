@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Stream model execution details to the terminal by default, including reasoning/model deltas,
-  tool calls, tool outputs, and agent events, with a persisted TUI toggle to disable the stream.
+- Show concise agent progress in the terminal by default: bounded reasoning summaries, sanitized
+  tool names and targets, tool success/failure, and run status. Keep raw model JSON, complete SDK
+  events, tool arguments, and tool output hidden, with a persisted TUI toggle for a quiet console.
 - Add a current-incident conversation recall tool that searches durable SQLite messages through
   ripgrep and loads bounded matches into agent context when prior work or rationale is needed.
 - Expand the default agent system prompt with a graph-first investigation and verification method,
