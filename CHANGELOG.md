@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Expand the default agent system prompt with a graph-first investigation and verification method,
+  explicit structured-output schemas, honest blocker reporting, and stronger evidence standards;
+  provide comprehensive positive goals, negative goals, guardrails, and safeguards by default.
+- Escape newlines, carriage returns, and tabs when writing TOML so multiline system prompts remain
+  valid and round-trip exactly through the configuration file.
 - Fix overlapping Textual form sections so model, runtime, repository, connection, and safety
   controls remain labeled, focusable, scrollable, and editable from the keyboard.
 - Add repository onboarding through GitHub CLI web login/repository selection or a clone URL;

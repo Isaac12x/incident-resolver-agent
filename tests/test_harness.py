@@ -106,11 +106,20 @@ def test_configuration_round_trip_and_validation(config: Config, tmp_path: Path)
         ConnectorConfig(name="bad")
     created = load_config(tmp_path / "new" / "config.toml")
     assert created.runtime_root == tmp_path / "new"
-    assert created.agent.system_prompt
-    assert created.safety.positive_goals
-    assert created.safety.negative_goals
-    assert created.safety.guardrails
-    assert created.safety.safeguards
+    assert "Operating method:" in created.agent.system_prompt
+    assert "Output contract:" in created.agent.system_prompt
+    assert "Never fabricate evidence" in created.agent.system_prompt
+    assert len(created.safety.positive_goals) == 7
+    assert len(created.safety.negative_goals) == 7
+    assert len(created.safety.guardrails) == 7
+    assert len(created.safety.safeguards) == 8
+    assert any("root cause" in goal for goal in created.safety.positive_goals)
+    assert any("Do not fabricate" in goal for goal in created.safety.negative_goals)
+    assert any("exact current pull-request SHA" in rule for rule in created.safety.guardrails)
+    assert any("both repository graphs" in check for check in created.safety.safeguards)
+    another = Config()
+    created.safety.positive_goals.append("task-specific goal")
+    assert "task-specific goal" not in another.safety.positive_goals
     with pytest.raises(ValueError, match="requires.*base_url"):
         ModelConfig(mode="local")
     with pytest.raises(ValueError, match="reasoning"):
@@ -144,7 +153,11 @@ def test_compatible_model_and_safety_configuration_round_trip(tmp_path: Path) ->
             api_key_env="",
         ),
         trigger=TriggerConfig(mode="agent-call", agent_name="resolver"),
-        agent=AgentConfig(system_prompt="Resolve incidents safely."),
+        agent=AgentConfig(
+            system_prompt=(
+                "Resolve incidents safely.\nReturn exact evidence,\tcommands, and results."
+            )
+        ),
         safety=SafetyConfig(
             positive_goals=["restore checkout"],
             negative_goals=["do not expose secrets"],
