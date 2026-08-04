@@ -36,6 +36,85 @@ class OpenAIAgentsBackend:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._compatible_client: Any | None = None
+        self._open_trace_label: str | None = None
+
+    @staticmethod
+    def _trace_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        try:
+            return json.dumps(value, indent=2, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _trace(self, label: str, value: Any = "", *, stream: bool = False) -> None:
+        """Write provider and SDK execution details to the terminal when enabled."""
+        if not self.config.model.show_execution_details:
+            return
+        if stream:
+            if self._open_trace_label != label:
+                self._close_trace()
+                print(f"\n[{label}] ", end="", flush=True)
+                self._open_trace_label = label
+            print(self._trace_value(value), end="", flush=True)
+            return
+        self._close_trace()
+        print(f"\n[{label}]\n{self._trace_value(value)}", flush=True)
+
+    def _close_trace(self) -> None:
+        if self._open_trace_label is not None:
+            print(flush=True)
+            self._open_trace_label = None
+
+    @staticmethod
+    def _reasoning_text(value: Any) -> str:
+        """Extract provider reasoning summaries without printing opaque signatures."""
+        if isinstance(value, dict):
+            parts = value.get("summary") or value.get("content") or []
+        else:
+            parts = getattr(value, "summary", None) or getattr(value, "content", None) or []
+        texts: list[str] = []
+        for part in parts if isinstance(parts, list) else [parts]:
+            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            if text:
+                texts.append(str(text))
+        return "\n".join(texts)
+
+    def _trace_event(self, event: Any) -> None:
+        event_type = getattr(event, "type", type(event).__name__)
+        if event_type == "raw_response_event":
+            data = getattr(event, "data", event)
+            data_type = str(getattr(data, "type", type(data).__name__))
+            delta = getattr(data, "delta", None)
+            if isinstance(delta, str):
+                label = "reasoning" if "reasoning" in data_type else "model output"
+                self._trace(label, delta, stream=True)
+            else:
+                self._trace(f"model event: {data_type}", data)
+            return
+        if event_type == "run_item_stream_event":
+            name = str(getattr(event, "name", "run item"))
+            item = getattr(event, "item", None)
+            raw_item = getattr(item, "raw_item", item)
+            if name == "reasoning_item_created":
+                self._trace("reasoning", self._reasoning_text(raw_item) or "reasoning item created")
+            elif name == "tool_called":
+                tool_name = getattr(raw_item, "name", None)
+                self._trace(f"tool call: {tool_name or 'unknown'}", raw_item)
+            elif name == "tool_output":
+                self._trace("tool output", getattr(item, "output", raw_item))
+            else:
+                self._trace(name, raw_item)
+            return
+        if event_type == "agent_updated_stream_event":
+            agent = getattr(event, "new_agent", None)
+            self._trace("agent updated", {"name": getattr(agent, "name", "unknown")})
+            return
+        self._trace(event_type, event)
 
     def _uses_compatible_client(self) -> bool:
         model = self.config.model
@@ -234,11 +313,31 @@ class OpenAIAgentsBackend:
             mcp_servers=mcp_servers,
             reset_tool_choice=True,
         )
-        result = await Runner.run(
-            agent,
-            prompt,
-            max_turns=self.config.model.max_turns_per_iteration,
+        self._trace(
+            "agent run started",
+            {
+                "model": self.config.model.name,
+                "max_turns": self.config.model.max_turns_per_iteration,
+                "tool_count": len(sdk_tools) + len(mcp_servers),
+            },
         )
+        stream_runner = getattr(Runner, "run_streamed", None)
+        if self.config.model.show_execution_details and callable(stream_runner):
+            result = stream_runner(
+                agent,
+                prompt,
+                max_turns=self.config.model.max_turns_per_iteration,
+            )
+            async for event in result.stream_events():
+                self._trace_event(event)
+            self._close_trace()
+        else:
+            result = await Runner.run(
+                agent,
+                prompt,
+                max_turns=self.config.model.max_turns_per_iteration,
+            )
+        self._trace("agent run completed", {"output_type": type(result.final_output).__name__})
         output = result.final_output
         if isinstance(output, dict):
             return output

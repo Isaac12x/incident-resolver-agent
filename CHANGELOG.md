@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stream model execution details to the terminal by default, including reasoning/model deltas,
+  tool calls, tool outputs, and agent events, with a persisted TUI toggle to disable the stream.
 - Add a current-incident conversation recall tool that searches durable SQLite messages through
   ripgrep and loads bounded matches into agent context when prior work or rationale is needed.
 - Expand the default agent system prompt with a graph-first investigation and verification method,

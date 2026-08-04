@@ -127,6 +127,7 @@ def test_configuration_round_trip_and_validation(config: Config, tmp_path: Path)
     assert TriggerConfig(hook_path="/custom/incidents/").hook_path == "/custom/incidents"
     with pytest.raises(ValueError, match="absolute route"):
         TriggerConfig(hook_path="custom/{connector}")
+    assert Config().model.show_execution_details is True
 
 
 def test_environment_template_contains_only_runtime_variables() -> None:
@@ -1027,6 +1028,7 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         base_url="http://127.0.0.1:11434/v1",
         api_key_env="",
         name="local-model",
+        show_execution_details=False,
     )
     workspace = WorkspaceTools(
         tmp_path,
@@ -1124,6 +1126,33 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
             assert prompt == "resolve" and max_turns == config.model.max_turns_per_iteration
             return types.SimpleNamespace(final_output=SDKRunner.outputs.pop(0))
 
+        @staticmethod
+        def run_streamed(agent, prompt, max_turns):  # noqa: ANN001, ANN202
+            async def events():
+                yield types.SimpleNamespace(
+                    type="raw_response_event",
+                    data=types.SimpleNamespace(
+                        type="response.reasoning_summary_text.delta", delta="inspect"
+                    ),
+                )
+                yield types.SimpleNamespace(
+                    type="run_item_stream_event",
+                    name="tool_called",
+                    item=types.SimpleNamespace(
+                        raw_item={"name": "shell", "arguments": '{"command":"pwd"}'}
+                    ),
+                )
+                yield types.SimpleNamespace(
+                    type="run_item_stream_event",
+                    name="tool_output",
+                    item=types.SimpleNamespace(output="tool finished"),
+                )
+
+            return types.SimpleNamespace(
+                final_output={"changed": True},
+                stream_events=events,
+            )
+
     fake_agents = types.SimpleNamespace(
         Agent=SDKAgent,
         AsyncOpenAI=FakeClient,
@@ -1137,6 +1166,11 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
     result = await backend("instructions", "resolve", workspace, [mcp_server, connector_tool])
     assert result == {"changed": True}
 
+    config.model.show_execution_details = True
+    streamed = await backend("instructions", "resolve", workspace, [])
+    assert streamed == {"changed": True}
+
+    config.model.show_execution_details = False
     SDKRunner.outputs = [{"changed": True}, 3, "not json", "[]"]
     assert await backend("instructions", "resolve", workspace, []) == {"changed": True}
     with pytest.raises(RuntimeError, match="non-JSON"):
@@ -1145,6 +1179,56 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         await backend("instructions", "resolve", workspace, [])
     with pytest.raises(RuntimeError, match="must be an object"):
         await backend("instructions", "resolve", workspace, [])
+
+
+def test_execution_trace_formats_sdk_events(config: Config, capsys) -> None:
+    backend = OpenAIAgentsBackend(config)
+    assert backend._trace_value(None) == ""  # noqa: SLF001
+    assert backend._trace_value(
+        types.SimpleNamespace(model_dump=lambda mode: {"mode": mode})
+    ) == '{\n  "mode": "json"\n}'  # noqa: SLF001
+    assert OpenAIAgentsBackend._reasoning_text(  # noqa: SLF001
+        types.SimpleNamespace(summary=[types.SimpleNamespace(text="private reasoning")])
+    ) == "private reasoning"
+
+    backend._trace("model output", "a", stream=True)  # noqa: SLF001
+    backend._trace("model output", "b", stream=True)  # noqa: SLF001
+    backend._trace_event(  # noqa: SLF001
+        types.SimpleNamespace(
+            type="raw_response_event",
+            data=types.SimpleNamespace(type="response.completed"),
+        )
+    )
+    backend._trace_event(  # noqa: SLF001
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="reasoning_item_created",
+            item=types.SimpleNamespace(raw_item={"summary": [{"text": "thinking"}]}),
+        )
+    )
+    backend._trace_event(  # noqa: SLF001
+        types.SimpleNamespace(
+            type="run_item_stream_event",
+            name="handoff_requested",
+            item=types.SimpleNamespace(raw_item={"target": "reviewer"}),
+        )
+    )
+    backend._trace_event(  # noqa: SLF001
+        types.SimpleNamespace(
+            type="agent_updated_stream_event",
+            new_agent=types.SimpleNamespace(name="reviewer"),
+        )
+    )
+    backend._trace_event(types.SimpleNamespace(type="custom_event"))  # noqa: SLF001
+    output = capsys.readouterr().out
+    assert "[model output] ab" in output
+    assert "[model event: response.completed]" in output
+    assert "[reasoning]" in output and "thinking" in output
+    assert "[handoff_requested]" in output and "[agent updated]" in output
+
+    config.model.show_execution_details = False
+    backend._trace("hidden", "not printed")  # noqa: SLF001
+    assert capsys.readouterr().out == ""
 
 
 def test_openai_compatible_model_uses_configured_endpoint_and_env(monkeypatch) -> None:
@@ -1276,6 +1360,8 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
         app.query_one("#model-top-p").value = "0.9"
         app.query_one("#model-max-tokens").value = "2048"
         app.query_one("#model-parallel-tools").value = True
+        assert app.query_one("#model-show-execution-details").value is True
+        app.query_one("#model-show-execution-details").value = False
         app.query_one("#model-max-turns").value = "12"
         app.query_one("#model-max-iterations").value = "3"
         app.query_one("#model-tool-timeout").value = "90"
@@ -1309,6 +1395,7 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
     assert saved.model.top_p == 0.9
     assert saved.model.max_tokens == 2048
     assert saved.model.parallel_tool_calls is True
+    assert saved.model.show_execution_details is False
     assert saved.model.max_turns_per_iteration == 12
     assert saved.model.max_task_iterations == 3
     assert saved.model.tool_timeout_seconds == 90

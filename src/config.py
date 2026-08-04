@@ -139,6 +139,7 @@ class ModelConfig(BaseModel):
     top_p: float | None = Field(None, gt=0, le=1)
     max_tokens: int | None = Field(None, ge=1)
     parallel_tool_calls: bool = False
+    show_execution_details: bool = True
     max_turns_per_iteration: int = Field(30, ge=1)
     max_task_iterations: int = Field(8, ge=1)
     tool_timeout_seconds: int = Field(600, ge=1)

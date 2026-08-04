@@ -12,6 +12,8 @@ tasks remain inspectable and recoverable while the process is running or after a
 - Per-task Git worktrees backed by one bare mirror per configured repository.
 - A bounded OpenAI Agents SDK coding runtime with repository instructions, skills, memory, MCP tool
   adapters, workspace-constrained file tools, and any local or hosted OpenAI-compatible endpoint.
+- Live model execution details in the terminal by default, including reasoning/model deltas, tool
+  calls, tool outputs, and agent events, with a TUI setting to disable them.
 - GitHub webhook signature verification, delivery deduplication, authorized review routing, and
   agent-comment loop prevention.
 - Strict deployment matching by repository, environment, and current PR head SHA before Playwright
@@ -64,6 +66,10 @@ supports OpenAI and hosted compatible APIs. The TUI never asks for or writes sec
 The Safety tab also contains the complete system prompt. That prompt and the positive goals,
 negative goals, guardrails, and safeguards are assembled into every investigation, implementation,
 and review agent run as a binding instruction contract.
+
+Model execution details are enabled by default and are printed in the terminal while an agent is
+running. Use the Model tab's “Show live model execution details in the terminal” checkbox to turn
+this stream off; the setting is saved in `.agent/config.toml`.
 
 Add at least one repository with its `clone_url` (or `local_path`), accepted incident environments,
 preview environment, and Playwright command. Configure trigger mode, webhook security, MCP
