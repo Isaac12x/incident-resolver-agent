@@ -1,0 +1,13 @@
+{
+  "action": "created",
+  "repository": {"full_name": "company/application"},
+  "pull_request": {"number": 418},
+  "comment": {
+    "id": 9001,
+    "body": "@incident-agent please add a regression test",
+    "user": {"login": "maintainer"},
+    "author_association": "MEMBER",
+    "path": "src/checkout.py",
+    "line": 84
+  }
+}

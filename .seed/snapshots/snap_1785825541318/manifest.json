@@ -1,0 +1,14 @@
+{
+  "id": "snap_1785825541318",
+  "created_at": 1785825541.319317,
+  "operation": "apply",
+  "spec_path": "structure.seed",
+  "base_path": "/Users/iamin/work/code/tools/incident-harness",
+  "files": [],
+  "directories": [],
+  "plan_summary": {
+    "add": 57,
+    "change": 0,
+    "delete": 0
+  }
+}

@@ -1,0 +1,68 @@
+agent-harness/
+├── pyproject.toml
+├── uv.lock
+├── README.md
+├── .env.example
+├── .gitignore
+│   ├── AGENTS.md                 # Optional project instructions
+│   ├── skills/
+│   │   ├── incident-investigation/
+│   │   │   └── SKILL.md
+│   │   ├── coding/
+│   │   │   └── SKILL.md
+│   │   ├── testing/
+│   │   │   └── SKILL.md
+│   │   ├── github/
+│   │   │   └── SKILL.md
+│   │   ├── deployment-verification/
+│   │   │   └── SKILL.md
+│   │   ├── review-comments/
+│   │   │   └── SKILL.md
+│   │   └── ...
+├── src/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── app.py
+│   ├── config.py
+│   ├── models.py
+│   ├── storage.py
+│   ├── agent.py
+│   ├── tools.py
+│   ├── workflow.py
+│   ├── connectors.py
+│   ├── github.py
+│   ├── verify.py
+│   ├── server.py
+│   └── tui.py
+├──  tests/
+│    ├── test_harness.py
+│    └── fixtures/
+│        ├── incident.json
+│        ├── github_review_comment.json
+│        ├── github_deployment.json
+│        └── github_deployment_status.json
+└── .agent/
+    ├── config.toml
+    ├── sessions.sqlite3
+    ├── memory/
+    │   ├── global.md
+    │   └── repositories/
+    │       └──<app-git>.md
+    ├── repositories/
+    │   └── <app-git>.git/
+    ├── worktrees/
+    │   └── <worktree-id>/
+    ├── tasks/
+    │   ├── pending/
+    │   ├── active/
+    │   ├── waiting/
+    │   ├── completed/
+    │   ├── blocked/
+    │   └── failed/
+    │
+    ├── locks/
+    │   ├── worker.lock
+    │   └──<app-git>.lock
+    │
+    └── logs/
+        └── agent.jsonl

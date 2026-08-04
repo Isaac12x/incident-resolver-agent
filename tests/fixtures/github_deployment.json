@@ -1,0 +1,9 @@
+{
+  "repository": {"full_name": "company/application"},
+  "pull_request": {"number": 418},
+  "deployment": {
+    "id": 771,
+    "environment": "preview",
+    "sha": "de81ab9"
+  }
+}

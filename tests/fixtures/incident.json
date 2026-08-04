@@ -1,0 +1,9 @@
+{
+  "external_id": "INC-1842",
+  "source": "sentry",
+  "repository": "company/application",
+  "environment": "production",
+  "summary": "Checkout requests returning HTTP 500",
+  "description": "Failures began after deployment abc123",
+  "evidence": []
+}

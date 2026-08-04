@@ -1,0 +1,43 @@
+{
+  "name": "incident-harness",
+  "version": "0.1.0",
+  "conformance_version": "1.0.0",
+  "description": "Incident investigation, repair, verification, and pull-request workflow skills",
+  "skills": [
+    {
+      "name": "coding",
+      "path": "coding/SKILL.md",
+      "description": "Implement the narrowest incident fix while preserving repository conventions"
+    },
+    {
+      "name": "deployment-verification",
+      "path": "deployment-verification/SKILL.md",
+      "description": "Verify a current pull request against its matching preview deployment"
+    },
+    {
+      "name": "github",
+      "path": "github/SKILL.md",
+      "description": "Create, update, and monitor incident-fix pull requests"
+    },
+    {
+      "name": "graphify",
+      "path": "graphify/SKILL.md",
+      "description": "Build and query repository knowledge graphs"
+    },
+    {
+      "name": "incident-investigation",
+      "path": "incident-investigation/SKILL.md",
+      "description": "Preserve evidence, reproduce an incident, and establish its root cause"
+    },
+    {
+      "name": "review-comments",
+      "path": "review-comments/SKILL.md",
+      "description": "Process authorized pull-request feedback and verify resulting changes"
+    },
+    {
+      "name": "testing",
+      "path": "testing/SKILL.md",
+      "description": "Verify incident fixes in the required order and report evidence"
+    }
+  ]
+}
