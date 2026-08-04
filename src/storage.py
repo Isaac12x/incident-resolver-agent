@@ -8,7 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
@@ -202,6 +202,66 @@ class Storage:
                 (conversation_id,),
             ).fetchall()
         return [(str(role), str(content)) for role, content in rows]
+
+    def search_messages(
+        self,
+        conversation_id: str,
+        pattern: str,
+        limit: int = 20,
+        *,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> list[dict[str, object]]:
+        """Search one incident conversation with ripgrep and return bounded matching messages."""
+        if not pattern or len(pattern) > 500:
+            raise ValueError("conversation search pattern must contain 1-500 characters")
+        if not 1 <= limit <= 50:
+            raise ValueError("conversation search limit must be between 1 and 50")
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            rows = connection.execute(
+                "SELECT role, content, created_at FROM messages "
+                "WHERE conversation_id=? ORDER BY rowid",
+                (conversation_id,),
+            ).fetchall()
+        if not rows:
+            return []
+        corpus = "".join(
+            json.dumps(
+                {"role": role, "content": content, "created_at": created_at},
+                ensure_ascii=False,
+            )
+            + "\n"
+            for role, content, created_at in rows
+        )
+        try:
+            result = runner(
+                ["rg", "--json", "--max-count", str(limit), "--", pattern, "-"],
+                input=corpus,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            raise RuntimeError(f"conversation search could not start ripgrep: {error}") from error
+        if result.returncode == 1:
+            return []
+        if result.returncode != 0:
+            raise ValueError(f"invalid conversation search pattern: {result.stderr.strip()}")
+        matches: list[dict[str, object]] = []
+        for line in result.stdout.splitlines():
+            event = json.loads(line)
+            if event.get("type") != "match":
+                continue
+            message = json.loads(event["data"]["lines"]["text"])
+            content = str(message["content"])
+            matches.append(
+                {
+                    "role": str(message["role"]),
+                    "content": content[:8_000],
+                    "created_at": str(message["created_at"]),
+                    "truncated": len(content) > 8_000,
+                }
+            )
+        return matches[:limit]
 
     @contextmanager
     def lock(self, name: str) -> Iterator[None]:

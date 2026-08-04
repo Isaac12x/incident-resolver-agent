@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import signal
@@ -36,12 +37,14 @@ class WorkspaceTools:
         max_output: int = 100_000,
         logger: Callable[[dict[str, object]], None] | None = None,
         permissions: PermissionsConfig | None = None,
+        conversation_searcher: Callable[[str, int], list[dict[str, object]]] | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
         self.timeout = timeout
         self.max_output = max_output
         self.logger = logger
         self.permissions = permissions or PermissionsConfig()
+        self.conversation_searcher = conversation_searcher
 
     def _path(self, relative_path: str) -> Path:
         if not relative_path or Path(relative_path).is_absolute():
@@ -70,6 +73,15 @@ class WorkspaceTools:
         if occurrences != 1:
             raise ToolError(f"expected exactly one match, found {occurrences}")
         path.write_text(content.replace(old, new, 1), encoding="utf-8")
+
+    def rg_conversation_history(self, pattern: str, limit: int = 20) -> str:
+        """Search the current incident's persisted conversation and return JSON matches."""
+        if self.conversation_searcher is None:
+            raise ToolError("conversation history search is not configured")
+        return json.dumps(
+            {"matches": self.conversation_searcher(pattern, limit)},
+            ensure_ascii=False,
+        )
 
     def _validate_write(self, relative_path: str) -> None:
         if self.permissions.mode == "read-only":

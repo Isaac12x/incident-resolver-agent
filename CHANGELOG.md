@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a current-incident conversation recall tool that searches durable SQLite messages through
+  ripgrep and loads bounded matches into agent context when prior work or rationale is needed.
 - Expand the default agent system prompt with a graph-first investigation and verification method,
   explicit structured-output schemas, honest blocker reporting, and stronger evidence standards;
   provide comprehensive positive goals, negative goals, guardrails, and safeguards by default.

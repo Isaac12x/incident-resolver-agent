@@ -1028,7 +1028,12 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         api_key_env="",
         name="local-model",
     )
-    workspace = WorkspaceTools(tmp_path)
+    workspace = WorkspaceTools(
+        tmp_path,
+        conversation_searcher=lambda pattern, limit: [
+            {"role": "assistant", "content": f"{pattern}:{limit}"}
+        ],
+    )
     workspace.shell = AsyncMock(
         side_effect=lambda command: CommandResult(
             command,
@@ -1094,13 +1099,23 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         @staticmethod
         async def run(agent, prompt, max_turns):  # noqa: ANN001, ANN202
             if not (tmp_path / "example.txt").exists():
-                shell, read, write, replace, graphify, search, query, impact, connector = (
-                    agent.tools
-                )
+                (
+                    shell,
+                    read,
+                    write,
+                    replace,
+                    recall,
+                    graphify,
+                    search,
+                    query,
+                    impact,
+                    connector,
+                ) = agent.tools
                 assert connector is connector_tool
                 assert write("example.txt", "old") == "written"
                 assert read("example.txt") == "old"
                 assert replace("example.txt", "old", "new") == "replaced"
+                assert "checkout:2" in recall("checkout", 2)
                 assert "returncode" in await shell("pwd")
                 assert await graphify("checkout failure") == "graph result"
                 assert json.loads(search("checkout", "Function", 3))["operation"] == "search"

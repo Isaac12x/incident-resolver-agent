@@ -125,6 +125,15 @@ class OpenAIAgentsBackend:
             return "replaced"
 
         @function_tool
+        def rg_conversation_history(pattern: str, limit: int = 20) -> str:
+            """Search prior messages for this incident with a ripgrep regular expression.
+
+            Use this when asked what was done or why and the current context does not contain
+            enough evidence. Matching messages are loaded into the current context as JSON.
+            """
+            return workspace.rg_conversation_history(pattern, limit)
+
+        @function_tool
         async def graphify_query(question: str, budget: int = 2000) -> str:
             """Query the freshly generated semantic/structural repository graph."""
             graph = workspace.workspace / "graphify-out" / "graph.json"
@@ -187,6 +196,7 @@ class OpenAIAgentsBackend:
             read_file,
             write_file,
             replace_in_file,
+            rg_conversation_history,
             graphify_query,
             code_graph_search,
             code_graph_query,
@@ -293,6 +303,16 @@ class IncidentAgent:
             "`code_graph_impact` to check blast radius. Treat graph results as navigation evidence "
             "and confirm conclusions against source and tests."
         )
+        parts.append(
+            "# Durable Conversation Recall\n\n"
+            "Earlier incident messages are persisted but are not automatically included in this "
+            "operation. If asked what was previously investigated, changed, tested, or why a "
+            "decision was made and the current context is insufficient, call "
+            "`rg_conversation_history` with a focused ripgrep regular expression. It searches only "
+            "this incident and loads bounded matches into the current context. Treat those matches "
+            "as evidence, and say that the answer is unknown when the persisted record is "
+            "insufficient."
+        )
         for skill in skills:
             path = self.skills_root / skill / "SKILL.md"
             if path.exists():
@@ -366,6 +386,9 @@ class IncidentAgent:
             logger=lambda data: self.storage.append_event(
                 task.task_id,
                 TaskEvent(type=str(data.pop("type")), data=data),
+            ),
+            conversation_searcher=lambda pattern, limit: self.storage.search_messages(
+                task.conversation_id, pattern, limit
             ),
         )
         connector_tools = await self.connectors.tools_for(capabilities)
