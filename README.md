@@ -209,4 +209,3 @@ I have solved some of these pitfalls using graphify and code-review-graph so the
 
 I have used skills written by others alongside those that I created for this exercise.
 
-Some paths have not been fully tested, the
