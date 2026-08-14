@@ -1,0 +1,37 @@
+[Unit]
+Description=Incident Harness task worker
+Documentation=file:///opt/incident-harness/README.md
+After=network-online.target incident-harness-http.service
+Wants=network-online.target
+PartOf=incident-harness.target
+
+[Service]
+Type=simple
+User=incident-harness
+Group=incident-harness
+WorkingDirectory=/opt/incident-harness
+
+RuntimeDirectory=incident-harness
+ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent init
+ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent export-systemd-env --output /run/incident-harness/environment
+EnvironmentFile=/run/incident-harness/environment
+ExecStart=/opt/incident-harness/.venv/bin/incident-agent worker
+
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=300
+
+StateDirectory=incident-harness
+StateDirectoryMode=0750
+ReadWritePaths=/opt/incident-harness/.agent /var/lib/incident-harness
+BindReadOnlyPaths=/etc/incident-harness
+ReadWritePaths=/var/lib/incident-harness/.ssh
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=incident-harness.target

@@ -14,6 +14,7 @@ from .app import Application
 from .models import Incident, TaskState
 from .server import create_server
 from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
+from .systemd_env import export_systemd_environment, service_base_url
 from .tui import run_tui
 
 
@@ -27,6 +28,25 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     commands.add_parser("worker", help="run only the durable task worker")
     commands.add_parser("tui", help="configure the harness")
     commands.add_parser("mcp", help="serve MCP-compatible HTTP endpoints")
+    export_env = commands.add_parser(
+        "export-systemd-env",
+        help="write a systemd EnvironmentFile from TUI config and secret stores",
+    )
+    export_env.add_argument(
+        "--output",
+        type=Path,
+        default=Path("/run/incident-harness/environment"),
+    )
+    export_env.add_argument(
+        "--secrets",
+        type=Path,
+        action="append",
+        help="secret store to read (default: /etc/incident-harness/environment and .env)",
+    )
+    commands.add_parser(
+        "service-url",
+        help="print the health-check URL from server settings in config",
+    )
     run = commands.add_parser("run", help="submit an incident JSON file")
     run.add_argument("incident", type=Path)
     index = commands.add_parser("index", help="build graphify and code-review-graph indexes")
@@ -63,7 +83,8 @@ async def _run_direct(application: Application, path: Path) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
     should_initialise = args.command == "init" or (
-        args.command not in {"index", "tree"} and not Path(".agent").is_dir()
+        args.command not in {"index", "tree", "export-systemd-env", "service-url"}
+        and not Path(".agent").is_dir()
     )
     if should_initialise:
         result = initialise_runtime_tree()
@@ -97,6 +118,21 @@ def main(argv: list[str] | None = None) -> None:
         if any(not result.succeeded for result in results):
             code = next(result.returncode for result in results if result.returncode) or 1
             raise SystemExit(code)
+        return
+    if args.command == "export-systemd-env":
+        from .systemd_env import default_secrets_paths
+
+        secrets_paths = args.secrets or default_secrets_paths()
+        export_systemd_environment(
+            config_path=args.config,
+            output_path=args.output,
+            secrets_paths=secrets_paths,
+        )
+        return
+    if args.command == "service-url":
+        from .config import load_config
+
+        print(service_base_url(load_config(args.config, create=False)))
         return
     application = Application.build(args.config)
     if args.command in {"serve", "mcp"}:

@@ -784,6 +784,124 @@ def test_cli_parsing() -> None:
     assert parse_arguments(["serve", "--no-worker"]).no_worker
     assert parse_arguments(["worker"]).command == "worker"
     assert parse_arguments(["run", "incident.json"]).incident == Path("incident.json")
+    assert parse_arguments(["export-systemd-env"]).command == "export-systemd-env"
+    assert parse_arguments(["service-url"]).command == "service-url"
+
+
+def test_systemd_env_export_follows_tui_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from src.config import GitHubConfig, PlaywrightConfig, ServerConfig, save_config
+    from src.systemd_env import (
+        build_systemd_environment,
+        export_systemd_environment,
+        referenced_env_vars,
+        service_base_url,
+    )
+
+    config_path = tmp_path / ".agent" / "config.toml"
+    config = Config(
+        model=ModelConfig(api_key_env="CUSTOM_MODEL_KEY", organization_env="CUSTOM_ORG"),
+        server=ServerConfig(
+            host="0.0.0.0",
+            port=9876,
+            public_url="https://incidents.example.com",
+            webhook_secret_env="CUSTOM_AGENT_SECRET",
+        ),
+        github=GitHubConfig(webhook_secret_env="CUSTOM_GITHUB_SECRET"),
+        connectors=[
+            ConnectorConfig(
+                name="github",
+                url="https://api.githubcopilot.com/mcp/",
+                auth_token_env="CUSTOM_GH_TOKEN",
+            ),
+        ],
+        repositories=[
+            RepositoryConfig(
+                name="company/app",
+                playwright=PlaywrightConfig(base_url_env="CUSTOM_PREVIEW_URL"),
+            )
+        ],
+    )
+    save_config(config, config_path)
+
+    assert referenced_env_vars(config) == frozenset(
+        {
+            "CUSTOM_MODEL_KEY",
+            "CUSTOM_ORG",
+            "CUSTOM_AGENT_SECRET",
+            "CUSTOM_GITHUB_SECRET",
+            "CUSTOM_GH_TOKEN",
+            "CUSTOM_PREVIEW_URL",
+        }
+    )
+    assert service_base_url(config) == "https://incidents.example.com"
+
+    secrets_path = tmp_path / "secrets.env"
+    secrets_path.write_text(
+        "\n".join(
+            [
+                "CUSTOM_MODEL_KEY=model-secret",
+                "CUSTOM_ORG=org-secret",
+                "CUSTOM_AGENT_SECRET=agent-secret",
+                "CUSTOM_GITHUB_SECRET=github-secret",
+                "CUSTOM_GH_TOKEN=gh-secret",
+                "CUSTOM_PREVIEW_URL=https://preview.example.com",
+                'GIT_SSH_COMMAND=ssh -i /var/lib/incident-harness/.ssh/id_ed25519',
+                "UNUSED_SECRET=ignored",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    selected = build_systemd_environment(config, {"CUSTOM_MODEL_KEY": "model-secret"})
+    assert "UNUSED_SECRET" not in selected
+    assert selected["CUSTOM_MODEL_KEY"] == "model-secret"
+
+    output_path = tmp_path / "runtime" / "environment"
+    export_systemd_environment(
+        config_path=config_path,
+        output_path=output_path,
+        secrets_paths=[secrets_path],
+    )
+    rendered = output_path.read_text(encoding="utf-8")
+    assert "CUSTOM_MODEL_KEY=model-secret" in rendered
+    assert "CUSTOM_GH_TOKEN=gh-secret" in rendered
+    assert 'GIT_SSH_COMMAND="ssh -i /var/lib/incident-harness/.ssh/id_ed25519"' in rendered
+    assert "UNUSED_SECRET" not in rendered
+
+    main(["--config", str(config_path), "service-url"])
+    assert capsys.readouterr().out == "https://incidents.example.com\n"
+
+    main(
+        [
+            "--config",
+            str(config_path),
+            "export-systemd-env",
+            "--output",
+            str(tmp_path / "generated.env"),
+            "--secrets",
+            str(secrets_path),
+        ]
+    )
+    assert (tmp_path / "generated.env").exists()
+
+    from src.systemd_env import (
+        _format_env_value,
+        default_secrets_paths,
+        format_systemd_environment,
+        merge_secret_stores,
+    )
+
+    assert service_base_url(
+        Config(server=ServerConfig(host="0.0.0.0", port=8765))
+    ) == "http://127.0.0.1:8765"
+    assert service_base_url(Config(server=ServerConfig(host="::", port=8765))) == "http://127.0.0.1:8765"
+    assert merge_secret_stores([tmp_path / "missing.env"]) == {}
+    assert _format_env_value("") == '""'
+    assert format_systemd_environment({}) == ""
+    assert default_secrets_paths(tmp_path) == [
+        Path("/etc/incident-harness/environment"),
+        tmp_path / ".env",
+    ]
 
 
 def test_repository_graph_and_structure_adapters(tmp_path: Path) -> None:

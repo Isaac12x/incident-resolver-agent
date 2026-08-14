@@ -1,0 +1,49 @@
+[Unit]
+Description=Incident Harness (webhooks + task worker)
+Documentation=file:///opt/incident-harness/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=incident-harness
+Group=incident-harness
+
+# Install tree: git clone + uv sync in /opt/incident-harness
+WorkingDirectory=/opt/incident-harness
+
+# Host, port, webhook paths, env var names, and concurrency come from .agent/config.toml
+# (configured via incident-agent tui). Secrets live in /etc/incident-harness/environment
+# and/or .env; export-systemd-env maps TUI env names into the runtime environment.
+RuntimeDirectory=incident-harness
+ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent init
+ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent export-systemd-env --output /run/incident-harness/environment
+EnvironmentFile=/run/incident-harness/environment
+ExecStart=/opt/incident-harness/.venv/bin/incident-agent serve
+
+Restart=always
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=300
+
+# Graceful stop: workflow.run_worker() drains in-flight tasks on SIGTERM.
+SendSIGKILL=yes
+
+# Writable runtime state (.agent/tasks, worktrees, repositories, sessions).
+StateDirectory=incident-harness
+StateDirectoryMode=0750
+ReadWritePaths=/opt/incident-harness/.agent /var/lib/incident-harness
+
+# Git push / clone for configured repositories.
+BindReadOnlyPaths=/etc/incident-harness
+
+# Optional deploy key or git config for the service user.
+ReadWritePaths=/var/lib/incident-harness/.ssh
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

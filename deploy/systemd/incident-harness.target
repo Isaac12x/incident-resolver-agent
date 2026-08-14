@@ -1,0 +1,7 @@
+[Unit]
+Description=Incident Harness (split HTTP intake + worker)
+Documentation=file:///opt/incident-harness/README.md
+Wants=incident-harness-http.service incident-harness-worker.service
+
+[Install]
+WantedBy=multi-user.target
