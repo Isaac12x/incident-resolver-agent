@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend
+from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend, SubscriptionCLIBackend
 from .config import Config, load_config
 from .connectors import ConnectorManager
 from .github import GitHubService
@@ -42,7 +42,11 @@ class Application:
         github = GitHubService(
             config.github, webhook_secret=os.getenv(config.github.webhook_secret_env)
         )
-        backend = agent_backend or OpenAIAgentsBackend(config)
+        backend = agent_backend or (
+            SubscriptionCLIBackend(config)
+            if config.model.runtime == "subscription-cli"
+            else OpenAIAgentsBackend(config)
+        )
         agent = IncidentAgent(config, storage, connectors, backend)
         verifier = DeploymentVerifier(config)
         workflow = WorkflowEngine(

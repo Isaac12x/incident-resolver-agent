@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Replace phase-per-call execution with one resumable lead-agent session per task. Lifecycle tools
+  now persist investigation, testing, memory, and PR transitions, while deployment/review events
+  resume the same session and stable research/implementation sub-agent tree.
+- Add bounded session compaction into task memory and load global, repository, and task memory on
+  every resume.
+- Add a selectable, host-authenticated subscription CLI backend (Codex by default) with thread
+  resume, structured InvestigationResult/FixResult/ReviewResult/SessionResult parsing, native
+  workspace/graph tools, MCP configuration mapping, and an authenticated lifecycle-tool bridge.
 - Rewrite repository history to remove `codedb.snapshot` and `handoff.md`, and consolidate all
   commits older than three hours into one pre-cutoff commit.
 - Discover nested built-in and repository-local `SKILL.md` files before every agent operation,
