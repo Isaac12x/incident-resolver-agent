@@ -788,7 +788,9 @@ def test_cli_parsing() -> None:
     assert parse_arguments(["service-url"]).command == "service-url"
 
 
-def test_systemd_env_export_follows_tui_config(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_systemd_env_export_follows_tui_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     from src.config import GitHubConfig, PlaywrightConfig, ServerConfig, save_config
     from src.systemd_env import (
         build_systemd_environment,

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import secrets
 import shlex
+import tempfile
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pydantic import BaseModel
 
@@ -18,6 +23,7 @@ from .models import (
     InvestigationResult,
     ReviewComment,
     ReviewResult,
+    SessionResult,
     TaskEvent,
     TaskRecord,
 )
@@ -26,6 +32,106 @@ from .storage import Storage
 from .tools import WorkspaceTools
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
+
+
+class AgentLifecycle(Protocol):
+    """Task-state operations exposed to a long-running agent session."""
+
+    async def mark_investigation_complete(
+        self,
+        root_cause: str,
+        evidence: list[str],
+        proposed_fix: str,
+        reproducible: bool = False,
+    ) -> dict[str, Any]: ...
+
+    async def run_tests(self, command: str) -> dict[str, Any]: ...
+
+    async def open_pr(self, summary: str) -> dict[str, Any]: ...
+
+    async def remember(self, note: str, scope: str = "task") -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class AgentRunContext:
+    """Durable identity and callbacks shared by every resume of a task session."""
+
+    task: TaskRecord
+    session_id: str
+    session_db: Path
+    lifecycle: AgentLifecycle
+    save_backend_session: Callable[[str], None]
+    memory_writer: Callable[[str], None]
+    capabilities: frozenset[str] = frozenset()
+
+
+class _CompactingSession:
+    """Bound a SQLite SDK session while retaining an extractive task-memory checkpoint."""
+
+    def __init__(
+        self,
+        session: Any,
+        *,
+        threshold: int,
+        keep: int,
+        memory_writer: Callable[[str], None],
+    ) -> None:
+        self.session_id = session.session_id
+        self.session_settings = getattr(session, "session_settings", None)
+        self._session = session
+        self._threshold = threshold
+        self._keep = keep
+        self._memory_writer = memory_writer
+
+    async def get_items(self, limit: int | None = None) -> list[Any]:
+        return await self._session.get_items(limit)
+
+    async def add_items(self, items: list[Any]) -> None:
+        await self._session.add_items(items)
+        await self._compact_if_needed()
+
+    async def pop_item(self) -> Any | None:
+        return await self._session.pop_item()
+
+    async def clear_session(self) -> None:
+        await self._session.clear_session()
+
+    @staticmethod
+    def _text(item: Any) -> str:
+        if not isinstance(item, dict):
+            return str(item)
+        content = item.get("content", "")
+        if isinstance(content, list):
+            parts = [
+                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                for part in content
+            ]
+            content = " ".join(part for part in parts if part)
+        return " ".join(str(content).split())
+
+    async def _compact_if_needed(self) -> None:
+        items = await self._session.get_items()
+        if len(items) <= self._threshold:
+            return
+        old_items = items[: -self._keep]
+        recent_items = items[-self._keep :]
+        lines = [self._text(item)[:500] for item in old_items if self._text(item)]
+        checkpoint = "\n".join(f"- {line}" for line in lines[-40:])
+        summary = (
+            f"## Compacted session {self.session_id}\n\n"
+            f"{checkpoint or '- Earlier tool and model activity was compacted.'}\n"
+        )
+        self._memory_writer(summary)
+        await self._session.clear_session()
+        await self._session.add_items(
+            [
+                {
+                    "role": "user",
+                    "content": "Durable checkpoint from earlier session context:\n" + summary,
+                },
+                *recent_items,
+            ]
+        )
 
 
 class _ConsoleProgress:
@@ -231,6 +337,7 @@ class OpenAIAgentsBackend:
         workspace: WorkspaceTools,
         connector_tools: list[Any],
         output_type: type[BaseModel] | None = None,
+        run_context: AgentRunContext | None = None,
     ) -> dict[str, Any]:
         from agents import Agent, ModelSettings, Runner, function_tool
         from openai.types.shared import Reasoning
@@ -348,7 +455,46 @@ class OpenAIAgentsBackend:
                 default=str,
             )
 
-        local_tools = [
+        lifecycle_tools: list[Any] = []
+        if run_context is not None:
+
+            @function_tool
+            async def mark_investigation_complete(
+                root_cause: str,
+                evidence: list[str],
+                proposed_fix: str,
+                reproducible: bool = False,
+            ) -> str:
+                """Persist the evidence-backed investigation before implementation starts."""
+                return json.dumps(
+                    await run_context.lifecycle.mark_investigation_complete(
+                        root_cause, evidence, proposed_fix, reproducible
+                    )
+                )
+
+            @function_tool
+            async def run_tests(command: str) -> str:
+                """Run a verification command and durably record its result and state."""
+                return json.dumps(await run_context.lifecycle.run_tests(command))
+
+            @function_tool
+            async def open_pr(summary: str) -> str:
+                """Publish or update the verified fix and yield for deployment or review."""
+                return json.dumps(await run_context.lifecycle.open_pr(summary))
+
+            @function_tool
+            async def remember(note: str, scope: str = "task") -> str:
+                """Store a durable task or repository memory for later resumes."""
+                return json.dumps(await run_context.lifecycle.remember(note, scope))
+
+            lifecycle_tools = [
+                mark_investigation_complete,
+                run_tests,
+                open_pr,
+                remember,
+            ]
+
+        local_tools: list[Any] = [
             shell,
             read_file,
             write_file,
@@ -364,7 +510,11 @@ class OpenAIAgentsBackend:
             for item in connector_tools
             if all(hasattr(item, attribute) for attribute in ("list_tools", "call_tool", "connect"))
         ]
-        sdk_tools = local_tools + [item for item in connector_tools if item not in mcp_servers]
+        sdk_tools = (
+            local_tools
+            + lifecycle_tools
+            + [item for item in connector_tools if item not in mcp_servers]
+        )
         reasoning = (
             Reasoning(effort=self.config.model.reasoning)
             if self.config.model.reasoning is not None
@@ -381,13 +531,89 @@ class OpenAIAgentsBackend:
             parallel_tool_calls=self.config.model.parallel_tool_calls,
             reasoning=reasoning,
         )
+        model = self._model(agents_module) if agents_module else self.config.model.name
+        session: Any | None = None
+        if run_context is not None:
+            from agents import SQLiteSession
+
+            def durable_session(session_id: str) -> Any:
+                sqlite_session = SQLiteSession(session_id, db_path=run_context.session_db)
+                return (
+                    _CompactingSession(
+                        sqlite_session,
+                        threshold=self.config.model.compaction_threshold,
+                        keep=self.config.model.session_history_limit,
+                        memory_writer=lambda value: self._write_compaction_memory(
+                            run_context, value
+                        ),
+                    )
+                    if self.config.model.compaction_enabled
+                    else sqlite_session
+                )
+
+            session = durable_session(run_context.session_id)
+
+        subagent_tools: list[Any] = []
+        if run_context is not None and self.config.agent.max_subagents:
+            read_tools: list[Any] = [
+                shell,
+                read_file,
+                rg_conversation_history,
+                graphify_query,
+                code_graph_search,
+                code_graph_query,
+                code_graph_impact,
+            ]
+            research = Agent(
+                name="Incident Researcher",
+                instructions=(
+                    instructions
+                    + "\n\nInvestigate the delegated sub-task. Do not modify files. Return concise "
+                    "evidence, hypotheses, and source/test locations to the parent agent."
+                ),
+                model=model,
+                model_settings=model_settings,
+                tools=read_tools,
+                mcp_servers=mcp_servers,
+                reset_tool_choice=True,
+            )
+            implementer = Agent(
+                name="Incident Implementer",
+                instructions=(
+                    instructions
+                    + "\n\nImplement the delegated, bounded change and regression test. Report "
+                    "changed files and commands; the parent owns lifecycle transitions."
+                ),
+                model=model,
+                model_settings=model_settings,
+                tools=local_tools,
+                reset_tool_choice=True,
+            )
+            research_session = durable_session(f"{run_context.session_id}:research")
+            implementation_session = durable_session(f"{run_context.session_id}:implementation")
+            subagent_tools = [
+                research.as_tool(
+                    "delegate_research",
+                    "Delegate a bounded code or incident research sub-task.",
+                    max_turns=self.config.model.max_turns_per_iteration,
+                    session=research_session,
+                ),
+                implementer.as_tool(
+                    "delegate_implementation",
+                    "Delegate a bounded implementation or test sub-task.",
+                    max_turns=self.config.model.max_turns_per_iteration,
+                    session=implementation_session,
+                ),
+            ][: self.config.agent.max_subagents]
+
         agent = Agent(
             name="Incident Resolver",
             instructions=instructions
-            + "\n\nReturn only the structured result requested by the operation.",
-            model=self._model(agents_module) if agents_module else self.config.model.name,
+            + "\n\nReturn only the structured checkpoint requested after lifecycle tools have "
+            "persisted the task's real progress.",
+            model=model,
             model_settings=model_settings,
-            tools=sdk_tools,
+            tools=sdk_tools + subagent_tools,
             mcp_servers=mcp_servers,
             output_type=output_type,
             reset_tool_choice=True,
@@ -399,12 +625,17 @@ class OpenAIAgentsBackend:
             tool_count=len(sdk_tools) + len(mcp_servers),
         )
         stream_runner = getattr(Runner, "run_streamed", None)
+        run_kwargs: dict[str, Any] = {
+            "max_turns": self.config.model.max_turns_per_iteration,
+        }
+        if session is not None:
+            run_kwargs["session"] = session
         try:
             if self.config.model.show_execution_details and callable(stream_runner):
                 result = stream_runner(
                     agent,
                     prompt,
-                    max_turns=self.config.model.max_turns_per_iteration,
+                    **run_kwargs,
                 )
                 try:
                     async for event in result.stream_events():
@@ -415,7 +646,7 @@ class OpenAIAgentsBackend:
                 result = await Runner.run(
                     agent,
                     prompt,
-                    max_turns=self.config.model.max_turns_per_iteration,
+                    **run_kwargs,
                 )
             output = result.final_output
             if isinstance(output, BaseModel):
@@ -436,6 +667,298 @@ class OpenAIAgentsBackend:
             raise
         progress.complete()
         return decoded
+
+    @staticmethod
+    def _write_compaction_memory(run_context: AgentRunContext, value: str) -> None:
+        run_context.memory_writer(value)
+
+
+class SubscriptionCLIBackend:
+    """Long-session backend using a host-authenticated subscription CLI (Codex by default)."""
+
+    _TOOL_HELP = """
+# Harness lifecycle tools
+
+Use the following command from the repository root to drive durable task state. Pass exactly one
+JSON object as the final argument and use the returned JSON as authoritative:
+
+- `graphify-out/incident-session-tool mark_investigation_complete JSON`
+  (`root_cause`, `evidence`, `proposed_fix`, `reproducible`)
+- `graphify-out/incident-session-tool run_tests JSON` (`command`)
+- `graphify-out/incident-session-tool open_pr JSON` (`summary`)
+- `graphify-out/incident-session-tool remember JSON` (`note`, optional `scope`)
+- `graphify-out/incident-session-tool shell JSON` (`command`)
+- `graphify-out/incident-session-tool read_file JSON` (`path`)
+- `graphify-out/incident-session-tool write_file JSON` (`path`, `content`)
+- `graphify-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`)
+- `graphify-out/incident-session-tool graphify_query JSON` (`question`, optional `budget`)
+
+The CLI runs in a read-only sandbox. Use these mapped commands for mutations and verification so
+the harness applies its workspace and permission policy. Native read-only inspection remains
+available. Configured MCP servers are supplied to the CLI process. Do not claim a transition unless
+its lifecycle command succeeds.
+"""
+
+    def __init__(self, config: Config) -> None:
+        self.config = config
+
+    @staticmethod
+    def _launcher(path: Path, socket_path: Path, token: str) -> None:
+        path.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, socket, sys\n"
+            f"request={{'token':{token!r},'name':sys.argv[1],"
+            "'arguments':json.loads(sys.argv[2])}\n"
+            "client=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\n"
+            f"client.connect({str(socket_path)!r})\n"
+            "client.sendall((json.dumps(request)+'\\n').encode())\n"
+            "data=b''\n"
+            "while not data.endswith(b'\\n'):\n"
+            "    chunk=client.recv(65536)\n"
+            "    if not chunk: break\n"
+            "    data+=chunk\n"
+            "client.close()\n"
+            "print(data.decode().strip())\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o700)
+
+    @asynccontextmanager
+    async def _tool_bridge(self, context: AgentRunContext, workspace: WorkspaceTools):
+        digest = hashlib.sha256(context.session_id.encode()).hexdigest()[:16]
+        socket_path = Path(tempfile.gettempdir()) / f"ih-{digest}.sock"
+        with suppress(FileNotFoundError):
+            socket_path.unlink()
+        token = secrets.token_hex(24)
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                request = json.loads((await reader.readline()).decode())
+                if not secrets.compare_digest(str(request.get("token", "")), token):
+                    raise PermissionError("invalid session-tool token")
+                name = str(request.get("name", ""))
+                if name not in {
+                    "mark_investigation_complete",
+                    "run_tests",
+                    "open_pr",
+                    "remember",
+                    "shell",
+                    "read_file",
+                    "write_file",
+                    "replace_in_file",
+                    "graphify_query",
+                }:
+                    raise ValueError(f"unknown lifecycle tool: {name}")
+                arguments = request.get("arguments", {})
+                if not isinstance(arguments, dict):
+                    raise ValueError("tool arguments must be an object")
+                if name in {
+                    "mark_investigation_complete",
+                    "run_tests",
+                    "open_pr",
+                    "remember",
+                }:
+                    result = await getattr(context.lifecycle, name)(**arguments)
+                elif name == "shell":
+                    command_result = await workspace.shell(**arguments)
+                    result = {
+                        "returncode": command_result.returncode,
+                        "stdout": command_result.stdout,
+                        "stderr": command_result.stderr,
+                        "truncated": command_result.truncated,
+                    }
+                elif name == "read_file":
+                    result = {"content": workspace.read_file(arguments["path"])}
+                elif name == "write_file":
+                    workspace.write_file(arguments["path"], arguments["content"])
+                    result = {"written": True}
+                elif name == "replace_in_file":
+                    workspace.replace_in_file(
+                        arguments["path"], arguments["old"], arguments["new"]
+                    )
+                    result = {"replaced": True}
+                else:
+                    budget = int(arguments.get("budget", 2000))
+                    graph = workspace.workspace / "graphify-out" / "graph.json"
+                    command_result = await workspace.shell(
+                        shlex.join(
+                            [
+                                "graphify",
+                                "query",
+                                str(arguments["question"]),
+                                "--budget",
+                                str(budget),
+                                "--graph",
+                                str(graph),
+                            ]
+                        )
+                    )
+                    result = {
+                        "returncode": command_result.returncode,
+                        "stdout": command_result.stdout,
+                        "stderr": command_result.stderr,
+                    }
+                response = {"ok": True, "result": result}
+            except Exception as error:
+                response = {"ok": False, "error": str(error)}
+            writer.write((json.dumps(response, default=str) + "\n").encode())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(handle, path=socket_path)
+        launcher = workspace.workspace / "graphify-out" / "incident-session-tool"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        self._launcher(launcher, socket_path, token)
+        try:
+            async with server:
+                yield launcher
+        finally:
+            server.close()
+            await server.wait_closed()
+            with suppress(FileNotFoundError):
+                socket_path.unlink()
+            with suppress(FileNotFoundError):
+                launcher.unlink()
+
+    def _mcp_arguments(self, capabilities: frozenset[str]) -> list[str]:
+        arguments: list[str] = []
+        for connector in self.config.connectors:
+            if connector.type != "mcp" or not capabilities.intersection(connector.capabilities):
+                continue
+            prefix = f"mcp_servers.{connector.name}"
+            if connector.transport == "stdio":
+                arguments.extend(["-c", f"{prefix}.command={json.dumps(connector.command[0])}"])
+                if len(connector.command) > 1:
+                    arguments.extend(
+                        ["-c", f"{prefix}.args={json.dumps(connector.command[1:])}"]
+                    )
+            else:
+                arguments.extend(["-c", f"{prefix}.url={json.dumps(connector.url)}"])
+                if connector.auth_token_env:
+                    arguments.extend(
+                        [
+                            "-c",
+                            f"{prefix}.bearer_token_env_var="
+                            f"{json.dumps(connector.auth_token_env)}",
+                        ]
+                    )
+        return arguments
+
+    @staticmethod
+    def _decode_output(stdout: str, output_path: Path) -> tuple[str | None, dict[str, Any]]:
+        backend_session: str | None = None
+        messages: list[str] = []
+        for line in stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "thread.started":
+                backend_session = str(event.get("thread_id") or event.get("thread", {}).get("id"))
+            item = event.get("item", {})
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                messages.append(str(item.get("text", "")))
+        raw = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        raw = raw.strip() or (messages[-1].strip() if messages else "")
+        if not raw:
+            raise RuntimeError("subscription CLI returned no final structured result")
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("subscription CLI returned invalid JSON") from error
+        if not isinstance(decoded, dict):
+            raise RuntimeError("subscription CLI result must be an object")
+        return backend_session, decoded
+
+    async def __call__(
+        self,
+        instructions: str,
+        prompt: str,
+        workspace: WorkspaceTools,
+        connector_tools: list[Any],
+        output_type: type[BaseModel] | None = None,
+        run_context: AgentRunContext | None = None,
+    ) -> dict[str, Any]:
+        del connector_tools  # Configured MCP endpoints are translated into CLI arguments below.
+        if run_context is None:
+            raise RuntimeError("subscription CLI requires a durable task run context")
+        output_type = output_type or SessionResult
+        files = workspace.workspace / "graphify-out"
+        files.mkdir(parents=True, exist_ok=True)
+        schema_path = files / "session-output.schema.json"
+        output_path = files / "session-output.json"
+        schema_path.write_text(json.dumps(output_type.model_json_schema()), encoding="utf-8")
+        with suppress(FileNotFoundError):
+            output_path.unlink()
+
+        command = [*self.config.model.subscription_command, "exec"]
+        backend_session = run_context.task.backend_session_id
+        if backend_session:
+            command.extend(["resume", backend_session])
+        else:
+            command.extend(["--sandbox", "read-only", "--cd", str(workspace.workspace)])
+        command.extend(self._mcp_arguments(run_context.capabilities))
+        if self.config.model.subscription_profile:
+            command.extend(["--profile", self.config.model.subscription_profile])
+        command.extend(
+            [
+                "--json",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output_path),
+                "-",
+            ]
+        )
+        full_prompt = instructions + "\n\n" + self._TOOL_HELP + "\n\n" + prompt
+        progress = _ConsoleProgress(self.config.model.show_execution_details)
+        progress.start(
+            model="subscription-cli",
+            max_turns=self.config.model.max_turns_per_iteration,
+            tool_count=4,
+        )
+        try:
+            async with self._tool_bridge(run_context, workspace):
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=workspace.workspace,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                        process.communicate(full_prompt.encode()),
+                        timeout=self.config.model.tool_timeout_seconds,
+                    )
+                except TimeoutError as error:
+                    process.kill()
+                    await process.wait()
+                    raise RuntimeError(
+                        "subscription CLI timed out after "
+                        f"{self.config.model.tool_timeout_seconds}s"
+                    ) from error
+            stdout = stdout_bytes.decode(errors="replace")
+            stderr = stderr_bytes.decode(errors="replace")
+            if process.returncode:
+                raise RuntimeError(
+                    f"subscription CLI exited {process.returncode}: "
+                    + (stderr or stdout)[-4000:]
+                )
+            discovered_session, decoded = self._decode_output(stdout, output_path)
+            if discovered_session and discovered_session != "None":
+                run_context.save_backend_session(discovered_session)
+            validated = output_type.model_validate(decoded)
+            progress.complete()
+            return validated.model_dump(mode="json")
+        except Exception as error:
+            progress.fail(error)
+            raise
+        finally:
+            for path in (schema_path, output_path):
+                with suppress(FileNotFoundError):
+                    path.unlink()
 
 
 class IncidentAgent:
@@ -463,11 +986,16 @@ class IncidentAgent:
             else source_skills
         )
 
+    @property
+    def supports_durable_session(self) -> bool:
+        return isinstance(self.backend, (OpenAIAgentsBackend, SubscriptionCLIBackend))
+
     def _instructions(self, task: TaskRecord, worktree: Path, skills: tuple[Skill, ...]) -> str:
         parts = [
             "# System Prompt\n\n" + self.config.agent.system_prompt.strip(),
             self.storage.read_memory(),
             self.storage.read_memory(task.repository),
+            self.storage.read_task_memory(task.task_id),
         ]
         safety = self.config.safety
         safety_sections = {
@@ -498,13 +1026,24 @@ class IncidentAgent:
         )
         parts.append(
             "# Durable Conversation Recall\n\n"
-            "Earlier incident messages are persisted but are not automatically included in this "
-            "operation. If asked what was previously investigated, changed, tested, or why a "
-            "decision was made and the current context is insufficient, call "
+            "This task has one durable agent session, including stable research and implementation "
+            "sub-agent sessions. The runtime automatically restores recent context and compacts "
+            "older context into task memory. If the restored context is insufficient, call "
             "`rg_conversation_history` with a focused ripgrep regular expression. It searches only "
             "this incident and loads bounded matches into the current context. Treat those matches "
             "as evidence, and say that the answer is unknown when the persisted record is "
             "insufficient."
+        )
+        parts.append(
+            "# Agent-Driven Lifecycle\n\n"
+            "You own the incident lifecycle. Delegate bounded research and implementation work to "
+            "the available sub-agents while remaining responsible for their conclusions. Persist "
+            "the root cause with `mark_investigation_complete`; use `run_tests` for every real "
+            "verification command; and call `open_pr` only after the relevant checks pass. These "
+            "tools, not prose or a final response, move durable task state. Use `remember` for "
+            "decisions that must survive compaction. Yield once the task is waiting for an "
+            "external deployment or review event, and resume the same session when the harness "
+            "supplies it."
         )
         if skills:
             loaded = ", ".join(skill.name for skill in skills)
@@ -573,6 +1112,7 @@ class IncidentAgent:
         prompt: str,
         skills: list[str],
         capabilities: set[str],
+        lifecycle: AgentLifecycle | None = None,
     ) -> dict[str, Any]:
         if not self.backend:
             raise RuntimeError("model backend is not configured")
@@ -611,24 +1151,80 @@ class IncidentAgent:
         connector_tools = await self.connectors.tools_for(capabilities)
         prompt = await self._graph_context(task, worktree, tools) + prompt
         self.storage.add_message(task.conversation_id, "user", f"{operation}: {prompt}")
-        if isinstance(self.backend, OpenAIAgentsBackend):
+        if isinstance(self.backend, (OpenAIAgentsBackend, SubscriptionCLIBackend)):
             output_types: dict[str, type[BaseModel]] = {
                 "investigate": InvestigationResult,
                 "implement_fix": FixResult,
                 "address_review": ReviewResult,
+                "resolve": SessionResult,
             }
+            run_context: AgentRunContext | None = None
+            if lifecycle is not None:
+                session_id = task.agent_session_id or task.conversation_id
+
+                def save_backend_session(value: str) -> None:
+                    latest = self.storage.load_task(task.task_id)
+                    latest.backend_session_id = value
+                    self.storage.save_task(latest)
+
+                run_context = AgentRunContext(
+                    task=task,
+                    session_id=session_id,
+                    session_db=self.storage.root / "sessions.sqlite3",
+                    lifecycle=lifecycle,
+                    save_backend_session=save_backend_session,
+                    memory_writer=lambda value: self.storage.append_task_memory(
+                        task.task_id, value
+                    ),
+                    capabilities=frozenset(capabilities),
+                )
+            backend_kwargs: dict[str, Any] = {"output_type": output_types[operation]}
+            if run_context is not None:
+                backend_kwargs["run_context"] = run_context
             return await self.backend(
                 instructions,
                 prompt,
                 tools,
                 connector_tools,
-                output_type=output_types[operation],
+                **backend_kwargs,
             )
         return await self.backend(instructions, prompt, tools, connector_tools)
 
     def _cache_response(self, task: TaskRecord, response: dict[str, Any]) -> None:
         """Persist only a model response that passed the operation schema."""
         self.storage.add_message(task.conversation_id, "assistant", str(response))
+
+    async def run_session(
+        self,
+        task: TaskRecord,
+        worktree: Path,
+        lifecycle: AgentLifecycle,
+        prompt: str | None = None,
+    ) -> SessionResult:
+        incident = self.storage.load_incident(task.task_id)
+        initial_prompt = (
+            "Resolve this incident end to end in the current durable session. Use lifecycle tools "
+            "to persist progress and delegate bounded sub-tasks.\n\n"
+            + incident.model_dump_json(indent=2)
+        )
+        result = await self._run(
+            task,
+            worktree,
+            "resolve",
+            prompt or initial_prompt,
+            [
+                "graphify",
+                "incident-investigation",
+                "coding",
+                "testing",
+                "github",
+            ],
+            {"incidents", "errors", "logs", "traces", "metrics", "runtime"},
+            lifecycle=lifecycle,
+        )
+        validated = SessionResult.model_validate(result)
+        self._cache_response(task, result)
+        return validated
 
     async def investigate(self, task: TaskRecord, worktree: Path) -> InvestigationResult:
         incident = self.storage.load_incident(task.task_id)

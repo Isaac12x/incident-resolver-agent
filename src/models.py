@@ -111,6 +111,8 @@ class TaskRecord(BaseModel):
     external_id: str
     source: str
     conversation_id: str
+    agent_session_id: str | None = None
+    backend_session_id: str | None = None
     repository: str
     environment: str
     summary: str
@@ -155,3 +157,11 @@ class ReviewResult(BaseModel):
     summary: str
     tests_passed: bool = False
     head_sha: str | None = None
+
+
+class SessionResult(BaseModel):
+    """A checkpoint emitted by a durable task session after it yields control."""
+
+    summary: str
+    waiting_for_external_event: bool = False
+    blocked_reason: str | None = None
