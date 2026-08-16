@@ -27,5 +27,7 @@ Verification completed:
   pre-existing typing issues in config defaults, connector SDK types, TUI literal narrowing, and
   legacy workflow result variable reuse. The new agent tool-list invariance findings were corrected.
 
-Remaining lifecycle work: push the branch, open the pull request, verify required checks/preview,
-and monitor authorized review feedback.
+Published as [PR #1](https://github.com/Isaac12x/incident-resolver-agent/pull/1). Six polls over
+five minutes confirmed the PR was mergeable with no configured checks, preview deployment,
+reviews, or comments. Because GitHub supplied no deployment SHA, required environment, or preview
+URL, deployment verification was correctly left unclaimed.
