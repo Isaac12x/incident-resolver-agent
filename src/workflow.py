@@ -176,10 +176,20 @@ class _TaskLifecycle:
             result = await WorkspaceTools(self.worktree).shell("git rev-parse HEAD")
             if result.returncode:
                 raise RuntimeError(result.stderr or "could not determine updated PR head")
+            if not task.branch:
+                raise RuntimeError("cannot update a pull request without its branch")
+            push = await WorkspaceTools(self.worktree).shell(
+                f"git push origin HEAD:{task.branch}"
+            )
+            if push.returncode:
+                raise RuntimeError(push.stderr or "could not push the updated pull-request head")
+            updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
+            reference = await self.workflow.github.update_pull_request(updated)
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
                 pr_head_sha=result.stdout.strip(),
+                pr_url=reference.url if reference else task.pr_url,
             )
         elif repository.publish_mode == "local" or (
             repository.publish_mode == "auto" and self.workflow.github.api is None
@@ -248,6 +258,29 @@ class WorkflowEngine:
         self._queued_task_ids: set[str] = set()
         self._running_task_ids: set[str] = set()
         self._deferred_wakeups: set[str] = set()
+
+    def _has_review_comments(self, task_id: str) -> bool:
+        task = self.storage.load_task(task_id)
+        return bool(task.pending_review_comments or self._review_comments.get(task_id))
+
+    def _take_review_comments(self, task_id: str) -> list[ReviewComment]:
+        task = self.storage.load_task(task_id)
+        comments = list(task.pending_review_comments)
+        comments.extend(self._review_comments.pop(task_id, []))
+        unique = {comment.id: comment for comment in comments}
+        if task.pending_review_comments:
+            task.pending_review_comments = []
+            self.storage.save_task(task)
+        return list(unique.values())
+
+    def _queue_review_comments(self, task_id: str, comments: list[ReviewComment]) -> None:
+        task = self.storage.load_task(task_id)
+        known = {comment.id for comment in task.pending_review_comments}
+        task.pending_review_comments.extend(
+            comment for comment in comments if comment.id not in known
+        )
+        self.storage.save_task(task)
+        self._review_comments[task_id] = list(task.pending_review_comments)
 
     async def submit(self, incident: Incident) -> TaskRecord:
         try:
@@ -368,7 +401,7 @@ class WorkflowEngine:
                     "incident context follows.\n\n" + context.read_text(encoding="utf-8")
                 )
         elif task.state == TaskState.WAITING_FOR_REVIEW:
-            comments = self._review_comments.pop(task.task_id, [])
+            comments = self._take_review_comments(task.task_id)
             prompt = "Address these authorized review comments in the same task session:\n\n" + (
                 "\n".join(f"{comment.author}: {comment.body}" for comment in comments)
             )
@@ -428,10 +461,13 @@ class WorkflowEngine:
                 and callable(getattr(self.agent, "run_session", None))
             )
             if uses_durable_session and (
-                task.state in ACTIVE_STATES
+                (
+                    task.state in ACTIVE_STATES
+                    and task.state != TaskState.TESTING_DEPLOYMENT
+                )
                 or (
                     task.state == TaskState.WAITING_FOR_REVIEW
-                    and self._review_comments.get(task_id)
+                    and self._has_review_comments(task_id)
                 )
             ):
                 return await self._process_agent_session(task, worktree)
@@ -561,8 +597,8 @@ class WorkflowEngine:
                     playwright_status="failed",
                 )
 
-            if task.state == TaskState.WAITING_FOR_REVIEW and self._review_comments.get(task_id):
-                comments = self._review_comments.pop(task_id)
+            if task.state == TaskState.WAITING_FOR_REVIEW and self._has_review_comments(task_id):
+                comments = self._take_review_comments(task_id)
                 result = await self.agent.address_review(task, comments, worktree)
                 if result.changed:
                     if not result.tests_passed:
@@ -575,7 +611,7 @@ class WorkflowEngine:
                                 attempts=attempts,
                                 error=error,
                             )
-                        self._review_comments[task_id] = comments
+                        self._queue_review_comments(task_id, comments)
                         await self.wake(task_id)
                         return self.storage.transition(
                             task_id,
@@ -621,7 +657,7 @@ class WorkflowEngine:
         if event in {"pull_request_review_comment", "issue_comment", "pull_request_review"}:
             comment = self.github.review_comment(payload)
             if comment:
-                self._review_comments.setdefault(task.task_id, []).append(comment)
+                self._queue_review_comments(task.task_id, [comment])
                 await self.wake(task.task_id)
             return task
         if event in {"deployment_status", "deployment"}:
@@ -648,8 +684,9 @@ class WorkflowEngine:
         return task
 
     async def recover(self) -> None:
-        for task in self.storage.list_tasks("pending", "active"):
-            await self.wake(task.task_id)
+        for task in self.storage.list_tasks("pending", "active", "waiting"):
+            if task.state in ACTIVE_STATES or task.pending_review_comments:
+                await self.wake(task.task_id)
 
     async def run_worker(self) -> None:
         await self.recover()

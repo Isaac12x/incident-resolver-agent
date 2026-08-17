@@ -113,6 +113,7 @@ class TaskRecord(BaseModel):
     conversation_id: str
     agent_session_id: str | None = None
     backend_session_id: str | None = None
+    pending_review_comments: list[ReviewComment] = Field(default_factory=list)
     repository: str
     environment: str
     summary: str

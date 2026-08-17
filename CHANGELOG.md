@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Keep deployment verification outside the durable-agent routing path, persist authorized review
+  comments across worker restarts, and explicitly push/update existing pull-request heads.
+- Bridge runtime MCP adapters into the subscription CLI alongside static connector configuration;
+  delegated implementation agents receive the same MCP servers as research agents.
+- Configure systemd services with a service-user `HOME`/`CODEX_HOME` for subscription CLI OAuth,
+  and document Codex authentication and runtime setup for systemd deployments.
 - Run the Codex subscription backend with `codex --yolo` by default, including for legacy
   configurations that only specify `codex`.
 - Replace phase-per-call execution with one resumable lead-agent session per task. Lifecycle tools

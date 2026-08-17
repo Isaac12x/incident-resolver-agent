@@ -25,6 +25,7 @@ from src.models import (
     Incident,
     InvestigationResult,
     PullRequestReference,
+    ReviewComment,
     ReviewResult,
     SessionResult,
     TaskState,
@@ -37,6 +38,10 @@ from src.workflow import WorkflowEngine, _TaskLifecycle
 
 
 class _GitHub(GitHubService):
+    def __init__(self, config):  # noqa: ANN001
+        super().__init__(config)
+        self.updated: list[str] = []
+
     async def create_pull_request(self, task):  # noqa: ANN001, ANN201
         return PullRequestReference(
             repository=task.repository,
@@ -48,6 +53,16 @@ class _GitHub(GitHubService):
 
     async def publish_verification(self, task, result):  # noqa: ANN001, ANN201
         return None
+
+    async def update_pull_request(self, task):  # noqa: ANN001, ANN201
+        self.updated.append(task.pr_head_sha or "")
+        return PullRequestReference(
+            repository=task.repository,
+            number=task.pr_number or 17,
+            url=task.pr_url or "https://github.test/pull/17",
+            head_sha=task.pr_head_sha or "",
+            branch=task.branch or "agent/fix",
+        )
 
 
 class _Verifier(DeploymentVerifier):
@@ -101,6 +116,9 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
         ],
         check=True,
     )
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+    subprocess.run(["git", "-C", str(worktree), "remote", "add", "origin", str(remote)], check=True)
     calls: list[AgentRunContext] = []
 
     class Backend(OpenAIAgentsBackend):
@@ -133,7 +151,8 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
             }
 
     agent = IncidentAgent(config, storage, ConnectorManager([]), Backend(config))
-    workflow = WorkflowEngine(config, storage, agent, _GitHub(config.github), _Verifier(config))
+    github = _GitHub(config.github)
+    workflow = WorkflowEngine(config, storage, agent, github, _Verifier(config))
 
     assert (await workflow.process(task.task_id)).state == TaskState.COLLECTING_CONTEXT
     task = await workflow.process(task.task_id)
@@ -147,19 +166,96 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
     assert "task.publishing_pr" in lifecycle_events
 
     task = storage.transition(task.task_id, TaskState.WAITING_FOR_REVIEW)
-    workflow._review_comments[task.task_id] = [  # noqa: SLF001
-        SimpleNamespace(author="owner", body="add a note")
-    ]
+    workflow._review_comments[task.task_id] = [
+        ReviewComment(id=91, author="owner", body="add a note")
+    ]  # noqa: SLF001
     task = await workflow.process(task.task_id)
     assert task.state == TaskState.WAITING_FOR_DEPLOYMENT
     assert len(calls) == 2
     assert calls[0].session_id == calls[1].session_id
+    assert len(github.updated) == 1
     assert task.pr_head_sha == subprocess.run(
         ["git", "-C", str(worktree), "rev-parse", "HEAD"],
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_durable_route_keeps_deployment_verification_and_review_recovery(
+    tmp_path: Path,
+) -> None:
+    config = Config(runtime_root=tmp_path / ".agent")
+    config.repositories.append(RepositoryConfig(name="company/service", publish_mode="github"))
+    storage = Storage(config.runtime_root)
+    incident = Incident(
+        external_id="INC-DEPLOY",
+        source="test",
+        repository="company/service",
+        environment="production",
+        summary="deployment route",
+    )
+    task = storage.create_task(incident)
+    worktree = storage.root / "worktrees" / task.task_id
+    worktree.mkdir(parents=True)
+    task.pr_number = 17
+    task.pr_head_sha = "sha-1"
+    task.branch = "agent/fix"
+    storage.save_task(task)
+    storage.transition(task.task_id, TaskState.WAITING_FOR_DEPLOYMENT)
+
+    class NoAgentBackend(OpenAIAgentsBackend):
+        async def __call__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            raise AssertionError("deployment verification must not invoke the agent")
+
+    class TrackingVerifier(_Verifier):
+        def __init__(self, config):  # noqa: ANN001
+            super().__init__(config)
+            self.calls = 0
+
+        async def verify(self, task, deployment, worktree):  # noqa: ANN001, ANN201
+            self.calls += 1
+            return await super().verify(task, deployment, worktree)
+
+    verifier = TrackingVerifier(config)
+    github = _GitHub(config.github)
+    agent = IncidentAgent(config, storage, ConnectorManager([]), NoAgentBackend(config))
+    workflow = WorkflowEngine(config, storage, agent, github, verifier)
+    deployment = await workflow.handle_github_event(
+        "deployment_status",
+        {
+            "repository": {"full_name": "company/service"},
+            "pull_request": {"number": 17},
+            "deployment": {"id": 4, "environment": "preview", "sha": "sha-1"},
+            "deployment_status": {
+                "state": "success",
+                "environment_url": "https://preview.example.test",
+            },
+        },
+    )
+    assert deployment and deployment.state == TaskState.TESTING_DEPLOYMENT
+    verified = await workflow.process(task.task_id)
+    assert verified.state == TaskState.WAITING_FOR_REVIEW
+    assert verifier.calls == 1
+
+    review_payload = {
+        "action": "created",
+        "repository": {"full_name": "company/service"},
+        "pull_request": {"number": 17},
+        "comment": {
+            "id": 44,
+            "body": "Please add a regression test",
+            "user": {"login": "owner"},
+            "author_association": "OWNER",
+        },
+    }
+    await workflow.handle_github_event("pull_request_review_comment", review_payload)
+    persisted = storage.load_task(task.task_id)
+    assert [comment.id for comment in persisted.pending_review_comments] == [44]
+    recovered = WorkflowEngine(config, storage, agent, github, verifier)
+    await recovered.recover()
+    assert await recovered._wakeups.get() == task.task_id
 
 
 @pytest.mark.asyncio
@@ -391,6 +487,16 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
         {"changed": False, "summary": "reviewed", "tests_passed": True},
     ]
 
+    class RuntimeConnector:
+        name = "runtime-logs"
+
+        async def list_tools(self):  # noqa: ANN201
+            return [SimpleNamespace(name="search")]
+
+        async def call_tool(self, name, arguments):  # noqa: ANN001, ANN201
+            assert name == "search" and arguments == {"query": "checkout"}
+            return {"matches": 2}
+
     class Process:
         returncode = 0
 
@@ -415,6 +521,20 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             )
             stdout, _ = await child.communicate()
             assert json.loads(stdout)["result"] == {"written": True}
+            child = await real_subprocess(
+                str(worktree / "graphify-out" / "incident-session-tool"),
+                "connector_call",
+                json.dumps(
+                    {
+                        "connector": "runtime-logs",
+                        "tool": "search",
+                        "arguments": {"query": "checkout"},
+                    }
+                ),
+                stdout=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await child.communicate()
+            assert json.loads(stdout)["result"] == {"matches": 2}
             output = Path(self.command[self.command.index("--output-last-message") + 1])
             output.write_text(json.dumps(structured_outputs.pop(0)))
             event = json.dumps({"type": "thread.started", "thread_id": "thread-123"})
@@ -436,6 +556,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             save_backend_session=saved.append,
             memory_writer=lambda value: storage.append_task_memory(task.task_id, value),
             capabilities=frozenset({"logs"}),
+            connector_tools=(RuntimeConnector(),),
         )
 
     backend = SubscriptionCLIBackend(config)
