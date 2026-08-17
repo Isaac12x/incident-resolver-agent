@@ -63,6 +63,7 @@ class AgentRunContext:
     save_backend_session: Callable[[str], None]
     memory_writer: Callable[[str], None]
     capabilities: frozenset[str] = frozenset()
+    connector_tools: tuple[Any, ...] = ()
 
 
 class _CompactingSession:
@@ -587,6 +588,7 @@ class OpenAIAgentsBackend:
                 model=model,
                 model_settings=model_settings,
                 tools=local_tools,
+                mcp_servers=mcp_servers,
                 reset_tool_choice=True,
             )
             research_session = durable_session(f"{run_context.session_id}:research")
@@ -692,6 +694,7 @@ JSON object as the final argument and use the returned JSON as authoritative:
 - `graphify-out/incident-session-tool write_file JSON` (`path`, `content`)
 - `graphify-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`)
 - `graphify-out/incident-session-tool graphify_query JSON` (`question`, optional `budget`)
+- `graphify-out/incident-session-tool connector_call JSON` (`connector`, `tool`, `arguments`)
 
 The CLI runs in a read-only sandbox. Use these mapped commands for mutations and verification so
 the harness applies its workspace and permission policy. Native read-only inspection remains
@@ -701,6 +704,35 @@ its lifecycle command succeeds.
 
     def __init__(self, config: Config) -> None:
         self.config = config
+
+    @staticmethod
+    def _connector_name(server: Any, index: int) -> str:
+        return str(getattr(server, "name", None) or f"connector-{index}")
+
+    async def _connector_help(self, context: AgentRunContext) -> str:
+        lines: list[str] = []
+        for index, server in enumerate(context.connector_tools):
+            if not all(
+                callable(getattr(server, attribute, None))
+                for attribute in ("list_tools", "call_tool")
+            ):
+                continue
+            name = self._connector_name(server, index)
+            try:
+                tools = await server.list_tools()
+            except Exception as error:
+                lines.append(f"- {name}: unavailable ({error})")
+                continue
+            tool_names: list[str] = []
+            for tool in tools:
+                name_value = (
+                    tool.get("name", "tool")
+                    if isinstance(tool, dict)
+                    else getattr(tool, "name", "tool")
+                )
+                tool_names.append(str(name_value))
+            lines.append(f"- {name}: {', '.join(tool_names) or 'no tools reported'}")
+        return "\n".join(lines) or "- No runtime MCP adapters are connected."
 
     @staticmethod
     def _launcher(path: Path, socket_path: Path, token: str) -> None:
@@ -747,6 +779,7 @@ its lifecycle command succeeds.
                     "write_file",
                     "replace_in_file",
                     "graphify_query",
+                    "connector_call",
                 }:
                     raise ValueError(f"unknown lifecycle tool: {name}")
                 arguments = request.get("arguments", {})
@@ -777,6 +810,23 @@ its lifecycle command succeeds.
                         arguments["path"], arguments["old"], arguments["new"]
                     )
                     result = {"replaced": True}
+                elif name == "connector_call":
+                    connector = str(arguments.get("connector", ""))
+                    tool_name = str(arguments.get("tool", ""))
+                    tool_arguments = arguments.get("arguments", {})
+                    if not isinstance(tool_arguments, dict):
+                        raise ValueError("connector arguments must be an object")
+                    server = next(
+                        (
+                            server
+                            for index, server in enumerate(context.connector_tools)
+                            if self._connector_name(server, index) == connector
+                        ),
+                        None,
+                    )
+                    if server is None:
+                        raise ValueError(f"unknown connector: {connector}")
+                    result = await server.call_tool(tool_name, tool_arguments)
                 else:
                     budget = int(arguments.get("budget", 2000))
                     graph = workspace.workspace / "graphify-out" / "graph.json"
@@ -918,7 +968,16 @@ its lifecycle command succeeds.
                 "-",
             ]
         )
-        full_prompt = instructions + "\n\n" + self._TOOL_HELP + "\n\n" + prompt
+        connector_help = await self._connector_help(run_context)
+        full_prompt = (
+            instructions
+            + "\n\n"
+            + self._TOOL_HELP
+            + "\n\nAvailable runtime MCP adapters:\n"
+            + connector_help
+            + "\n\n"
+            + prompt
+        )
         progress = _ConsoleProgress(self.config.model.show_execution_details)
         progress.start(
             model="subscription-cli",
@@ -1184,6 +1243,7 @@ class IncidentAgent:
                         task.task_id, value
                     ),
                     capabilities=frozenset(capabilities),
+                    connector_tools=tuple(connector_tools),
                 )
             backend_kwargs: dict[str, Any] = {"output_type": output_types[operation]}
             if run_context is not None:

@@ -81,6 +81,13 @@ class GitHubService:
         result = await self._call("create_pull_request", task.model_dump(mode="json"))
         return PullRequestReference.model_validate(result)
 
+    async def update_pull_request(self, task: TaskRecord) -> PullRequestReference | None:
+        """Notify the configured adapter that an existing PR received a new pushed head."""
+        if not self.api:
+            return None
+        result = await self._call("update_pull_request", task.model_dump(mode="json"))
+        return PullRequestReference.model_validate(result) if result else None
+
     async def get_review_threads(self, task: TaskRecord) -> list[ReviewComment]:
         result = await self._call("get_review_threads", task.model_dump(mode="json"))
         return [ReviewComment.model_validate(comment) for comment in result]
