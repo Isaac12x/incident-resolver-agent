@@ -11,6 +11,8 @@ User=incident-harness
 Group=incident-harness
 WorkingDirectory=/opt/incident-harness
 
+Environment=HOME=/var/lib/incident-harness
+Environment=CODEX_HOME=/var/lib/incident-harness/.codex
 RuntimeDirectory=incident-harness
 ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent init
 ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent export-systemd-env --output /run/incident-harness/environment

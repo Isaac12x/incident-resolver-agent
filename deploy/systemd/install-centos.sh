@@ -70,11 +70,16 @@ Optional split (restart worker without dropping webhook intake):
 Before production intake:
   1. Configure repositories, server host/port, and env var names via:
        sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent tui
-  2. Put secret values in ${ENV_DIR}/environment using the env var names from the TUI.
-  3. Validate the generated runtime environment:
+  2. For subscription-cli, install the configured CLI (codex by default) on PATH for
+     incident-harness, then authenticate it as that user:
+       sudo -u incident-harness -H codex login
+     Codex state is stored in /var/lib/incident-harness/.codex by the systemd units.
+  3. Put API, webhook, connector, and other secret values in ${ENV_DIR}/environment using the
+     env var names from the TUI. Subscription OAuth is managed separately by the CLI.
+  4. Validate the generated runtime environment:
        sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent export-systemd-env --output /tmp/incident-harness.env
-  4. Set max_concurrent_tasks in .agent/config.toml for parallel incidents.
-  5. Point GitHub/Sentry webhooks at:
+  5. Set max_concurrent_tasks in .agent/config.toml for parallel incidents.
+  6. Point GitHub/Sentry webhooks at:
        \$(sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/hooks/github
        \$(sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/hooks/incidents/<connector>
 
