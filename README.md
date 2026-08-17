@@ -74,6 +74,47 @@ provider label, model name, OpenAI-compatible base URL, and the names of environ
 holding credentials. Local mode supports Ollama, vLLM, LM Studio, and similar servers; remote mode
 supports OpenAI and hosted compatible APIs. The TUI never asks for or writes secret values.
 
+### systemd deployment
+
+The CentOS/RHEL installer deploys the single service and an optional split HTTP/worker target:
+
+```bash
+sudo deploy/systemd/install-centos.sh
+sudo -u incident-harness /opt/incident-harness/.venv/bin/incident-agent tui
+sudo systemctl enable --now incident-harness.service
+```
+
+The installer copies `deploy/systemd/incident-harness.env.example` to
+`/etc/incident-harness/environment`. Put API keys, webhook secrets, connector tokens, and other
+values there using the environment-variable names configured in the TUI. On every start,
+`export-systemd-env` selects only the variables referenced by the current configuration and writes
+the systemd environment file under `/run`.
+
+To run with a host-authenticated subscription such as Codex:
+
+1. Install the configured CLI (`codex` by default) so it is available on the systemd service
+   user's `PATH`.
+2. In the TUI Model tab, select `subscription-cli` and leave the command as `codex` (the harness
+   adds `--yolo` automatically), or enter another compatible CLI command.
+3. Authenticate as the service user before starting the service:
+
+   ```bash
+   sudo -u incident-harness -H codex login
+   ```
+
+   The units set `HOME=/var/lib/incident-harness` and `CODEX_HOME=/var/lib/incident-harness/.codex`,
+   so the service uses that user's OAuth/configuration rather than an administrator's login. Do
+   not put subscription OAuth state in `/etc/incident-harness/environment`; it is managed by the
+   CLI. Another subscription CLI should use its own login command and state directory if it does
+   not honor `CODEX_HOME`.
+
+Restart the service after changing TUI configuration or authentication:
+
+```bash
+sudo systemctl restart incident-harness.service
+sudo systemctl status incident-harness.service
+```
+
 The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
 the task and sub-agent histories in `.agent/sessions.sqlite3`. `subscription-cli` starts `codex --yolo
 exec` by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,

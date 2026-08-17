@@ -1,5 +1,13 @@
 # Handoff
 
+## 2026-08-17 — systemd subscription runtime setup
+
+Propagated the host-authenticated subscription CLI setup into all systemd units. Services now set
+`HOME=/var/lib/incident-harness` and `CODEX_HOME=/var/lib/incident-harness/.codex`, and the installer
+explains installing/authenticating Codex as the service user. README and the environment template
+now distinguish CLI OAuth state from API/webhook/connector secrets and document the complete systemd
+setup.
+
 ## 2026-08-16 — Durable long-horizon agent sessions
 
 Branch: `feat/durable-agent-sessions`
