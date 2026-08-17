@@ -143,6 +143,9 @@ The lead agent receives four stateful harness tools:
 Research and implementation run as bounded sub-agents with stable child session IDs. The lead agent
 owns lifecycle transitions and verifies delegated conclusions. Deployment webhooks and authorized
 review comments resume the same lead session instead of creating phase-specific conversations.
+Review comments are stored in the task state before the worker wakes, so a process restart cannot
+drop an authorized request. `open_pr` pushes an updated review branch and calls the configured
+GitHub adapter before waiting for a fresh deployment.
 
 ### Adding skills
 
