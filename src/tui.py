@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -131,8 +132,21 @@ class ConfigurationApp(App[None]):
         model = self.config.model
         return [
             Static(
-                "Configure any provider exposing an OpenAI-compatible chat-completions API. "
-                "Secrets are referenced by environment-variable name and are never saved here."
+                "Use the Agents SDK with an OpenAI-compatible endpoint, or a host-authenticated "
+                "subscription CLI. Secrets are referenced, never saved here."
+            ),
+            Vertical(
+                Label("Agent runtime"),
+                self._select(
+                    model.runtime,
+                    "model-runtime",
+                    ("agents-sdk", "subscription-cli"),
+                ),
+                Label("Subscription CLI command"),
+                self._input(shlex.join(model.subscription_command), "subscription-command"),
+                Label("Subscription CLI profile (optional)"),
+                self._input(model.subscription_profile, "subscription-profile"),
+                classes="section",
             ),
             Vertical(
                 Label("Execution location"),
@@ -180,6 +194,17 @@ class ConfigurationApp(App[None]):
                 self._input(model.max_task_iterations, "model-max-iterations"),
                 Label("Tool timeout in seconds"),
                 self._input(model.tool_timeout_seconds, "model-tool-timeout"),
+                Label("Recent session items retained after compaction"),
+                self._input(model.session_history_limit, "session-history-limit"),
+                Label("Session item compaction threshold"),
+                self._input(model.compaction_threshold, "compaction-threshold"),
+                Checkbox(
+                    "Compact long sessions into durable task memory",
+                    value=model.compaction_enabled,
+                    id="compaction-enabled",
+                ),
+                Label("Maximum durable sub-agents per task"),
+                self._input(self.config.agent.max_subagents, "max-subagents"),
                 classes="section",
             ),
         ]
@@ -505,6 +530,7 @@ class ConfigurationApp(App[None]):
     def _collect(self) -> Config:
         model = self.config.model.model_copy(
             update={
+                "runtime": self._selected("model-runtime"),
                 "mode": self._selected("model-mode"),
                 "provider": self._value("provider").strip(),
                 "name": self._value("model").strip(),
@@ -520,6 +546,11 @@ class ConfigurationApp(App[None]):
                 "max_turns_per_iteration": self._number("model-max-turns", integer=True),
                 "max_task_iterations": self._number("model-max-iterations", integer=True),
                 "tool_timeout_seconds": self._number("model-tool-timeout", integer=True),
+                "session_history_limit": self._number("session-history-limit", integer=True),
+                "compaction_threshold": self._number("compaction-threshold", integer=True),
+                "compaction_enabled": self._checked("compaction-enabled"),
+                "subscription_command": shlex.split(self._value("subscription-command")),
+                "subscription_profile": self._value("subscription-profile").strip() or None,
             }
         )
         trigger = self.config.trigger.model_copy(
@@ -540,7 +571,10 @@ class ConfigurationApp(App[None]):
             }
         )
         agent = self.config.agent.model_copy(
-            update={"system_prompt": self._text("system-prompt").strip()}
+            update={
+                "system_prompt": self._text("system-prompt").strip(),
+                "max_subagents": self._number("max-subagents", integer=True),
+            }
         )
         server = self.config.server.model_copy(
             update={

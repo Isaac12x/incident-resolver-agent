@@ -1,6 +1,6 @@
 # Incident Harness
 
-A durable, single-agent harness that turns production incidents into locally tested,
+A durable, long-horizon agent harness that turns production incidents into locally tested,
 deployment-verified pull requests. Every intake protocol uses one filesystem-backed workflow, so
 tasks remain inspectable and recoverable while the process is running or after a restart.
 
@@ -10,9 +10,13 @@ tasks remain inspectable and recoverable while the process is running or after a
 - Atomic task queues under `.agent/tasks` with append-only events and SQLite conversation history.
 - Incident deduplication and restart recovery without an external queue.
 - Per-task Git worktrees backed by one bare mirror per configured repository.
-- A bounded OpenAI Agents SDK coding runtime with repository instructions, preflight skill
-  discovery, memory, MCP tool adapters, workspace-constrained file tools, and any local or hosted
-  OpenAI-compatible endpoint.
+- One durable lead-agent session per task, with stable research and implementation sub-agent
+  sessions, automatic context compaction, and global, repository, and task memory.
+- Agent-driven lifecycle tools for investigation checkpoints, local verification, durable memory,
+  and pull-request publication; the filesystem workflow validates transitions and external waits
+  instead of invoking a new model operation for every phase.
+- Selectable OpenAI Agents SDK or host-authenticated subscription CLI runtimes, with repository
+  instructions, preflight skills, workspace tools, repository graphs, and MCP connector mapping.
 - Concise live agent progress in the terminal by default, including bounded reasoning summaries,
   sanitized tool activity, and run status without raw model JSON or complete tool output.
 - GitHub webhook signature verification, delivery deduplication, authorized review routing, and
@@ -70,9 +74,34 @@ provider label, model name, OpenAI-compatible base URL, and the names of environ
 holding credentials. Local mode supports Ollama, vLLM, LM Studio, and similar servers; remote mode
 supports OpenAI and hosted compatible APIs. The TUI never asks for or writes secret values.
 
+The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
+the task and sub-agent histories in `.agent/sessions.sqlite3`. `subscription-cli` starts `codex --yolo
+exec` by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,
+uses `codex --yolo exec resume` after external deployment or review events, translates eligible configured
+MCP servers into CLI configuration, and exposes authenticated per-run lifecycle commands. Change
+`model.subscription_command` when using another Codex-compatible subscription CLI.
+
+Long SDK sessions compact older items after `model.compaction_threshold` while retaining the newest
+`model.session_history_limit` items. The extractive checkpoint is appended to the task's `memory.md`,
+which is included together with global and repository memory on every resume. Set
+`model.compaction_enabled = false` only when the selected provider handles context compaction itself.
+
 The Safety tab also contains the complete system prompt. That prompt and the positive goals,
 negative goals, guardrails, and safeguards are assembled into every investigation, implementation,
 and review agent run as a binding instruction contract.
+
+### Durable agent lifecycle
+
+The lead agent receives four stateful harness tools:
+
+- `mark_investigation_complete` stores root cause, evidence, proposed fix, and reproduction status.
+- `run_tests` executes and records a real command; failures consume the task retry budget.
+- `open_pr` publishes only from a successfully tested state, or updates the known PR head on review.
+- `remember` writes task or repository memory that survives process restarts and compaction.
+
+Research and implementation run as bounded sub-agents with stable child session IDs. The lead agent
+owns lifecycle transitions and verifies delegated conclusions. Deployment webhooks and authorized
+review comments resume the same lead session instead of creating phase-specific conversations.
 
 ### Adding skills
 
@@ -185,17 +214,16 @@ source file as well as at least 90% aggregate coverage.
 
 ## Architecture
 
-The implementation is simply by design and consists of basically: one asyncio event loop, small responsibility-based
-modules following a single responsibility principle (SRP), filesystem task queues, SQLite conversation-history storage, and no additional workflow framework or service layers.
+The implementation uses one asyncio event loop, small responsibility-based modules, filesystem task
+queues, SQLite session history, and no additional workflow framework. The workflow owns transition
+validation, retries, deployment events, and recovery. Each task's durable lead session decides when
+to investigate, delegate, edit, test, remember, and publish by calling the workflow's lifecycle tools.
 
 
 ## Known limitations, pitfalls and non-goals
 
 This was built as a time-boxed prototype (over a 3hr window). And so I left pieces out that would make the agent-harness work better. I list them below in order of importance:
 
-- Memory system (3 layer). This also removes the need for compaction (in conversation) as I'm treating the agent loop as ephimeral and the memory itself as lookup + insert in context.
-- Sub-agents. This would be ideal to span multiple agents to do research, multiple approach proposals to a fix and discussions of the fix. There is no RL loop (context-aware reinforcement learning) to improve long-horizon reasoning whcih improves the output.
-- Sub-tasks. The tasks stay on the main thread which will fill the context quicker. Sub-tasks paired with sub-agents would be my default choice.
 - Stronger tool calling with RL into the main loop, find-research-install tools as needed and retries.
 - Evals.
 - Logs and observability as primitives.
@@ -208,4 +236,3 @@ This was built as a time-boxed prototype (over a 3hr window). And so I left piec
 I have solved some of these pitfalls using graphify and code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
 
 I have used skills written by others alongside those that I created for this exercise.
-

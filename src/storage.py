@@ -66,6 +66,7 @@ class Storage:
             external_id=incident.external_id,
             source=incident.source,
             conversation_id=f"incident:{incident.repository}:{incident.external_id}",
+            agent_session_id=f"task:{incident.repository}:{incident.external_id}",
             repository=incident.repository,
             environment=incident.environment,
             summary=incident.summary,
@@ -184,6 +185,15 @@ class Storage:
         repository_path = f"repositories/{repository.replace('/', '--')}.md" if repository else None
         path = self.root / "memory" / (repository_path or "global.md")
         path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(content.rstrip() + "\n")
+
+    def read_task_memory(self, task_id: str) -> str:
+        path = self.task_directory(task_id) / "memory.md"
+        return path.read_text(encoding="utf-8") if path.exists() else ""
+
+    def append_task_memory(self, task_id: str, content: str) -> None:
+        path = self.task_directory(task_id) / "memory.md"
         with path.open("a", encoding="utf-8") as handle:
             handle.write(content.rstrip() + "\n")
 
