@@ -31,3 +31,20 @@ Published as [PR #1](https://github.com/Isaac12x/incident-resolver-agent/pull/1)
 five minutes confirmed the PR was mergeable with no configured checks, preview deployment,
 reviews, or comments. Because GitHub supplied no deployment SHA, required environment, or preview
 URL, deployment verification was correctly left unclaimed.
+
+## 2026-08-17 — Codex subscription yolo mode
+
+Branch: `fix/codex-yolo-subscription`
+
+Updated the host-authenticated subscription backend to default to `codex --yolo` and to inject
+`--yolo` for legacy configurations that only specify `codex`. No Claude backend is used. Updated
+the README, changelog, and subscription CLI regression test.
+
+Verification completed:
+
+- `uv run pytest -q` — 79 passed, 95.14% aggregate coverage; every source file above 90%.
+- `uv run ruff check .` — passed.
+- `uv build` — passed.
+- `uv run --with 'mypy>=1.11' mypy src --ignore-missing-imports` — not clean; 28 pre-existing
+  typing issues remain in config defaults, connector SDK types, TUI literal narrowing, and
+  workflow result-variable reuse.

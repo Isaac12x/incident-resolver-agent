@@ -75,9 +75,9 @@ holding credentials. Local mode supports Ollama, vLLM, LM Studio, and similar se
 supports OpenAI and hosted compatible APIs. The TUI never asks for or writes secret values.
 
 The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
-the task and sub-agent histories in `.agent/sessions.sqlite3`. `subscription-cli` starts `codex exec`
-by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,
-uses `codex exec resume` after external deployment or review events, translates eligible configured
+the task and sub-agent histories in `.agent/sessions.sqlite3`. `subscription-cli` starts `codex --yolo
+exec` by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,
+uses `codex --yolo exec resume` after external deployment or review events, translates eligible configured
 MCP servers into CLI configuration, and exposes authenticated per-run lifecycle commands. Change
 `model.subscription_command` when using another Codex-compatible subscription CLI.
 

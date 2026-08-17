@@ -148,7 +148,9 @@ class ModelConfig(BaseModel):
     session_history_limit: int = Field(60, ge=10)
     compaction_enabled: bool = True
     compaction_threshold: int = Field(120, ge=20)
-    subscription_command: list[str] = Field(default_factory=lambda: ["codex"])
+    # Codex is the supported host-authenticated subscription runtime. Keep its
+    # non-interactive runs approval-free so the durable workflow can progress.
+    subscription_command: list[str] = Field(default_factory=lambda: ["codex", "--yolo"])
     subscription_profile: str | None = None
 
     @model_validator(mode="after")

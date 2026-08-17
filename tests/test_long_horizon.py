@@ -450,6 +450,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
     assert result["summary"] == "CLI checkpoint"
     assert saved == ["thread-123"]
     assert remembered == [("CLI memory", "task")]
+    assert commands[0][:3] == ["codex", "--yolo", "exec"]
     assert "mcp_servers.logs.command=\"log-mcp\"" in commands[0]
     assert commands[0][commands[0].index("--sandbox") + 1] == "read-only"
     assert (worktree / "cli-change.txt").read_text() == "mapped write\n"
@@ -467,7 +468,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
                 run_context=context(resumed),
             )
         )
-    assert commands[1][2:4] == ["resume", "thread-123"]
+    assert commands[1][3:5] == ["resume", "thread-123"]
     assert parsed[0]["root_cause"] == "bad cache key"
     assert parsed[1]["changed"] and parsed[1]["tests_passed"]
     assert parsed[2]["summary"] == "reviewed"

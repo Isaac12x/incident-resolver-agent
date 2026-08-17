@@ -845,6 +845,13 @@ its lifecycle command succeeds.
                     )
         return arguments
 
+    def _subscription_command(self) -> list[str]:
+        """Return the configured CLI command with Codex's yolo mode enabled."""
+        command = list(self.config.model.subscription_command)
+        if command and Path(command[0]).name == "codex" and "--yolo" not in command:
+            command.insert(1, "--yolo")
+        return command
+
     @staticmethod
     def _decode_output(stdout: str, output_path: Path) -> tuple[str | None, dict[str, Any]]:
         backend_session: str | None = None
@@ -892,7 +899,7 @@ its lifecycle command succeeds.
         with suppress(FileNotFoundError):
             output_path.unlink()
 
-        command = [*self.config.model.subscription_command, "exec"]
+        command = [*self._subscription_command(), "exec"]
         backend_session = run_context.task.backend_session_id
         if backend_session:
             command.extend(["resume", backend_session])
