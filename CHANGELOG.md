@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run the Codex subscription backend with `codex --yolo` by default, including for legacy
+  configurations that only specify `codex`.
 - Replace phase-per-call execution with one resumable lead-agent session per task. Lifecycle tools
   now persist investigation, testing, memory, and PR transitions, while deployment/review events
   resume the same session and stable research/implementation sub-agent tree.
