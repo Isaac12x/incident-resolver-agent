@@ -68,6 +68,21 @@ uv run incident-agent mcp
 uv run incident-agent run tests/fixtures/incident.json
 ```
 
+### Removing a file from PR branches
+
+Use the standalone GitHub CLI helper when a file needs to be removed from one or more already
+published branches. It uses temporary detached worktrees and is a dry run unless `--apply` is
+provided; pushing the branch automatically updates its open pull request(s).
+
+```bash
+python scripts/remove-file-from-branches.py handoff.md master fix/codex-yolo-subscription
+python scripts/remove-file-from-branches.py --apply --repo Isaac12x/incident-resolver-agent \
+  handoff.md master fix/codex-yolo-subscription
+```
+
+The checkout must have an `origin` remote, and `gh auth login` must be complete. Pass
+`--repository /path/to/checkout` when running the helper outside the repository.
+
 The initialization command creates `.agent/config.toml`. The TUI has separate tabs for model, runtime,
 repositories, connections, and safety. In the Model tab choose `local` or `remote`, set the
 provider label, model name, OpenAI-compatible base URL, and the names of environment variables

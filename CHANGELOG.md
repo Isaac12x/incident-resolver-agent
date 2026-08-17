@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add a dry-run GitHub CLI helper to remove any relative file from one or more branch tips using
+  temporary worktrees, commits, pushes, and automatic open-PR updates.
 - Run the Codex subscription backend with `codex --yolo` by default, including for legacy
   configurations that only specify `codex`.
 - Replace phase-per-call execution with one resumable lead-agent session per task. Lifecycle tools

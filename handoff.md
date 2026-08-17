@@ -48,3 +48,16 @@ Verification completed:
 - `uv run --with 'mypy>=1.11' mypy src --ignore-missing-imports` — not clean; 28 pre-existing
   typing issues remain in config defaults, connector SDK types, TUI literal narrowing, and
   workflow result-variable reuse.
+
+## 2026-08-17 — Reusable file cleanup for PR branches
+
+Branch: `master`
+
+Added `scripts/remove-file-from-branches.py`, a dry-run-by-default GitHub CLI utility that accepts
+any relative file and one or more branches. It finds open PRs with `gh`, works in temporary
+detached worktrees, and with `--apply` commits and pushes each changed branch so its PR updates.
+
+Verification completed:
+
+- `python scripts/remove-file-from-branches.py --help` — passed.
+- `python -m py_compile scripts/remove-file-from-branches.py` — passed.
