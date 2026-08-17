@@ -21,6 +21,7 @@ from .models import (
 )
 from .storage import Storage
 from .tooling import ToolResult
+from .tools import WorkspaceTools
 from .verify import DeploymentVerifier
 
 GraphIndexer = Callable[[Path], tuple[ToolResult, ToolResult]]
@@ -41,6 +42,181 @@ TERMINAL_STATES = {
     TaskState.FAILED,
     TaskState.CANCELLED,
 }
+
+
+class _TaskLifecycle:
+    """Validated workflow mutations callable from one durable task agent session."""
+
+    def __init__(self, workflow: WorkflowEngine, task_id: str, worktree: Path) -> None:
+        self.workflow = workflow
+        self.task_id = task_id
+        self.worktree = worktree
+
+    def _task(self) -> TaskRecord:
+        return self.workflow.storage.load_task(self.task_id)
+
+    async def mark_investigation_complete(
+        self,
+        root_cause: str,
+        evidence: list[str],
+        proposed_fix: str,
+        reproducible: bool = False,
+    ) -> dict[str, Any]:
+        if not root_cause.strip() or not proposed_fix.strip():
+            raise ValueError("root cause and proposed fix are required")
+        task = self._task()
+        if task.state not in {
+            TaskState.COLLECTING_CONTEXT,
+            TaskState.INVESTIGATING,
+            TaskState.REPRODUCING,
+        }:
+            raise RuntimeError(f"investigation cannot complete from {task.state.value}")
+        markdown = (
+            "# Investigation\n\n## Root Cause\n\n"
+            + root_cause.strip()
+            + "\n\n## Evidence\n\n"
+            + "\n".join(f"- {item}" for item in evidence)
+            + "\n\n## Proposed Fix\n\n"
+            + proposed_fix.strip()
+            + "\n"
+        )
+        self.workflow.storage.write_artifact(self.task_id, "investigation.md", markdown)
+        self.workflow.storage.append_task_memory(
+            self.task_id,
+            f"## Investigation\n\nRoot cause: {root_cause.strip()}\n\n"
+            f"Proposed fix: {proposed_fix.strip()}\n",
+        )
+        if task.state == TaskState.COLLECTING_CONTEXT:
+            task = self.workflow.storage.transition(self.task_id, TaskState.INVESTIGATING)
+        reproduced = (
+            await self.workflow.reproducer(task, self.worktree)
+            if self.workflow.reproducer
+            else reproducible
+        )
+        self.workflow.storage.append_event(
+            self.task_id,
+            TaskEvent(type="incident.reproduction", data={"reproduced": reproduced}),
+        )
+        task = self.workflow.storage.transition(self.task_id, TaskState.REPRODUCING)
+        return {"state": task.state.value, "reproduced": reproduced}
+
+    async def run_tests(self, command: str) -> dict[str, Any]:
+        task = self._task()
+        if task.state not in {
+            TaskState.REPRODUCING,
+            TaskState.IMPLEMENTING,
+            TaskState.TESTING_LOCAL,
+            TaskState.WAITING_FOR_REVIEW,
+        }:
+            raise RuntimeError(f"tests cannot run from {task.state.value}")
+        if task.state != TaskState.IMPLEMENTING:
+            task = self.workflow.storage.transition(self.task_id, TaskState.IMPLEMENTING)
+        tools = WorkspaceTools(
+            self.worktree,
+            timeout=self.workflow.config.model.tool_timeout_seconds,
+            permissions=self.workflow.config.permissions,
+            logger=lambda data: self.workflow.storage.append_event(
+                self.task_id, TaskEvent(type=str(data.pop("type")), data=data)
+            ),
+        )
+        result = await tools.shell(command)
+        passed = result.returncode == 0
+        if passed and self.workflow.local_tester:
+            passed = await self.workflow.local_tester(task, self.worktree)
+        self.workflow.storage.append_event(
+            self.task_id,
+            TaskEvent(
+                type="verification.local",
+                data={
+                    "command": command,
+                    "returncode": result.returncode,
+                    "passed": passed,
+                    "stdout": result.stdout[-2000:],
+                    "stderr": result.stderr[-2000:],
+                },
+            ),
+        )
+        if passed:
+            task = self.workflow.storage.transition(
+                self.task_id, TaskState.TESTING_LOCAL, error=None
+            )
+        else:
+            attempts = task.attempts + 1
+            state = (
+                TaskState.BLOCKED
+                if attempts >= self.workflow.config.model.max_task_iterations
+                else TaskState.REPRODUCING
+            )
+            task = self.workflow.storage.transition(
+                self.task_id,
+                state,
+                attempts=attempts,
+                error=f"local verification failed: {command}",
+            )
+        return {
+            "state": task.state.value,
+            "passed": passed,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+
+    async def open_pr(self, summary: str) -> dict[str, Any]:
+        task = self._task()
+        if task.state not in {TaskState.TESTING_LOCAL, TaskState.PUBLISHING_PR}:
+            raise RuntimeError("pull requests require successful local verification")
+        self.workflow.storage.write_artifact(
+            self.task_id, "artifacts/local/fix.txt", summary.strip()
+        )
+        self.workflow.storage.append_task_memory(
+            self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
+        )
+        repository = self.workflow.config.repository(task.repository)
+        if task.pr_number:
+            result = await WorkspaceTools(self.worktree).shell("git rev-parse HEAD")
+            if result.returncode:
+                raise RuntimeError(result.stderr or "could not determine updated PR head")
+            task = self.workflow.storage.transition(
+                self.task_id,
+                TaskState.WAITING_FOR_DEPLOYMENT,
+                pr_head_sha=result.stdout.strip(),
+            )
+        elif repository.publish_mode == "local" or (
+            repository.publish_mode == "auto" and self.workflow.github.api is None
+        ):
+            task = self.workflow._local_publish(task, self.worktree)
+        else:
+            if task.state != TaskState.PUBLISHING_PR:
+                task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
+            pull_request = await self.workflow.github.create_pull_request(task)
+            task = self.workflow.storage.transition(
+                self.task_id,
+                TaskState.WAITING_FOR_DEPLOYMENT,
+                branch=pull_request.branch,
+                pr_number=pull_request.number,
+                pr_url=pull_request.url,
+                pr_head_sha=pull_request.head_sha,
+            )
+        return {
+            "state": task.state.value,
+            "url": task.pr_url,
+            "head_sha": task.pr_head_sha,
+        }
+
+    async def remember(self, note: str, scope: str = "task") -> dict[str, Any]:
+        if not note.strip():
+            raise ValueError("memory note cannot be blank")
+        task = self._task()
+        if scope == "task":
+            self.workflow.storage.append_task_memory(self.task_id, note)
+        elif scope == "repository":
+            self.workflow.storage.append_memory(note, task.repository)
+        else:
+            raise ValueError("memory scope must be task or repository")
+        self.workflow.storage.append_event(
+            self.task_id, TaskEvent(type="agent.memory_written", data={"scope": scope})
+        )
+        return {"stored": True, "scope": scope}
 
 
 class WorkflowEngine:
@@ -181,6 +357,58 @@ class WorkflowEngine:
             pr_head_sha=sha,
         )
 
+    async def _process_agent_session(self, task: TaskRecord, worktree: Path) -> TaskRecord:
+        lifecycle = _TaskLifecycle(self, task.task_id, worktree)
+        prompt: str | None = None
+        if task.state == TaskState.COLLECTING_CONTEXT:
+            context = self.storage.task_directory(task.task_id) / "context.md"
+            if context.exists():
+                prompt = (
+                    "Resolve this incident end to end in the durable task session. The collected "
+                    "incident context follows.\n\n" + context.read_text(encoding="utf-8")
+                )
+        elif task.state == TaskState.WAITING_FOR_REVIEW:
+            comments = self._review_comments.pop(task.task_id, [])
+            prompt = "Address these authorized review comments in the same task session:\n\n" + (
+                "\n".join(f"{comment.author}: {comment.body}" for comment in comments)
+            )
+        else:
+            prompt = (
+                f"Resume the same durable incident session from state `{task.state.value}`. "
+                f"The last recorded error was: {task.error or 'none'}. Continue toward a verified "
+                "pull request using lifecycle tools."
+            )
+        result = await self.agent.run_session(task, worktree, lifecycle, prompt)
+        self.storage.append_task_memory(
+            task.task_id, f"## Session checkpoint\n\n{result.summary.strip()}\n"
+        )
+        latest = self.storage.load_task(task.task_id)
+        if result.blocked_reason and latest.state not in TERMINAL_STATES:
+            return self.storage.transition(
+                task.task_id, TaskState.BLOCKED, error=result.blocked_reason
+            )
+        if result.waiting_for_external_event and latest.state not in {
+            TaskState.WAITING_FOR_DEPLOYMENT,
+            TaskState.WAITING_FOR_REVIEW,
+            *TERMINAL_STATES,
+        }:
+            raise RuntimeError(
+                "agent yielded for an external event without a durable lifecycle transition"
+            )
+        if latest.state == task.state and latest.state in ACTIVE_STATES:
+            attempts = latest.attempts + 1
+            if attempts >= self.config.model.max_task_iterations:
+                return self.storage.transition(
+                    task.task_id,
+                    TaskState.BLOCKED,
+                    attempts=attempts,
+                    error="agent session made no durable lifecycle progress",
+                )
+            latest.attempts = attempts
+            latest.error = "agent session made no durable lifecycle progress"
+            self.storage.save_task(latest)
+        return latest
+
     async def process(self, task_id: str) -> TaskRecord:
         task = self.storage.load_task(task_id)
         try:
@@ -195,6 +423,18 @@ class WorkflowEngine:
                 return self.storage.transition(task_id, TaskState.COLLECTING_CONTEXT)
 
             worktree = await self._worktree(task)
+            uses_durable_session = bool(
+                getattr(self.agent, "supports_durable_session", False)
+                and callable(getattr(self.agent, "run_session", None))
+            )
+            if uses_durable_session and (
+                task.state in ACTIVE_STATES
+                or (
+                    task.state == TaskState.WAITING_FOR_REVIEW
+                    and self._review_comments.get(task_id)
+                )
+            ):
+                return await self._process_agent_session(task, worktree)
             if task.state == TaskState.COLLECTING_CONTEXT:
                 investigation = await self.agent.investigate(task, worktree)
                 markdown = (

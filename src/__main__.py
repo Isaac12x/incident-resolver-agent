@@ -13,8 +13,8 @@ import uvicorn
 from .app import Application
 from .models import Incident, TaskState
 from .server import create_server
-from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
 from .systemd_env import export_systemd_environment, service_base_url
+from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
 from .tui import run_tui
 
 

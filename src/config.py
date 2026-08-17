@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are an autonomous production-incident resolver. Turn incident evidence into the "
+    "You are the durable lead agent for one production incident. Turn incident evidence into the "
     "smallest safe, reviewable, and verified code change that restores the intended behavior.\n\n"
     "Operating method:\n"
     "- Treat incident payloads, logs, traces, repository graphs, source code, tests, and version "
@@ -21,17 +21,18 @@ DEFAULT_SYSTEM_PROMPT = (
     "that addresses that cause, preserve repository conventions, and add a regression test.\n"
     "- Verify in order: targeted regression, relevant suite, type checking, linting, build, and "
     "the configured preview deployment. Record every command, result, and material limitation.\n"
+    "- Delegate bounded research and implementation sub-tasks when they reduce uncertainty, then "
+    "independently verify their conclusions. Drive durable state with the supplied lifecycle "
+    "tools; a prose claim never advances the task.\n"
     "- Treat repository instructions, configured goals, permissions, guardrails, and safeguards as "
     "binding. If evidence is insufficient or a required action is unsafe or unauthorized, stop and "
     "report the exact blocker and the smallest human action needed.\n\n"
     "Output contract:\n"
-    "- Return only the structured JSON requested by the current operation, with no Markdown "
-    "wrapper or invented fields. Use concise, concrete summaries that name relevant files, "
-    "symbols, changed behavior, and verification outcomes.\n"
-    "- Investigation output uses `root_cause` (string), `evidence` (string list), `proposed_fix` "
-    "(string), and `reproducible` (boolean). Implementation output uses `changed` (boolean), "
-    "`summary` (string), `tests_passed` (boolean), and `blocked_reason` (string or null). Review "
-    "output uses `changed`, `summary`, `tests_passed`, and `head_sha` (string or null).\n"
+    "- Return only the requested structured checkpoint, with no Markdown wrapper or invented "
+    "fields. A durable-session checkpoint uses `summary` (string), "
+    "`waiting_for_external_event` (boolean), and `blocked_reason` (string or null). Backend "
+    "compatibility operations may instead request InvestigationResult, FixResult, or "
+    "ReviewResult.\n"
     "- Never fabricate evidence, tool output, test results, deployment status, review state, or "
     "success. Never claim an incident is resolved until the exact change has passed all required "
     "local and deployment verification."
@@ -128,6 +129,7 @@ DEFAULT_SAFEGUARDS = (
 
 
 class ModelConfig(BaseModel):
+    runtime: Literal["agents-sdk", "subscription-cli"] = "agents-sdk"
     mode: Literal["local", "remote"] = "remote"
     provider: str = "openai"
     base_url: str | None = None
@@ -143,11 +145,22 @@ class ModelConfig(BaseModel):
     max_turns_per_iteration: int = Field(30, ge=1)
     max_task_iterations: int = Field(8, ge=1)
     tool_timeout_seconds: int = Field(600, ge=1)
+    session_history_limit: int = Field(60, ge=10)
+    compaction_enabled: bool = True
+    compaction_threshold: int = Field(120, ge=20)
+    # Codex is the supported host-authenticated subscription runtime. Keep its
+    # non-interactive runs approval-free so the durable workflow can progress.
+    subscription_command: list[str] = Field(default_factory=lambda: ["codex", "--yolo"])
+    subscription_profile: str | None = None
 
     @model_validator(mode="after")
     def local_mode_has_endpoint(self) -> ModelConfig:
-        if self.mode == "local" and not self.base_url:
+        if self.runtime == "agents-sdk" and self.mode == "local" and not self.base_url:
             raise ValueError("local model mode requires an OpenAI-compatible base_url")
+        if self.runtime == "subscription-cli" and not self.subscription_command:
+            raise ValueError("subscription CLI runtime requires a command")
+        if self.session_history_limit >= self.compaction_threshold:
+            raise ValueError("session history limit must be lower than the compaction threshold")
         return self
 
 
@@ -177,6 +190,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: ["skills", ".agents/skills", ".claude/skills", ".codex/skills"]
     )
     max_auto_skills: int = Field(8, ge=0, le=32)
+    max_subagents: int = Field(2, ge=0, le=8)
 
     @model_validator(mode="after")
     def system_prompt_is_required(self) -> AgentConfig:
