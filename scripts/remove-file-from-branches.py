@@ -58,6 +58,12 @@ def pull_requests(repo: str, branch: str, *, cwd: Path) -> list[dict[str, Any]]:
     return json.loads(output or "[]")
 
 
+def push_command(branch: str) -> list[str]:
+    """Build the push command, allowing the history rewrite required by master."""
+    force = ["--force"] if branch == "master" else []
+    return ["git", "push", *force, "origin", f"HEAD:refs/heads/{branch}"]
+
+
 def process_branch(
     repository: Path,
     repo: str,
@@ -94,11 +100,7 @@ def process_branch(
                 cwd=worktree,
                 capture=False,
             )
-            command(
-                ["git", "push", "origin", f"HEAD:refs/heads/{branch}"],
-                cwd=worktree,
-                capture=False,
-            )
+            command(push_command(branch), cwd=worktree, capture=False)
             print(f"  removed {file}, committed, and pushed; PR(s) update automatically")
             return True
         finally:

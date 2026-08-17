@@ -61,3 +61,20 @@ Verification completed:
 
 - `python scripts/remove-file-from-branches.py --help` — passed.
 - `python -m py_compile scripts/remove-file-from-branches.py` — passed.
+
+## 2026-08-17 — Force file cleanup pushes to master
+
+Branch: `fix/force-push-master-file-cleanup`
+
+Updated `scripts/remove-file-from-branches.py` so an applied cleanup targeting `master` uses
+`git push --force`; other branches continue using normal pushes. Added regression tests for both
+push modes.
+
+Verification completed:
+
+- `uv run pytest -q` — 81 passed, 95.14% coverage.
+- `uv run ruff check src tests scripts` — passed.
+- `uv build` — passed.
+- `uv run --with 'mypy>=1.11' mypy src --ignore-missing-imports` — not clean; 28 pre-existing
+  typing issues remain in config defaults, connector SDK types, TUI literal narrowing, and
+  workflow result-variable reuse.

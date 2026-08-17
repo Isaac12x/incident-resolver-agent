@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Force the file-cleanup helper's push when updating `master`, allowing rewritten history to reach
+  the remote while keeping ordinary branch pushes unchanged.
 - Add a dry-run GitHub CLI helper to remove any relative file from one or more branch tips using
   temporary worktrees, commits, pushes, and automatic open-PR updates.
 - Run the Codex subscription backend with `codex --yolo` by default, including for legacy
