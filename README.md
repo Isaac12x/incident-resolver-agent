@@ -47,7 +47,7 @@ The runtime loads `.env` from the current working directory without overriding v
 exported by the shell. The fixed variables are documented in `.env.example`; custom model and MCP
 connector credential names come from `.agent/config.toml`.
 
-The installation also includes the repository-intelligence tools `graphify`, `code-review-graph`,
+The installation also includes the repository-intelligence tools `code-review-graph`,
 and `seed-cli`. Build both local code graphs for a checkout, or capture a structured filesystem
 tree, with:
 
@@ -56,7 +56,7 @@ uv run incident-agent index /path/to/repository
 uv run incident-agent tree --out structure.seed /path/to/repository
 ```
 
-Graph output stays local in `graphify-out/` and `.code-review-graph/`; `tree` delegates tree
+Graph output stays local in `.code-review-graph/` and `harness-out/`; `tree` delegates tree
 creation to `seed capture`.
 
 Other modes:
@@ -277,6 +277,6 @@ This was built as a time-boxed prototype (over a 3hr window). And so I left piec
 - Extensibility other than by the use of skills.
 
 
-I have solved some of these pitfalls using graphify and code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
+I have solved some of these pitfalls using code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
 
 I have used skills written by others alongside those that I created for this exercise.

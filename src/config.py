@@ -304,7 +304,14 @@ class Config(BaseModel):
 
 def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True) -> Config:
     if not path.exists() or path.stat().st_size == 0:
-        config = Config(runtime_root=path.parent)
+        from .tooling import host_subscription_cli_ready
+
+        model = (
+            ModelConfig(runtime="subscription-cli")
+            if host_subscription_cli_ready()
+            else ModelConfig()
+        )
+        config = Config(runtime_root=path.parent, model=model)
         if create:
             save_config(config, path)
         return config

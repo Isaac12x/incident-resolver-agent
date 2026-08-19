@@ -506,7 +506,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
         async def communicate(self, prompt: bytes):
             assert b"incident-session-tool" in prompt
             child = await real_subprocess(
-                str(worktree / "graphify-out" / "incident-session-tool"),
+                str(worktree / "harness-out" / "incident-session-tool"),
                 "remember",
                 json.dumps({"note": "CLI memory", "scope": "task"}),
                 stdout=asyncio.subprocess.PIPE,
@@ -514,7 +514,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             stdout, _ = await child.communicate()
             assert json.loads(stdout)["ok"]
             child = await real_subprocess(
-                str(worktree / "graphify-out" / "incident-session-tool"),
+                str(worktree / "harness-out" / "incident-session-tool"),
                 "write_file",
                 json.dumps({"path": "cli-change.txt", "content": "mapped write\n"}),
                 stdout=asyncio.subprocess.PIPE,
@@ -522,7 +522,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             stdout, _ = await child.communicate()
             assert json.loads(stdout)["result"] == {"written": True}
             child = await real_subprocess(
-                str(worktree / "graphify-out" / "incident-session-tool"),
+                str(worktree / "harness-out" / "incident-session-tool"),
                 "connector_call",
                 json.dumps(
                     {
@@ -535,6 +535,36 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             )
             stdout, _ = await child.communicate()
             assert json.loads(stdout)["result"] == {"matches": 2}
+            import code_review_graph.tools as graph_tools
+
+            monkeypatch.setattr(
+                graph_tools,
+                "semantic_search_nodes",
+                lambda **values: {"operation": "search", **values},
+            )
+            monkeypatch.setattr(
+                graph_tools,
+                "query_graph",
+                lambda **values: {"operation": "query", **values},
+            )
+            monkeypatch.setattr(
+                graph_tools,
+                "get_impact_radius",
+                lambda **values: {"operation": "impact", **values},
+            )
+            for tool_name, payload in (
+                ("code_graph_search", {"query": "checkout"}),
+                ("code_graph_query", {"pattern": "callers_of", "target": "checkout"}),
+                ("code_graph_impact", {"changed_files": ["checkout.py"], "max_depth": 2}),
+            ):
+                child = await real_subprocess(
+                    str(worktree / "harness-out" / "incident-session-tool"),
+                    tool_name,
+                    json.dumps(payload),
+                    stdout=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await child.communicate()
+                assert json.loads(stdout)["ok"]
             output = Path(self.command[self.command.index("--output-last-message") + 1])
             output.write_text(json.dumps(structured_outputs.pop(0)))
             event = json.dumps({"type": "thread.started", "thread_id": "thread-123"})

@@ -16,7 +16,6 @@ dependencies = [
     "pygithub",
     "pydantic",
     "python-dotenv>=1,<2",
-    "graphifyy",
     "code-review-graph",
     "fastmcp>=3.2,<4",
     "seed-cli",
