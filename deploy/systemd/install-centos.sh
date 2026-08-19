@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Install Incident Harness as a systemd service on CentOS/RHEL 7+.
+# Run as root from the repository checkout:
+#   ./deploy/systemd/install-centos.sh
 set -euo pipefail
 
 INSTALL_ROOT="${INSTALL_ROOT:-/opt/incident-harness}"
+SERVICE_USER="incident-harness"
+SERVICE_HOME="/var/lib/incident-harness"
 ENV_DIR="/etc/incident-harness"
 UNIT_DIR="/etc/systemd/system"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+UV_BIN="$(command -v uv)"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Run as root (sudo)." >&2
+  echo "Run as root: sudo $0" >&2
   exit 1
 fi
 
@@ -18,15 +23,43 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v uv >/dev/null 2>&1; then
+if [[ -z "${UV_BIN}" ]]; then
   echo "uv is required. Install from https://docs.astral.sh/uv/getting-started/installation/" >&2
   exit 1
 fi
 
-if ! id incident-harness >/dev/null 2>&1; then
-  useradd --system --home-dir /var/lib/incident-harness --shell /sbin/nologin incident-harness
-fi
+prepare_owned_dir() {
+  local path="$1"
+  local mode="${2:-0750}"
+  install -d -m "${mode}" "${path}"
+  chown "${SERVICE_USER}:${SERVICE_USER}" "${path}"
+}
 
+ensure_service_user() {
+  if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
+    useradd --system --create-home --home-dir "${SERVICE_HOME}" --shell /sbin/nologin "${SERVICE_USER}"
+    return
+  fi
+
+  local current_home
+  current_home="$(getent passwd "${SERVICE_USER}" | cut -d: -f6)"
+  if [[ "${current_home}" != "${SERVICE_HOME}" ]]; then
+    usermod -d "${SERVICE_HOME}" "${SERVICE_USER}"
+  fi
+}
+
+run_as_service_user() {
+  runuser -u "${SERVICE_USER}" -w "${INSTALL_ROOT}" -- \
+    env HOME="${SERVICE_HOME}" PATH="${PATH}" "$@"
+}
+
+echo "==> Ensuring service user and home (${SERVICE_HOME})"
+ensure_service_user
+prepare_owned_dir "${SERVICE_HOME}"
+prepare_owned_dir "${SERVICE_HOME}/.ssh"
+prepare_owned_dir "${SERVICE_HOME}/.cache"
+
+echo "==> Installing application to ${INSTALL_ROOT}"
 install -d -m 0755 "${INSTALL_ROOT}"
 if [[ ! -f "${INSTALL_ROOT}/pyproject.toml" ]]; then
   rsync -a --delete \
@@ -35,18 +68,17 @@ if [[ ! -f "${INSTALL_ROOT}/pyproject.toml" ]]; then
     --exclude .git \
     "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 fi
+prepare_owned_dir "${INSTALL_ROOT}/.agent"
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
-install -d -m 0750 -o incident-harness -g incident-harness "${INSTALL_ROOT}/.agent"
-install -d -m 0750 -o incident-harness -g incident-harness /var/lib/incident-harness/.ssh
+echo "==> Creating virtualenv and syncing dependencies"
+run_as_service_user "${UV_BIN}" sync
 
-cd "${INSTALL_ROOT}"
-sudo -u incident-harness uv sync
-
+echo "==> Installing systemd units and environment template"
 install -d -m 0750 "${ENV_DIR}"
 if [[ ! -f "${ENV_DIR}/environment" ]]; then
-  install -m 0640 -o root -g incident-harness \
+  install -m 0640 -o root -g "${SERVICE_USER}" \
     "${SCRIPT_DIR}/incident-harness.env.example" "${ENV_DIR}/environment"
-  echo "Edit ${ENV_DIR}/environment before starting the service."
 fi
 
 install -m 0644 "${SCRIPT_DIR}/incident-harness.service" "${UNIT_DIR}/"
@@ -54,36 +86,27 @@ install -m 0644 "${SCRIPT_DIR}/incident-harness-http.service" "${UNIT_DIR}/"
 install -m 0644 "${SCRIPT_DIR}/incident-harness-worker.service" "${UNIT_DIR}/"
 install -m 0644 "${SCRIPT_DIR}/incident-harness.target" "${UNIT_DIR}/"
 
-chown -R incident-harness:incident-harness "${INSTALL_ROOT}" /var/lib/incident-harness
-
 systemctl daemon-reload
 
 cat <<EOF
 Installed.
 
-Recommended (single unit — webhooks + worker):
-  sudo systemctl enable --now incident-harness.service
+Next steps:
+  1. Edit secrets (if not done yet):
+       ${ENV_DIR}/environment
+  2. Configure the harness:
+       runuser -u ${SERVICE_USER} -w ${INSTALL_ROOT} -- \\
+         ${INSTALL_ROOT}/.venv/bin/incident-agent tui
+  3. Start the service:
+       systemctl enable --now incident-harness.service
+  4. Check status:
+       systemctl status incident-harness.service
+       curl -s "\$(runuser -u ${SERVICE_USER} -w ${INSTALL_ROOT} -- \\
+         ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/health"
 
-Optional split (restart worker without dropping webhook intake):
-  sudo systemctl enable --now incident-harness.target
+Optional split HTTP/worker layout:
+  systemctl enable --now incident-harness.target
 
-Before production intake:
-  1. Configure repositories, server host/port, and env var names via:
-       sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent tui
-  2. For subscription-cli, install the configured CLI (codex by default) on PATH for
-     incident-harness, then authenticate it as that user:
-       sudo -u incident-harness -H codex login
-     Codex state is stored in /var/lib/incident-harness/.codex by the systemd units.
-  3. Put API, webhook, connector, and other secret values in ${ENV_DIR}/environment using the
-     env var names from the TUI. Subscription OAuth is managed separately by the CLI.
-  4. Validate the generated runtime environment:
-       sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent export-systemd-env --output /tmp/incident-harness.env
-  5. Set max_concurrent_tasks in .agent/config.toml for parallel incidents.
-  6. Point GitHub/Sentry webhooks at:
-       \$(sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/hooks/github
-       \$(sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/hooks/incidents/<connector>
-
-Status:
-  systemctl status incident-harness.service
-  curl -s "\$(sudo -u incident-harness ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/health"
+Subscription CLI (codex, etc.): authenticate as the service user before intake:
+  runuser -u ${SERVICE_USER} -- env HOME=${SERVICE_HOME} codex login
 EOF
