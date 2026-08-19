@@ -143,6 +143,9 @@ class ConfigurationApp(App[None]):
                     "model-runtime",
                     ("agents-sdk", "subscription-cli"),
                 ),
+                classes="section",
+            ),
+            Vertical(
                 Static("", id="subscription-host-status", classes="inline-status", markup=False),
                 Label("Subscription CLI command"),
                 self._input(shlex.join(model.subscription_command), "subscription-command"),

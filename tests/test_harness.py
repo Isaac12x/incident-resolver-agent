@@ -1819,6 +1819,7 @@ async def test_tui_subscription_cli_probe_and_runtime_sections(tmp_path: Path) -
 
         app.query_one("#model-runtime", Select).value = "agents-sdk"
         await pilot.pause()
+        assert app.query_one("#model-runtime", Select).display is True
         assert app.query_one("#subscription-section").display is False
         assert app.query_one("#agents-sdk-endpoint-section").display is True
 
