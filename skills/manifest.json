@@ -20,9 +20,9 @@
       "description": "Create, update, and monitor incident-fix pull requests"
     },
     {
-      "name": "graphify",
-      "path": "graphify/SKILL.md",
-      "description": "Build and query repository knowledge graphs"
+      "name": "code-review-graph",
+      "path": "code-review-graph/SKILL.md",
+      "description": "Build and query the repository code-review graph"
     },
     {
       "name": "incident-investigation",

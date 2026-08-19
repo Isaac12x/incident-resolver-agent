@@ -451,6 +451,39 @@ class Storage:
             subprocess.run(["git", "-C", str(repository), "fetch", "--prune", "origin"], check=True)
 
     @staticmethod
+    def refresh_worktree(worktree: Path, base_branch: str) -> None:
+        """Fetch and merge the latest base branch before resuming a durable session."""
+        if not worktree.is_dir():
+            return
+        remote = subprocess.run(
+            ["git", "-C", str(worktree), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if remote.returncode != 0:
+            return
+        subprocess.run(["git", "-C", str(worktree), "fetch", "--prune", "origin"], check=True)
+        base_ref = f"origin/{base_branch}"
+        verify = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--verify", base_ref],
+            capture_output=True,
+            check=False,
+        )
+        if verify.returncode != 0:
+            return
+        merge = subprocess.run(
+            ["git", "-C", str(worktree), "merge", "--no-edit", base_ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if merge.returncode != 0:
+            raise RuntimeError(
+                f"could not merge origin/{base_branch} into {worktree}: {merge.stderr.strip()}"
+            )
+
+    @staticmethod
     def _base_ref(repository: Path, base_branch: str) -> str:
         for ref in (f"origin/{base_branch}", base_branch, "HEAD"):
             result = subprocess.run(
@@ -476,7 +509,7 @@ class Storage:
                 "-A",
                 "--",
                 ".",
-                ":(exclude)graphify-out",
+                ":(exclude)harness-out",
                 ":(exclude).code-review-graph",
                 ":(exclude).code-review-graph.db",
             ],

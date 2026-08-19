@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,19 +36,27 @@ class GitHubRepository:
 
 
 @dataclass(frozen=True)
+class SubscriptionProbeResult:
+    """Host subscription CLI availability and optional exec probe results."""
+
+    ready: bool
+    message: str
+    authenticated: bool = False
+    executable: str | None = None
+
+
+@dataclass(frozen=True)
 class RepositorySetupResult:
     """Clone/pull and graph generation results for one managed checkout."""
 
     path: Path
     acquisition: ToolResult
-    graphify: ToolResult | None = None
     code_review_graph: ToolResult | None = None
 
     @property
     def succeeded(self) -> bool:
-        return self.acquisition.succeeded and all(
-            result is not None and result.succeeded
-            for result in (self.graphify, self.code_review_graph)
+        return self.acquisition.succeeded and (
+            self.code_review_graph is not None and self.code_review_graph.succeeded
         )
 
 
@@ -133,20 +143,147 @@ def build_repository_graphs(
     base: Path | str = ".",
     *,
     runner: CommandRunner = subprocess.run,
-) -> tuple[ToolResult, ToolResult]:
-    """Build graphify and code-review-graph indexes for ``base``."""
+) -> ToolResult:
+    """Build the code-review-graph index for ``base``."""
     root = _validate_base(base)
-    graphify = _run(
-        ("graphify", "extract", str(root), "--code-only", "--no-cluster"),
-        cwd=root,
-        runner=runner,
-    )
-    code_review_graph = _run(
+    return _run(
         ("code-review-graph", "build", "--repo", str(root)),
         cwd=root,
         runner=runner,
     )
-    return graphify, code_review_graph
+
+
+def subscription_cli_command(command: list[str]) -> list[str]:
+    """Return the configured CLI command with Codex's yolo mode enabled."""
+    normalized = list(command)
+    if normalized and Path(normalized[0]).name == "codex" and "--yolo" not in normalized:
+        normalized.insert(1, "--yolo")
+    return normalized
+
+
+def host_subscription_cli_ready(*, runner: CommandRunner = subprocess.run) -> bool:
+    """Return whether the default host Codex subscription CLI is authenticated."""
+    return probe_subscription_cli(["codex"], runner=runner).ready
+
+
+def probe_subscription_cli(
+    command: list[str],
+    profile: str | None = None,
+    *,
+    runner: CommandRunner = subprocess.run,
+    exec_test: bool = False,
+    exec_timeout_seconds: int = 120,
+) -> SubscriptionProbeResult:
+    """Check subscription CLI availability and, optionally, run a minimal exec probe."""
+    if not command:
+        return SubscriptionProbeResult(False, "subscription CLI command cannot be blank")
+    executable = shutil.which(command[0])
+    if executable is None and not Path(command[0]).expanduser().is_file():
+        return SubscriptionProbeResult(False, f"command not found: {command[0]}")
+    resolved = executable or str(Path(command[0]).expanduser())
+    normalized = subscription_cli_command(command)
+    cli_name = Path(normalized[0]).name
+    if cli_name == "codex":
+        status_command = [normalized[0], "login", "status"]
+        if profile:
+            status_command.extend(["--profile", profile])
+        status = _run(status_command, Path.cwd(), runner)
+        if not status.succeeded:
+            message = (status.stderr or status.stdout).strip() or "not authenticated"
+            return SubscriptionProbeResult(False, message, executable=resolved)
+        auth_message = (status.stdout or status.stderr).strip() or "authenticated"
+        if not exec_test:
+            return SubscriptionProbeResult(
+                True,
+                auth_message,
+                authenticated=True,
+                executable=resolved,
+            )
+        with tempfile.TemporaryDirectory() as temporary:
+            workdir = Path(temporary)
+            schema_path = workdir / "schema.json"
+            output_path = workdir / "output.json"
+            schema_path.write_text(
+                (
+                    '{"type":"object","properties":{"ok":{"type":"boolean"}},'
+                    '"required":["ok"],"additionalProperties":false}'
+                ),
+                encoding="utf-8",
+            )
+            exec_command = [*normalized, "exec"]
+            if profile:
+                exec_command.extend(["--profile", profile])
+            exec_command.extend(
+                [
+                    "--sandbox",
+                    "read-only",
+                    "--json",
+                    "--output-schema",
+                    str(schema_path),
+                    "--output-last-message",
+                    str(output_path),
+                    "-",
+                ]
+            )
+            try:
+                completed = runner(
+                    exec_command,
+                    cwd=workdir,
+                    input='Reply with JSON {"ok": true} only.\n',
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=exec_timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                return SubscriptionProbeResult(
+                    False,
+                    f"exec probe timed out after {exec_timeout_seconds}s",
+                    authenticated=True,
+                    executable=resolved,
+                )
+            if completed.returncode != 0:
+                message = (completed.stderr or completed.stdout).strip() or "exec probe failed"
+                return SubscriptionProbeResult(
+                    False,
+                    message,
+                    authenticated=True,
+                    executable=resolved,
+                )
+            if not output_path.is_file():
+                return SubscriptionProbeResult(
+                    False,
+                    "exec probe completed without structured output",
+                    authenticated=True,
+                    executable=resolved,
+                )
+            try:
+                payload = json.loads(output_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return SubscriptionProbeResult(
+                    False,
+                    "exec probe returned invalid JSON",
+                    authenticated=True,
+                    executable=resolved,
+                )
+            if payload.get("ok") is True:
+                return SubscriptionProbeResult(
+                    True,
+                    f"{auth_message}; exec probe succeeded",
+                    authenticated=True,
+                    executable=resolved,
+                )
+            return SubscriptionProbeResult(
+                False,
+                "exec probe returned unexpected output",
+                authenticated=True,
+                executable=resolved,
+            )
+    help_result = _run([normalized[0], "--help"], Path.cwd(), runner)
+    if help_result.succeeded:
+        return SubscriptionProbeResult(True, f"{normalized[0]} is available", executable=resolved)
+    message = (help_result.stderr or help_result.stdout).strip() or "command is unavailable"
+    return SubscriptionProbeResult(False, message, executable=resolved)
 
 
 def github_login(*, runner: CommandRunner = subprocess.run) -> ToolResult:
@@ -221,7 +358,7 @@ def clone_and_index_repository(
     *,
     runner: CommandRunner = subprocess.run,
 ) -> RepositorySetupResult:
-    """Clone or fast-forward a managed checkout, then generate both repository graphs."""
+    """Clone or fast-forward a managed checkout, then generate the repository graph."""
     target = Path(destination).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -232,5 +369,5 @@ def clone_and_index_repository(
         acquisition = _run(("git", "clone", clone_url, str(target)), target.parent, runner)
     if not acquisition.succeeded:
         return RepositorySetupResult(target, acquisition)
-    graphify, code_review_graph = build_repository_graphs(target, runner=runner)
-    return RepositorySetupResult(target, acquisition, graphify, code_review_graph)
+    code_review_graph = build_repository_graphs(target, runner=runner)
+    return RepositorySetupResult(target, acquisition, code_review_graph)

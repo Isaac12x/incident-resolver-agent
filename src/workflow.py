@@ -24,7 +24,7 @@ from .tooling import ToolResult
 from .tools import WorkspaceTools
 from .verify import DeploymentVerifier
 
-GraphIndexer = Callable[[Path], tuple[ToolResult, ToolResult]]
+GraphIndexer = Callable[[Path], ToolResult]
 
 ACTIVE_STATES = {
     TaskState.RECEIVED,
@@ -330,31 +330,28 @@ class WorkflowEngine:
             self.storage.task_directory(task.task_id) / "artifacts" / "repository" / "graphs-ready"
         )
         if self.repository_indexer and not graph_marker.exists():
-            results = await asyncio.to_thread(self.repository_indexer, worktree)
-            for name, result in zip(("graphify", "code-review-graph"), results, strict=True):
-                self.storage.append_event(
-                    task.task_id,
-                    TaskEvent(
-                        type="repository.graph_indexed",
-                        data={
-                            "tool": name,
-                            "command": list(result.command),
-                            "returncode": result.returncode,
-                            "stderr": result.stderr[-2000:],
-                        },
-                    ),
-                )
-            failures = [result for result in results if not result.succeeded]
-            if failures:
-                detail = "; ".join(
+            result = await asyncio.to_thread(self.repository_indexer, worktree)
+            self.storage.append_event(
+                task.task_id,
+                TaskEvent(
+                    type="repository.graph_indexed",
+                    data={
+                        "tool": "code-review-graph",
+                        "command": list(result.command),
+                        "returncode": result.returncode,
+                        "stderr": result.stderr[-2000:],
+                    },
+                ),
+            )
+            if not result.succeeded:
+                detail = (
                     f"{result.command[0]} exited {result.returncode}: {result.stderr.strip()}"
-                    for result in failures
                 )
                 raise RuntimeError(f"repository graph generation failed: {detail}")
             self.storage.write_artifact(
                 task.task_id,
                 "artifacts/repository/graphs-ready",
-                "graphify and code-review-graph completed\n",
+                "code-review-graph completed\n",
             )
         return worktree
 

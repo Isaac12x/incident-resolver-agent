@@ -8,5 +8,6 @@ __pycache__/
 .ruff_cache/
 *.pyc
 .env
-graphify-out/
+harness-out/
 .code-review-graph/
+handoff.md

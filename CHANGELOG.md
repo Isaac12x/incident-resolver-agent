@@ -41,7 +41,7 @@
 - Fix overlapping Textual form sections so model, runtime, repository, connection, and safety
   controls remain labeled, focusable, scrollable, and editable from the keyboard.
 - Add repository onboarding through GitHub CLI web login/repository selection or a clone URL;
-  clone or fast-forward managed checkouts and generate graphify and code-review-graph indexes.
+  clone or fast-forward managed checkouts and generate code-review-graph indexes.
 - Pull the latest base branch for every new incident, rebuild both graphs before investigation,
   preload graph query results into agent context, and expose follow-up graph search/impact tools.
 - Connect configured stdio, Streamable HTTP, and SSE MCP servers at runtime, support bearer-token
@@ -92,6 +92,6 @@
 - Add HTTP, MCP-compatible, A2A, CLI, worker, and Textual configuration surfaces.
 - Add local-only repository mode with conventional `.agent(s)/repositories` discovery, isolated
   branches, local commits, and durable local PR records when GitHub is unavailable.
-- Install graphify, code-review-graph, and seed-cli with the harness; add graph indexing and
+- Install code-review-graph and seed-cli with the harness; add graph indexing and
   seed-backed structured-tree CLI commands.
 - Add the complete minimal regression matrix with over 90% coverage in every source file.

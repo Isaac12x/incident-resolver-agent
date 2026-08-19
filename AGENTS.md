@@ -12,4 +12,4 @@ Read a matching skill before acting; when several skills apply, follow them in l
 | Create, update, or monitor an incident pull request | `skills/github/SKILL.md` |
 | Verify the current pull request's preview deployment | `skills/deployment-verification/SKILL.md` |
 | Address authorized pull-request review feedback | `skills/review-comments/SKILL.md` |
-| Build or query a repository knowledge graph | `skills/graphify/SKILL.md` |
+| Build or query a repository knowledge graph | `skills/code-review-graph/SKILL.md` |

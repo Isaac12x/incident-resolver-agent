@@ -39,6 +39,7 @@ from .tooling import (
     clone_and_index_repository,
     github_login,
     list_github_repositories,
+    probe_subscription_cli,
     repository_name_from_url,
     repository_slug,
 )
@@ -142,16 +143,21 @@ class ConfigurationApp(App[None]):
                     "model-runtime",
                     ("agents-sdk", "subscription-cli"),
                 ),
+                Static("", id="subscription-host-status", classes="inline-status", markup=False),
                 Label("Subscription CLI command"),
                 self._input(shlex.join(model.subscription_command), "subscription-command"),
                 Label("Subscription CLI profile (optional)"),
                 self._input(model.subscription_profile, "subscription-profile"),
+                Button("Test subscription CLI", id="test-subscription-cli"),
+                Static("", id="subscription-status", classes="inline-status", markup=False),
+                id="subscription-section",
                 classes="section",
             ),
             Vertical(
                 Label("Execution location"),
                 self._select(model.mode, "model-mode", ("local", "remote")),
                 Static(self._model_help(model.mode), id="model-help"),
+                id="agents-sdk-mode-section",
                 classes="section",
             ),
             Vertical(
@@ -167,6 +173,7 @@ class ConfigurationApp(App[None]):
                 self._input(model.api_key_env, "model-api-key-env", placeholder="OPENAI_API_KEY"),
                 Label("Organization environment variable (optional)"),
                 self._input(model.organization_env, "model-organization-env"),
+                id="agents-sdk-endpoint-section",
                 classes="section",
             ),
             Vertical(
@@ -680,6 +687,67 @@ class ConfigurationApp(App[None]):
     def on_mount(self) -> None:
         for key in self._repository_keys:
             self._set_repository_source(key)
+        self._set_model_runtime(self.config.model.runtime)
+        self.call_later(self._refresh_subscription_status)
+
+    def _set_model_runtime(self, runtime: str) -> None:
+        subscription = runtime == "subscription-cli"
+        self.query_one("#subscription-section").display = subscription
+        self.query_one("#agents-sdk-mode-section").display = not subscription
+        self.query_one("#agents-sdk-endpoint-section").display = not subscription
+
+    async def _refresh_subscription_status(self) -> None:
+        host_status = self.query_one("#subscription-host-status", Static)
+        status = self.query_one("#subscription-status", Static)
+        try:
+            runtime = self._selected("model-runtime")
+        except ValueError:
+            return
+        if runtime != "subscription-cli":
+            host_status.update("")
+            status.update("")
+            return
+        try:
+            command = shlex.split(self._value("subscription-command"))
+            profile = self._value("subscription-profile").strip() or None
+        except ValueError:
+            host_status.update("")
+            status.update("Invalid subscription CLI command.")
+            return
+        host_status.update("Checking host subscription CLI…")
+        result = await asyncio.to_thread(
+            probe_subscription_cli,
+            command,
+            profile,
+            runner=self.command_runner,
+        )
+        if result.ready:
+            host_status.update(
+                "Host subscription CLI is authenticated. No API key or extra setup is required."
+            )
+            status.update(f"Ready: {result.message}")
+            return
+        host_status.update("")
+        status.update(f"Not ready: {result.message}")
+
+    async def _test_subscription_cli(self) -> None:
+        status = self.query_one("#subscription-status", Static)
+        try:
+            command = shlex.split(self._value("subscription-command"))
+            profile = self._value("subscription-profile").strip() or None
+        except ValueError as error:
+            status.update(f"Invalid command: {error}")
+            return
+        status.update("Testing subscription CLI with a short exec probe…")
+        result = await asyncio.to_thread(
+            probe_subscription_cli,
+            command,
+            profile,
+            runner=self.command_runner,
+            exec_test=True,
+        )
+        prefix = "Ready" if result.ready else "Subscription CLI unavailable"
+        status.update(f"{prefix}: {result.message}")
 
     def _set_repository_source(self, key: str) -> None:
         prefix = f"repo-{key}"
@@ -756,7 +824,7 @@ class ConfigurationApp(App[None]):
             return
         failures = [
             graph
-            for graph in (result.graphify, result.code_review_graph)
+            for graph in (result.code_review_graph,)
             if graph is None or not graph.succeeded
         ]
         if failures:
@@ -790,6 +858,11 @@ class ConfigurationApp(App[None]):
         status.update(f"{prefix}: {result.message}")
 
     def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "model-runtime" and event.value is not Select.NULL:
+            runtime = str(event.value)
+            self._set_model_runtime(runtime)
+            self.call_later(self._refresh_subscription_status)
+            return
         if event.select.id == "model-mode" and event.value is not Select.NULL:
             self.query_one("#model-help", Static).update(self._model_help(str(event.value)))
             return
@@ -833,6 +906,9 @@ class ConfigurationApp(App[None]):
             return
         if button_id.startswith("test-connector-"):
             await self._test_connector(button_id.removeprefix("test-"))
+            return
+        if button_id == "test-subscription-cli":
+            await self._test_subscription_cli()
             return
         if button_id.startswith("remove-repository-") or button_id.startswith("remove-connector-"):
             key = button_id.removeprefix("remove-")
