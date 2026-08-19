@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import secrets
-import shlex
 import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
@@ -30,6 +29,7 @@ from .models import (
 from .skills import Skill, SkillResolver
 from .storage import Storage
 from .tools import WorkspaceTools
+from .tooling import subscription_cli_command
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
 
@@ -189,7 +189,6 @@ class _ConsoleProgress:
             "write_file": ("path",),
             "replace_in_file": ("path",),
             "rg_conversation_history": ("pattern",),
-            "graphify_query": ("question",),
             "code_graph_search": ("query",),
             "code_graph_query": ("target", "pattern"),
             "code_graph_impact": ("changed_files",),
@@ -399,27 +398,6 @@ class OpenAIAgentsBackend:
             return workspace.rg_conversation_history(pattern, limit)
 
         @function_tool
-        async def graphify_query(question: str, budget: int = 2000) -> str:
-            """Query the freshly generated semantic/structural repository graph."""
-            graph = workspace.workspace / "graphify-out" / "graph.json"
-            result = await workspace.shell(
-                shlex.join(
-                    [
-                        "graphify",
-                        "query",
-                        question,
-                        "--budget",
-                        str(budget),
-                        "--graph",
-                        str(graph),
-                    ]
-                )
-            )
-            if result.returncode:
-                return f"graphify query failed: {result.stderr or result.stdout}"
-            return result.stdout
-
-        @function_tool
         def code_graph_search(query: str, kind: str | None = None, limit: int = 20) -> str:
             """Search symbols in the freshly generated code-review graph."""
             from code_review_graph.tools import semantic_search_nodes
@@ -501,7 +479,6 @@ class OpenAIAgentsBackend:
             write_file,
             replace_in_file,
             rg_conversation_history,
-            graphify_query,
             code_graph_search,
             code_graph_query,
             code_graph_impact,
@@ -560,7 +537,6 @@ class OpenAIAgentsBackend:
                 shell,
                 read_file,
                 rg_conversation_history,
-                graphify_query,
                 code_graph_search,
                 code_graph_query,
                 code_graph_impact,
@@ -684,17 +660,19 @@ class SubscriptionCLIBackend:
 Use the following command from the repository root to drive durable task state. Pass exactly one
 JSON object as the final argument and use the returned JSON as authoritative:
 
-- `graphify-out/incident-session-tool mark_investigation_complete JSON`
+- `harness-out/incident-session-tool mark_investigation_complete JSON`
   (`root_cause`, `evidence`, `proposed_fix`, `reproducible`)
-- `graphify-out/incident-session-tool run_tests JSON` (`command`)
-- `graphify-out/incident-session-tool open_pr JSON` (`summary`)
-- `graphify-out/incident-session-tool remember JSON` (`note`, optional `scope`)
-- `graphify-out/incident-session-tool shell JSON` (`command`)
-- `graphify-out/incident-session-tool read_file JSON` (`path`)
-- `graphify-out/incident-session-tool write_file JSON` (`path`, `content`)
-- `graphify-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`)
-- `graphify-out/incident-session-tool graphify_query JSON` (`question`, optional `budget`)
-- `graphify-out/incident-session-tool connector_call JSON` (`connector`, `tool`, `arguments`)
+- `harness-out/incident-session-tool run_tests JSON` (`command`)
+- `harness-out/incident-session-tool open_pr JSON` (`summary`)
+- `harness-out/incident-session-tool remember JSON` (`note`, optional `scope`)
+- `harness-out/incident-session-tool shell JSON` (`command`)
+- `harness-out/incident-session-tool read_file JSON` (`path`)
+- `harness-out/incident-session-tool write_file JSON` (`path`, `content`)
+- `harness-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`)
+- `harness-out/incident-session-tool code_graph_search JSON` (`query`, optional `kind`, `limit`)
+- `harness-out/incident-session-tool code_graph_query JSON` (`pattern`, `target`)
+- `harness-out/incident-session-tool code_graph_impact JSON` (`changed_files`, optional `max_depth`)
+- `harness-out/incident-session-tool connector_call JSON` (`connector`, `tool`, `arguments`)
 
 The CLI runs in a read-only sandbox. Use these mapped commands for mutations and verification so
 the harness applies its workspace and permission policy. Native read-only inspection remains
@@ -778,7 +756,9 @@ its lifecycle command succeeds.
                     "read_file",
                     "write_file",
                     "replace_in_file",
-                    "graphify_query",
+                    "code_graph_search",
+                    "code_graph_query",
+                    "code_graph_impact",
                     "connector_call",
                 }:
                     raise ValueError(f"unknown lifecycle tool: {name}")
@@ -827,27 +807,31 @@ its lifecycle command succeeds.
                     if server is None:
                         raise ValueError(f"unknown connector: {connector}")
                     result = await server.call_tool(tool_name, tool_arguments)
-                else:
-                    budget = int(arguments.get("budget", 2000))
-                    graph = workspace.workspace / "graphify-out" / "graph.json"
-                    command_result = await workspace.shell(
-                        shlex.join(
-                            [
-                                "graphify",
-                                "query",
-                                str(arguments["question"]),
-                                "--budget",
-                                str(budget),
-                                "--graph",
-                                str(graph),
-                            ]
-                        )
+                elif name == "code_graph_search":
+                    from code_review_graph.tools import semantic_search_nodes
+
+                    result = semantic_search_nodes(
+                        query=str(arguments["query"]),
+                        kind=arguments.get("kind"),
+                        limit=int(arguments.get("limit", 20)),
+                        repo_root=str(workspace.workspace),
                     )
-                    result = {
-                        "returncode": command_result.returncode,
-                        "stdout": command_result.stdout,
-                        "stderr": command_result.stderr,
-                    }
+                elif name == "code_graph_query":
+                    from code_review_graph.tools import query_graph
+
+                    result = query_graph(
+                        pattern=str(arguments["pattern"]),
+                        target=str(arguments["target"]),
+                        repo_root=str(workspace.workspace),
+                    )
+                else:
+                    from code_review_graph.tools import get_impact_radius
+
+                    result = get_impact_radius(
+                        changed_files=arguments.get("changed_files"),
+                        max_depth=int(arguments.get("max_depth", 2)),
+                        repo_root=str(workspace.workspace),
+                    )
                 response = {"ok": True, "result": result}
             except Exception as error:
                 response = {"ok": False, "error": str(error)}
@@ -857,7 +841,7 @@ its lifecycle command succeeds.
             await writer.wait_closed()
 
         server = await asyncio.start_unix_server(handle, path=socket_path)
-        launcher = workspace.workspace / "graphify-out" / "incident-session-tool"
+        launcher = workspace.workspace / "harness-out" / "incident-session-tool"
         launcher.parent.mkdir(parents=True, exist_ok=True)
         self._launcher(launcher, socket_path, token)
         try:
@@ -897,10 +881,7 @@ its lifecycle command succeeds.
 
     def _subscription_command(self) -> list[str]:
         """Return the configured CLI command with Codex's yolo mode enabled."""
-        command = list(self.config.model.subscription_command)
-        if command and Path(command[0]).name == "codex" and "--yolo" not in command:
-            command.insert(1, "--yolo")
-        return command
+        return subscription_cli_command(list(self.config.model.subscription_command))
 
     @staticmethod
     def _decode_output(stdout: str, output_path: Path) -> tuple[str | None, dict[str, Any]]:
@@ -941,7 +922,7 @@ its lifecycle command succeeds.
         if run_context is None:
             raise RuntimeError("subscription CLI requires a durable task run context")
         output_type = output_type or SessionResult
-        files = workspace.workspace / "graphify-out"
+        files = workspace.workspace / "harness-out"
         files.mkdir(parents=True, exist_ok=True)
         schema_path = files / "session-output.schema.json"
         output_path = files / "session-output.json"
@@ -1083,12 +1064,12 @@ class IncidentAgent:
         parts.append(
             "# Required Repository Graph Check\n\n"
             "This worktree was created only after pulling the latest configured base branch. "
-            "Both `graphify` and `code-review-graph` were then generated from this exact checkout. "
-            "Begin each operation by using `graphify_query` or `code_graph_search` to locate the "
-            "relevant code before broad text search. Use `code_graph_query` to verify callers, "
-            "callees, imports, tests, and inheritance. After changing code, use "
-            "`code_graph_impact` to check blast radius. Treat graph results as navigation evidence "
-            "and confirm conclusions against source and tests."
+            "A fresh `code-review-graph` index was generated from this exact checkout. "
+            "Begin each operation with `code_graph_search` to locate relevant code before broad "
+            "text search. Use `code_graph_query` to verify callers, callees, imports, tests, and "
+            "inheritance. After changing code, use `code_graph_impact` to check blast radius. "
+            "Treat graph results as navigation evidence and confirm conclusions against source "
+            "and tests."
         )
         parts.append(
             "# Durable Conversation Recall\n\n"
@@ -1131,42 +1112,22 @@ class IncidentAgent:
 
     @staticmethod
     async def _graph_context(task: TaskRecord, worktree: Path, tools: WorkspaceTools) -> str:
-        """Query both fresh indexes before the model starts inspecting the checkout."""
-        sections: list[str] = []
-        graph = worktree / "graphify-out" / "graph.json"
-        if graph.is_file():
-            result = await tools.shell(
-                shlex.join(
-                    [
-                        "graphify",
-                        "query",
-                        task.summary,
-                        "--budget",
-                        "2000",
-                        "--graph",
-                        "graphify-out/graph.json",
-                    ]
-                )
-            )
-            sections.append(
-                "## graphify\n" + (result.stdout if result.returncode == 0 else result.stderr)
-            )
+        """Query the fresh code-review graph before the model starts inspecting the checkout."""
         code_graph = worktree / ".code-review-graph" / "graph.db"
-        if code_graph.is_file():
-            from code_review_graph.tools import semantic_search_nodes
-
-            result = await asyncio.to_thread(
-                semantic_search_nodes,
-                query=task.summary,
-                limit=20,
-                repo_root=str(worktree),
-            )
-            sections.append("## code-review-graph\n" + json.dumps(result, default=str))
-        if not sections:
+        if not code_graph.is_file():
             return ""
+        from code_review_graph.tools import semantic_search_nodes
+
+        result = await asyncio.to_thread(
+            semantic_search_nodes,
+            query=task.summary,
+            limit=20,
+            repo_root=str(worktree),
+        )
         return (
             "# Fresh Repository Graph Context\n\n"
-            + "\n\n".join(sections)
+            "## code-review-graph\n"
+            + json.dumps(result, default=str)
             + "\n\nConfirm graph leads against source and tests.\n\n"
         )
 
@@ -1269,6 +1230,12 @@ class IncidentAgent:
         prompt: str | None = None,
     ) -> SessionResult:
         incident = self.storage.load_incident(task.task_id)
+        try:
+            repository = self.config.repository(task.repository)
+            base_branch = repository.base_branch
+        except KeyError:
+            base_branch = "main"
+        await asyncio.to_thread(self.storage.refresh_worktree, worktree, base_branch)
         initial_prompt = (
             "Resolve this incident end to end in the current durable session. Use lifecycle tools "
             "to persist progress and delegate bounded sub-tasks.\n\n"
@@ -1280,7 +1247,7 @@ class IncidentAgent:
             "resolve",
             prompt or initial_prompt,
             [
-                "graphify",
+                "code-review-graph",
                 "incident-investigation",
                 "coding",
                 "testing",
@@ -1300,7 +1267,7 @@ class IncidentAgent:
             worktree,
             "investigate",
             incident.model_dump_json(indent=2),
-            ["graphify", "incident-investigation"],
+            ["code-review-graph", "incident-investigation"],
             {"incidents", "errors", "logs", "traces", "metrics"},
         )
         validated = InvestigationResult.model_validate(result)
@@ -1314,7 +1281,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["graphify", "coding", "testing", "github"],
+            ["code-review-graph", "coding", "testing", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)
@@ -1329,7 +1296,7 @@ class IncidentAgent:
             worktree,
             "address_review",
             "\n".join(f"{comment.author}: {comment.body}" for comment in comments),
-            ["graphify", "review-comments", "coding", "testing"],
+            ["code-review-graph", "review-comments", "coding", "testing"],
             set(),
         )
         validated = ReviewResult.model_validate(result)

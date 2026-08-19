@@ -56,8 +56,10 @@ from src.tooling import (
     github_login,
     initialise_runtime_tree,
     list_github_repositories,
+    probe_subscription_cli,
     repository_name_from_url,
     repository_slug,
+    subscription_cli_command,
 )
 from src.tools import CommandResult, ToolError, WorkspaceTools
 from src.tui import ConfigurationApp, run_tui
@@ -171,15 +173,67 @@ def test_compatible_model_and_safety_configuration_round_trip(tmp_path: Path) ->
     assert load_config(path) == config
 
 
-def test_empty_seeded_configuration_is_replaced_with_defaults(tmp_path: Path) -> None:
+def test_empty_seeded_configuration_is_replaced_with_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / ".agent" / "config.toml"
     path.parent.mkdir()
     path.touch()
+    monkeypatch.setattr("src.tooling.host_subscription_cli_ready", lambda **_: False)
 
     config = load_config(path)
 
     assert config.runtime_root == path.parent
+    assert config.model.runtime == "agents-sdk"
     assert path.read_text(encoding="utf-8").startswith('runtime_root = "')
+
+
+def test_empty_seeded_configuration_defaults_to_subscription_cli_when_host_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / ".agent" / "config.toml"
+    path.parent.mkdir()
+    path.touch()
+    monkeypatch.setattr("src.tooling.host_subscription_cli_ready", lambda **_: True)
+
+    config = load_config(path)
+
+    assert config.model.runtime == "subscription-cli"
+    assert config.model.subscription_command == ["codex", "--yolo"]
+
+
+def test_subscription_cli_command_adds_yolo_for_codex() -> None:
+    assert subscription_cli_command(["codex"]) == ["codex", "--yolo"]
+    assert subscription_cli_command(["codex", "--yolo"]) == ["codex", "--yolo"]
+    assert subscription_cli_command(["other-cli"]) == ["other-cli"]
+
+
+def test_probe_subscription_cli_reports_missing_command_and_auth(tmp_path: Path) -> None:
+    assert probe_subscription_cli([], runner=subprocess.run).ready is False
+
+    def runner(command, **_kwargs):  # noqa: ANN001, ANN202
+        if command[:3] == ["codex", "login", "status"]:
+            return subprocess.CompletedProcess(command, 1, "", "Not logged in")
+        raise AssertionError(command)
+
+    result = probe_subscription_cli(["codex"], runner=runner)
+    assert not result.ready
+    assert "Not logged in" in result.message
+
+
+def test_probe_subscription_cli_can_run_exec_probe() -> None:
+    def runner(command, *, cwd, input="", **_kwargs):  # noqa: ANN001, ANN202
+        if command[:3] == ["codex", "login", "status"]:
+            return subprocess.CompletedProcess(command, 0, "Logged in using ChatGPT", "")
+        if command[:3] == ["codex", "--yolo", "exec"]:
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text('{"ok": true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    result = probe_subscription_cli(["codex"], runner=runner, exec_test=True)
+    assert result.ready
+    assert "exec probe succeeded" in result.message
 
 
 def test_repository_tooling_delegates_to_seed_and_graph_commands(tmp_path: Path) -> None:
@@ -192,10 +246,9 @@ def test_repository_tooling_delegates_to_seed_and_graph_commands(tmp_path: Path)
     tree = capture_structured_tree(tmp_path, tmp_path / "out" / "structure.seed", runner=runner)
     graphs = build_repository_graphs(tmp_path, runner=runner)
 
-    assert tree.succeeded and all(result.succeeded for result in graphs)
+    assert tree.succeeded and graphs.succeeded
     assert calls[0][0][:2] == ["seed", "capture"]
-    assert calls[1][0][:2] == ["graphify", "extract"]
-    assert calls[2][0][:2] == ["code-review-graph", "build"]
+    assert calls[1][0][:2] == ["code-review-graph", "build"]
     assert all(cwd == tmp_path.resolve() for _, cwd in calls)
 
 
@@ -321,9 +374,7 @@ def test_clone_pull_and_index_repository(tmp_path: Path) -> None:
     )
     assert setup.succeeded and setup.path == target.resolve()
     assert calls[0][:2] == ["git", "clone"]
-    assert calls[1][:2] == ["graphify", "extract"]
-    assert "--code-only" in calls[1]
-    assert calls[2][:2] == ["code-review-graph", "build"]
+    assert calls[1][:2] == ["code-review-graph", "build"]
 
     calls.clear()
     refreshed = clone_and_index_repository("unused", target, runner=runner)
@@ -338,7 +389,7 @@ def test_clone_pull_and_index_repository(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(command, 3, "", "clone failed")
 
     failed = clone_and_index_repository("bad", tmp_path / "failed", runner=failed_clone)
-    assert not failed.succeeded and failed.graphify is None
+    assert not failed.succeeded and failed.code_review_graph is None
 
 
 def test_storage_creation_dedup_transition_events_and_sessions(
@@ -915,8 +966,8 @@ def test_repository_graph_and_structure_adapters(tmp_path: Path) -> None:
 
     result = capture_structured_tree(tmp_path, tmp_path / "structure.seed", runner=runner)
     assert result.succeeded and calls[0][0][:2] == ["seed", "capture"]
-    graphify, review_graph = build_repository_graphs(tmp_path, runner=runner)
-    assert graphify.succeeded and review_graph.succeeded and len(calls) == 3
+    review_graph = build_repository_graphs(tmp_path, runner=runner)
+    assert review_graph.succeeded and len(calls) == 2
     with pytest.raises(NotADirectoryError):
         capture_structured_tree(tmp_path / "missing", runner=runner)
     assert parse_arguments(["index", "repo"]).path == Path("repo")
@@ -930,7 +981,7 @@ def test_builtin_skill_manifest_and_routing_are_complete() -> None:
         "coding",
         "deployment-verification",
         "github",
-        "graphify",
+        "code-review-graph",
         "incident-investigation",
         "review-comments",
         "testing",
@@ -1161,7 +1212,7 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "no production writes" in calls[0]
     assert "run tests before publishing" in calls[0]
     assert "Required Repository Graph Check" in calls[0]
-    assert "# /graphify" in calls[0]
+    assert "# Code Review Graph" in calls[0]
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
@@ -1177,17 +1228,15 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
 
 
 @pytest.mark.asyncio
-async def test_agent_preloads_both_fresh_repository_graphs(
+async def test_agent_preloads_fresh_code_review_graph(
     config: Config, incident: Incident, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     storage = Storage(config.runtime_root)
     task = storage.create_task(incident)
     worktree = storage.root / "worktrees" / task.task_id
-    (worktree / "graphify-out").mkdir(parents=True)
-    (worktree / "graphify-out" / "graph.json").write_text("{}")
+    worktree.mkdir(parents=True)
     (worktree / ".code-review-graph").mkdir()
     (worktree / ".code-review-graph" / "graph.db").write_bytes(b"")
-    shell = AsyncMock(return_value=CommandResult("graphify", 0, "graph route", ""))
 
     import code_review_graph.tools as graph_tools
 
@@ -1197,19 +1246,21 @@ async def test_agent_preloads_both_fresh_repository_graphs(
         lambda **values: {"summary": "code route", "query": values["query"]},
     )
     context = await IncidentAgent._graph_context(  # noqa: SLF001
-        task, worktree, types.SimpleNamespace(shell=shell)
+        task, worktree, types.SimpleNamespace()
     )
-    assert "graph route" in context and "code route" in context
-    assert incident.summary in shell.await_args.args[0]
+    assert "code route" in context and task.summary in context
 
-    shell.return_value = CommandResult("graphify", 2, "", "query failed")
-    assert "query failed" in await IncidentAgent._graph_context(  # noqa: SLF001
-        task, worktree, types.SimpleNamespace(shell=shell)
+    monkeypatch.setattr(
+        graph_tools,
+        "semantic_search_nodes",
+        lambda **values: {"error": "query failed", "query": values["query"]},
     )
-    (worktree / "graphify-out" / "graph.json").unlink()
+    assert "query failed" in await IncidentAgent._graph_context(  # noqa: SLF001
+        task, worktree, types.SimpleNamespace()
+    )
     (worktree / ".code-review-graph" / "graph.db").unlink()
     assert not await IncidentAgent._graph_context(  # noqa: SLF001
-        task, worktree, types.SimpleNamespace(shell=shell)
+        task, worktree, types.SimpleNamespace()
     )
 
 
@@ -1234,7 +1285,7 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
         side_effect=lambda command: CommandResult(
             command,
             0,
-            "graph result" if command.startswith("graphify query") else str(tmp_path),
+            str(tmp_path),
             "",
         )
     )
@@ -1301,7 +1352,6 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
                     write,
                     replace,
                     recall,
-                    graphify,
                     search,
                     query,
                     impact,
@@ -1313,7 +1363,6 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
                 assert replace("example.txt", "old", "new") == "replaced"
                 assert "checkout:2" in recall("checkout", 2)
                 assert "returncode" in await shell("pwd")
-                assert await graphify("checkout failure") == "graph result"
                 assert json.loads(search("checkout", "Function", 3))["operation"] == "search"
                 assert json.loads(query("callers_of", "checkout"))["operation"] == "query"
                 assert json.loads(impact(["checkout.py"], 3))["operation"] == "impact"
@@ -1674,7 +1723,9 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
         await pilot.click("#model")
         await pilot.press("end", "ctrl+u", *"new-model")
         assert model_input.value == "new-model"
-        model_sections = [widget.region for widget in app.query("#model-tab .section")]
+        model_sections = [
+            widget.region for widget in app.query("#model-tab .section") if widget.display
+        ]
         assert all(
             current.y + current.height <= following.y
             for current, following in zip(model_sections, model_sections[1:], strict=False)
@@ -1731,6 +1782,45 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
     assert saved.server.port == 9876
     assert saved.safety.positive_goals == ["restore service", "pass tests"]
     assert saved.agent.system_prompt == "Use the configured incident policy."
+
+
+@pytest.mark.asyncio
+async def test_tui_subscription_cli_probe_and_runtime_sections(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path,
+            model=ModelConfig(runtime="subscription-cli", subscription_command=["codex"]),
+        ),
+        path,
+    )
+
+    def runner(command, **_kwargs):  # noqa: ANN001, ANN202
+        if command[:3] == ["codex", "login", "status"]:
+            return subprocess.CompletedProcess(command, 0, "Logged in using ChatGPT", "")
+        if command[:3] == ["codex", "--yolo", "exec"]:
+            output_path = Path(command[command.index("--output-last-message") + 1])
+            output_path.write_text('{"ok": true}', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+        raise AssertionError(command)
+
+    app = ConfigurationApp(path, command_runner=runner)
+    async with app.run_test() as pilot:
+        assert app.query_one("#subscription-section").display is True
+        assert app.query_one("#agents-sdk-endpoint-section").display is False
+        await pilot.pause(0.05)
+        host_status = app.query_one("#subscription-host-status", Static).render().plain
+        assert "authenticated" in host_status.lower()
+
+        app.query_one("#test-subscription-cli", Button).press()
+        await pilot.pause(0.05)
+        status = app.query_one("#subscription-status", Static).render().plain
+        assert "exec probe succeeded" in status
+
+        app.query_one("#model-runtime", Select).value = "agents-sdk"
+        await pilot.pause()
+        assert app.query_one("#subscription-section").display is False
+        assert app.query_one("#agents-sdk-endpoint-section").display is True
 
 
 @pytest.mark.asyncio
@@ -1806,7 +1896,7 @@ async def test_tui_github_repository_setup_and_connection_test(tmp_path: Path) -
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(command, 0, "cloned", "")
-        if command[:2] == ["graphify", "extract"] and mode == "graph-failure":
+        if command[:2] == ["code-review-graph", "build"] and mode == "graph-failure":
             return subprocess.CompletedProcess(command, 4, "", "graph failed")
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
@@ -1840,7 +1930,6 @@ async def test_tui_github_repository_setup_and_connection_test(tmp_path: Path) -
         saved = load_config(path)
         assert saved.repositories[0].name == "company/application"
         assert Path(saved.repositories[0].local_path or "").is_dir()
-        assert any(command[:2] == ["graphify", "extract"] for command in calls)
         assert any(command[:2] == ["code-review-graph", "build"] for command in calls)
 
         app.query_one(TabbedContent).active = "connections-tab"
@@ -1889,7 +1978,7 @@ async def test_tui_repository_and_github_failures_are_reported(tmp_path: Path) -
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(command, 0, "", "")
-        if command[:2] == ["graphify", "extract"]:
+        if command[:2] == ["code-review-graph", "build"]:
             return subprocess.CompletedProcess(command, 4, "", "graph failed")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -2012,14 +2101,15 @@ def test_cli_tree_index_output_and_failures(tmp_path: Path, capsys) -> None:
         pytest.raises(SystemExit, match="7"),
     ):
         main(["tree", str(tmp_path)])
+    capsys.readouterr()
 
-    with patch("src.__main__.build_repository_graphs", return_value=(success, success)):
+    with patch("src.__main__.build_repository_graphs", return_value=success):
         main(["index", str(tmp_path)])
     captured = capsys.readouterr()
-    assert captured.out == "stdout\nstdout\n"
-    assert captured.err == "failed\nstderr\nstderr\n"
+    assert captured.out == "stdout\n"
+    assert captured.err == "stderr\n"
     with (
-        patch("src.__main__.build_repository_graphs", return_value=(success, failure)),
+        patch("src.__main__.build_repository_graphs", return_value=failure),
         pytest.raises(SystemExit, match="7"),
     ):
         main(["index", str(tmp_path)])
@@ -2434,7 +2524,7 @@ async def test_workflow_indexes_latest_worktree_before_investigation(
 
     def indexer(path: Path):
         calls.append(path)
-        return success, success
+        return success
 
     workflow = WorkflowEngine(
         config,
@@ -2451,14 +2541,14 @@ async def test_workflow_indexes_latest_worktree_before_investigation(
     graph_events = [
         event for event in storage.events(task.task_id) if "graph_indexed" in event.type
     ]
-    assert len(graph_events) == 2
+    assert len(graph_events) == 1
     await workflow._worktree(processed)  # noqa: SLF001
     assert len(calls) == 1
 
     failure_incident = incident.model_copy(update={"external_id": "INC-graph-failure"})
     failed_task = storage.create_task(failure_incident)
-    failure = ToolResult(("graphify",), 2, "", "broken graph")
-    workflow.repository_indexer = lambda _path: (failure, success)
+    failure = ToolResult(("code-review-graph",), 2, "", "broken graph")
+    workflow.repository_indexer = lambda _path: failure
     failed = await workflow.process(failed_task.task_id)
     assert failed.state == TaskState.RECEIVED
     assert "graph generation failed" in (failed.error or "")
@@ -2535,8 +2625,6 @@ async def test_local_repository_branch_commit_and_local_pr(
     worktree = storage.create_worktree(task, base_branch="main")
     assert task.branch and task.branch.startswith("agent/inc-bad-ref-lock-")
     (worktree / "FIX.md").write_text("local fix\n")
-    (worktree / "graphify-out").mkdir()
-    (worktree / "graphify-out" / "graph.json").write_text("{}")
     (worktree / ".code-review-graph").mkdir()
     (worktree / ".code-review-graph" / "graph.db").write_bytes(b"graph")
     storage.transition(task.task_id, TaskState.PUBLISHING_PR)
@@ -2565,7 +2653,7 @@ async def test_local_repository_branch_commit_and_local_pr(
         text=True,
     ).stdout.splitlines()
     assert "FIX.md" in committed_files
-    assert not any("graphify" in path or "code-review-graph" in path for path in committed_files)
+    assert not any("harness-out" in path or "code-review-graph" in path for path in committed_files)
 
 
 def test_incident_worktree_pulls_latest_remote_before_branching(

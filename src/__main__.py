@@ -49,7 +49,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     )
     run = commands.add_parser("run", help="submit an incident JSON file")
     run.add_argument("incident", type=Path)
-    index = commands.add_parser("index", help="build graphify and code-review-graph indexes")
+    index = commands.add_parser("index", help="build the code-review-graph index")
     index.add_argument("path", type=Path, nargs="?", default=Path("."))
     tree = commands.add_parser("tree", help="capture a structured tree with seed-cli")
     tree.add_argument("path", type=Path, nargs="?", default=Path("."))
@@ -109,15 +109,13 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(result.returncode or 1)
         return
     if args.command == "index":
-        results = build_repository_graphs(args.path)
-        for result in results:
-            if result.stdout:
-                print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
-        if any(not result.succeeded for result in results):
-            code = next(result.returncode for result in results if result.returncode) or 1
-            raise SystemExit(code)
+        result = build_repository_graphs(args.path)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if not result.succeeded:
+            raise SystemExit(result.returncode or 1)
         return
     if args.command == "export-systemd-env":
         from .systemd_env import default_secrets_paths
