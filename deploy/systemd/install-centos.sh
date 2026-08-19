@@ -12,6 +12,7 @@ UNIT_DIR="/etc/systemd/system"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 UV_BIN="$(command -v uv)"
+VENV_BIN="${INSTALL_ROOT}/.venv/bin"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: sudo $0" >&2
@@ -62,23 +63,26 @@ prepare_owned_dir "${SERVICE_HOME}"
 prepare_owned_dir "${SERVICE_HOME}/.ssh"
 prepare_owned_dir "${SERVICE_HOME}/.cache"
 
-echo "==> Installing application to ${INSTALL_ROOT}"
+echo "==> Syncing application to ${INSTALL_ROOT}"
 install -d -m 0755 "${INSTALL_ROOT}"
-if [[ ! -f "${INSTALL_ROOT}/pyproject.toml" ]]; then
-  rsync -a --delete \
-    --exclude .agent \
-    --exclude .venv \
-    --exclude .git \
-    "${REPO_ROOT}/" "${INSTALL_ROOT}/"
-fi
+rsync -a --delete \
+  --exclude .agent \
+  --exclude .venv \
+  --exclude .git \
+  "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 prepare_owned_dir "${INSTALL_ROOT}/.agent"
 
-echo "==> Creating virtualenv and syncing dependencies"
+echo "==> Creating virtualenv, syncing dependencies, and initializing .agent"
 install_uv_if_needed
 (
   cd "${INSTALL_ROOT}"
+  export PATH="${VENV_BIN}:${PATH}"
   "${UV_BIN}" sync
-  "${INSTALL_ROOT}/.venv/bin/incident-agent" init
+  if [[ ! -x "${VENV_BIN}/seed" ]]; then
+    echo "Missing ${VENV_BIN}/seed after uv sync." >&2
+    exit 1
+  fi
+  "${VENV_BIN}/incident-agent" init
 )
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 

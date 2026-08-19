@@ -72,6 +72,17 @@ def _validate_base(base: Path | str) -> Path:
     return path
 
 
+def _tool_executable(name: str) -> str:
+    """Resolve a project CLI next to the running interpreter, then fall back to PATH."""
+    import sys
+
+    sibling = Path(sys.executable).resolve().with_name(name)
+    if sibling.is_file():
+        return str(sibling)
+    resolved = shutil.which(name)
+    return resolved or name
+
+
 def _run(command: Sequence[str], cwd: Path, runner: CommandRunner) -> ToolResult:
     try:
         completed = runner(
@@ -104,7 +115,7 @@ def capture_structured_tree(
         destination = (Path.cwd() / destination).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     return _run(
-        ("seed", "capture", "--base", str(root), "--out", str(destination)),
+        (_tool_executable("seed"), "capture", "--base", str(root), "--out", str(destination)),
         cwd=root,
         runner=runner,
     )
@@ -126,7 +137,7 @@ def initialise_runtime_tree(
         raise FileNotFoundError(seed_spec)
     return _run(
         (
-            "seed",
+            _tool_executable("seed"),
             "create",
             "--template",
             str(seed_spec),
@@ -147,7 +158,7 @@ def build_repository_graphs(
     """Build the code-review-graph index for ``base``."""
     root = _validate_base(base)
     return _run(
-        ("code-review-graph", "build", "--repo", str(root)),
+        (_tool_executable("code-review-graph"), "build", "--repo", str(root)),
         cwd=root,
         runner=runner,
     )

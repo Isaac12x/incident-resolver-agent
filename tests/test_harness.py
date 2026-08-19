@@ -247,8 +247,10 @@ def test_repository_tooling_delegates_to_seed_and_graph_commands(tmp_path: Path)
     graphs = build_repository_graphs(tmp_path, runner=runner)
 
     assert tree.succeeded and graphs.succeeded
-    assert calls[0][0][:2] == ["seed", "capture"]
-    assert calls[1][0][:2] == ["code-review-graph", "build"]
+    assert Path(calls[0][0][0]).name == "seed"
+    assert calls[0][0][1] == "capture"
+    assert Path(calls[1][0][0]).name == "code-review-graph"
+    assert calls[1][0][1] == "build"
     assert all(cwd == tmp_path.resolve() for _, cwd in calls)
 
 
@@ -262,20 +264,17 @@ def test_runtime_initialisation_delegates_to_seed_template(tmp_path: Path) -> No
     result = initialise_runtime_tree(tmp_path, runner=runner)
 
     assert result.succeeded
-    assert calls == [
-        (
-            [
-                "seed",
-                "create",
-                "--template",
-                str(Path("src/runtime.tree").resolve()),
-                "--base",
-                str(tmp_path.resolve()),
-                "runtime_root=.agent",
-            ],
-            tmp_path.resolve(),
-        )
+    command, cwd = calls[0]
+    assert Path(command[0]).name == "seed"
+    assert command[1:] == [
+        "create",
+        "--template",
+        str(Path("src/runtime.tree").resolve()),
+        "--base",
+        str(tmp_path.resolve()),
+        "runtime_root=.agent",
     ]
+    assert cwd == tmp_path.resolve()
 
 
 def test_packaged_runtime_seed_matches_project_spec() -> None:
