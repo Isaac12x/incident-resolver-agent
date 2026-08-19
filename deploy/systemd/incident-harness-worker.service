@@ -16,7 +16,7 @@ Environment=CODEX_HOME=/var/lib/incident-harness/.codex
 RuntimeDirectory=incident-harness
 ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent init
 ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent export-systemd-env --output /run/incident-harness/environment
-EnvironmentFile=/run/incident-harness/environment
+EnvironmentFile=-/run/incident-harness/environment
 ExecStart=/opt/incident-harness/.venv/bin/incident-agent worker
 
 Restart=always
