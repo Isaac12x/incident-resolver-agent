@@ -78,6 +78,7 @@ install_uv_if_needed
 (
   cd "${INSTALL_ROOT}"
   "${UV_BIN}" sync
+  "${INSTALL_ROOT}/.venv/bin/incident-agent" init
 )
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
