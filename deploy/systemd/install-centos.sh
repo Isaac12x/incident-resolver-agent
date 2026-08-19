@@ -48,9 +48,12 @@ ensure_service_user() {
   fi
 }
 
-run_as_service_user() {
-  runuser -u "${SERVICE_USER}" -w "${INSTALL_ROOT}" -- \
-    env HOME="${SERVICE_HOME}" PATH="${PATH}" "$@"
+install_uv_if_needed() {
+  if [[ "${UV_BIN}" == /root/* ]] && [[ ! -x /usr/local/bin/uv ]]; then
+    echo "==> Installing uv to /usr/local/bin (root-only install is not usable by ${SERVICE_USER})"
+    install -m 0755 "${UV_BIN}" /usr/local/bin/uv
+    UV_BIN="/usr/local/bin/uv"
+  fi
 }
 
 echo "==> Ensuring service user and home (${SERVICE_HOME})"
@@ -69,10 +72,14 @@ if [[ ! -f "${INSTALL_ROOT}/pyproject.toml" ]]; then
     "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 fi
 prepare_owned_dir "${INSTALL_ROOT}/.agent"
-chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
 echo "==> Creating virtualenv and syncing dependencies"
-run_as_service_user "${UV_BIN}" sync
+install_uv_if_needed
+(
+  cd "${INSTALL_ROOT}"
+  "${UV_BIN}" sync
+)
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
 echo "==> Installing systemd units and environment template"
 install -d -m 0750 "${ENV_DIR}"
