@@ -25,6 +25,8 @@ class ConnectorManager:
         self,
         configs: list[ConnectorConfig],
         factories: dict[str, Callable[[ConnectorConfig], Awaitable[Any]]] | None = None,
+        *,
+        default_repository: str | None = None,
     ) -> None:
         self.configs = {config.name: config for config in configs}
         self.factories = {
@@ -33,6 +35,7 @@ class ConnectorManager:
         self.factories.update(factories or {})
         self.sessions: dict[str, Any] = {}
         self.errors: dict[str, str] = {}
+        self.default_repository = default_repository
 
     @staticmethod
     async def _mcp_factory(config: ConnectorConfig) -> Any:
@@ -123,6 +126,8 @@ class ConnectorManager:
     def normalize_incident(self, name: str, payload: dict[str, Any]) -> Incident:
         if name not in self.configs:
             raise KeyError(f"connector is not configured: {name}")
+        if "alerts" in payload and not payload.get("external_id"):
+            payload = self._normalize_grafana_payload(payload)
         required = ("external_id", "repository", "environment", "summary")
         missing = [key for key in required if not payload.get(key)]
         if missing:
@@ -140,3 +145,54 @@ class ConnectorManager:
         if payload.get("received_at"):
             values["received_at"] = payload["received_at"]
         return Incident(**values)
+
+    def _normalize_grafana_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Translate a native Grafana Alerting webhook into incident fields."""
+        alerts = payload.get("alerts")
+        if not isinstance(alerts, list) or not alerts:
+            raise ValueError("Grafana webhook contains no alerts")
+        alert = next(
+            (
+                item
+                for item in alerts
+                if isinstance(item, dict) and item.get("status") == "firing"
+            ),
+            alerts[0],
+        )
+        if not isinstance(alert, dict):
+            raise ValueError("Grafana webhook alert must be an object")
+        labels = {
+            **(payload.get("commonLabels") or {}),
+            **(alert.get("labels") or {}),
+        }
+        annotations = {
+            **(payload.get("commonAnnotations") or {}),
+            **(alert.get("annotations") or {}),
+        }
+        repository = labels.get("repository") or labels.get("repo") or self.default_repository
+        summary = (
+            annotations.get("summary")
+            or payload.get("title")
+            or labels.get("alertname")
+            or payload.get("message")
+        )
+        external_id = alert.get("fingerprint") or payload.get("groupKey")
+        normalized = {
+            "external_id": external_id,
+            "repository": repository,
+            "environment": labels.get("environment") or labels.get("env") or "production",
+            "summary": summary,
+            "description": annotations.get("description") or payload.get("message") or "",
+            "evidence": [
+                {
+                    "kind": "grafana_alert",
+                    "content": annotations.get("description") or payload.get("message"),
+                    "url": alert.get("generatorURL") or payload.get("externalURL"),
+                    "metadata": {
+                        "status": alert.get("status") or payload.get("status"),
+                        "labels": labels,
+                    },
+                }
+            ],
+        }
+        return normalized

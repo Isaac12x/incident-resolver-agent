@@ -222,7 +222,10 @@ class GitHubConfig(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    host: str = "127.0.0.1"
+    # The systemd deployment is an incident intake service. Bind on all
+    # interfaces by default so an external alert producer can reach it; the
+    # installer documents the fixed intake port and authentication boundary.
+    host: str = "0.0.0.0"
     port: int = Field(8765, ge=1, le=65535)
     public_url: str | None = None
     webhook_secret_env: str = "AGENT_WEBHOOK_SECRET"

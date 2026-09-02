@@ -42,6 +42,11 @@ def service_base_url(config: Config) -> str:
     """Return the local health-check URL derived from server settings in config."""
     if config.server.public_url:
         return config.server.public_url.rstrip("/")
+    return local_service_base_url(config)
+
+
+def local_service_base_url(config: Config) -> str:
+    """Return a loopback URL for checking the process bound on this host."""
     host = config.server.host
     if host in {"0.0.0.0", "::"}:
         host = "127.0.0.1"

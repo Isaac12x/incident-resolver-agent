@@ -18,36 +18,75 @@ from .models import Incident
 
 
 def create_server(application: Application, *, run_worker: bool = True) -> FastAPI:
+    worker_task: asyncio.Task[None] | None = None
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        nonlocal worker_task
         await application.connectors.start()
-        worker = asyncio.create_task(application.workflow.run_worker()) if run_worker else None
+        worker_task = (
+            asyncio.create_task(application.workflow.run_worker()) if run_worker else None
+        )
         yield
         application.workflow.stop()
-        if worker:
-            await worker
+        if worker_task:
+            await worker_task
         await application.connectors.stop()
 
     server = FastAPI(title="Incident Harness", version="0.1.0", lifespan=lifespan)
 
     @server.get("/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok"}
+    async def health() -> JSONResponse:
+        connector_errors = dict(application.connectors.errors)
+        worker_status = "external"
+        worker_error: str | None = None
+        if run_worker:
+            if worker_task is None:
+                worker_status = "starting"
+            elif worker_task.done():
+                worker_status = "failed"
+                if not worker_task.cancelled() and (error := worker_task.exception()):
+                    worker_error = str(error)
+            else:
+                worker_status = "running"
+        ready = not connector_errors and worker_status not in {"starting", "failed"}
+        body: dict[str, Any] = {
+            "status": "ok" if ready else "unavailable",
+            "worker": worker_status,
+            "connectors": "ok" if not connector_errors else "failed",
+        }
+        if connector_errors:
+            body["connector_errors"] = connector_errors
+        if worker_error:
+            body["worker_error"] = worker_error
+        return JSONResponse(body, status_code=200 if ready else 503)
 
     incident_hook_path = f"{application.config.trigger.hook_path}/{{connector}}"
 
     @server.post(incident_hook_path, status_code=status.HTTP_202_ACCEPTED)
     async def incident_webhook(
-        connector: str, request: Request, x_agent_signature_256: str = Header(default="")
+        connector: str,
+        request: Request,
+        x_agent_signature_256: str = Header(default=""),
+        x_grafana_alerting_signature: str = Header(default=""),
     ) -> dict[str, str]:
         body = await request.body()
         secret = os.getenv(application.config.server.webhook_secret_env)
         if secret:
-            expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected, x_agent_signature_256):
+            digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            provided = x_agent_signature_256 or x_grafana_alerting_signature
+            if provided.startswith("sha256="):
+                provided = provided.removeprefix("sha256=")
+            if not hmac.compare_digest(digest, provided):
                 raise HTTPException(status_code=401, detail="invalid webhook signature")
         try:
             payload = await request.json()
+            alerts = payload.get("alerts")
+            if isinstance(alerts, list) and alerts and not any(
+                isinstance(alert, dict) and alert.get("status") == "firing"
+                for alert in alerts
+            ):
+                return {"task_id": "", "state": "ignored"}
             incident = application.connectors.normalize_incident(connector, payload)
             task = await application.workflow.submit(incident)
         except (KeyError, ValueError) as error:

@@ -120,6 +120,9 @@ def test_configuration_round_trip_and_validation(config: Config, tmp_path: Path)
     assert any("Do not fabricate" in goal for goal in created.safety.negative_goals)
     assert any("exact current pull-request SHA" in rule for rule in created.safety.guardrails)
     assert any("both repository graphs" in check for check in created.safety.safeguards)
+    assert created.server.host == "0.0.0.0"
+    assert created.server.port == 8765
+    assert created.connectors == []
     another = Config()
     created.safety.positive_goals.append("task-specific goal")
     assert "task-specific goal" not in another.safety.positive_goals
@@ -145,6 +148,27 @@ def test_environment_template_contains_only_runtime_variables() -> None:
         "AGENT_WEBHOOK_SECRET",
         "GITHUB_WEBHOOK_SECRET",
     }
+
+
+def test_systemd_install_is_ready_and_uses_one_service_layout() -> None:
+    installer = Path("deploy/systemd/install-centos.sh").read_text(encoding="utf-8")
+    combined = Path("deploy/systemd/incident-harness.service").read_text(encoding="utf-8")
+    intake = Path("deploy/systemd/incident-harness-http.service").read_text(encoding="utf-8")
+    worker = Path("deploy/systemd/incident-harness-worker.service").read_text(encoding="utf-8")
+    target = Path("deploy/systemd/incident-harness.target").read_text(encoding="utf-8")
+
+    assert 'install -d -m 0750 -o root -g "${SERVICE_USER}" "${ENV_DIR}"' in installer
+    assert 'SERVICE_LAYOUT="${INCIDENT_HARNESS_LAYOUT:-combined}"' in installer
+    assert "systemctl enable --now incident-harness.service" in installer
+    assert "systemctl enable --now incident-harness.target" in installer
+    assert "healthcheck --timeout 30" in installer
+    assert "Conflicts=incident-harness.target" in combined
+    assert "ExecStartPost=" in combined and "healthcheck --timeout 30" in combined
+    assert "Restart=on-failure" in combined
+    assert "Conflicts=incident-harness.service" in intake
+    assert "Conflicts=incident-harness.service" in worker
+    assert "Conflicts=incident-harness.service" in target
+    assert "Requires=incident-harness-http.service incident-harness-worker.service" in target
 
 
 def test_compatible_model_and_safety_configuration_round_trip(tmp_path: Path) -> None:
@@ -286,6 +310,8 @@ def test_packaged_runtime_seed_matches_project_spec() -> None:
 def test_repository_tooling_validates_paths_and_reports_failures(tmp_path: Path) -> None:
     with pytest.raises(NotADirectoryError):
         capture_structured_tree(tmp_path / "missing")
+    with pytest.raises(FileNotFoundError):
+        initialise_runtime_tree(tmp_path, spec=tmp_path / "missing.tree")
 
     def failing_runner(command, *, cwd, **_kwargs):  # noqa: ANN001, ANN202
         return subprocess.CompletedProcess(command, 7, "", "failed")
@@ -373,7 +399,8 @@ def test_clone_pull_and_index_repository(tmp_path: Path) -> None:
     )
     assert setup.succeeded and setup.path == target.resolve()
     assert calls[0][:2] == ["git", "clone"]
-    assert calls[1][:2] == ["code-review-graph", "build"]
+    assert Path(calls[1][0]).name == "code-review-graph"
+    assert calls[1][1] == "build"
 
     calls.clear()
     refreshed = clone_and_index_repository("unused", target, runner=runner)
@@ -802,7 +829,18 @@ def test_server_health_submission_resources_and_github_security(
     application = Application(config, storage, connectors, github, agent, verifier, workflow)
     server = create_server(application, run_worker=False)
     with TestClient(server) as client:
-        assert client.get("/health").json() == {"status": "ok"}
+        assert client.get("/health").json() == {
+            "status": "ok",
+            "worker": "external",
+            "connectors": "ok",
+        }
+        connectors.errors["observability"] = "connection refused"
+        unavailable = client.get("/health")
+        assert unavailable.status_code == 503
+        assert unavailable.json()["connector_errors"] == {
+            "observability": "connection refused"
+        }
+        connectors.errors.clear()
         response = client.post("/mcp/tools/submit_incident", json=incident.model_dump(mode="json"))
         assert response.status_code == 200
         task_id = response.json()["task_id"]
@@ -829,6 +867,19 @@ def test_server_health_submission_resources_and_github_security(
         assert client.post("/hooks/incidents/missing", json={}).status_code == 422
 
 
+def test_combined_server_health_reports_the_worker(config: Config) -> None:
+    storage = Storage(config.runtime_root)
+    connectors = ConnectorManager(config.connectors)
+    github = FakeGitHub(config.github, webhook_secret="secret")
+    verifier = FakeVerifier(config)
+    agent = IncidentAgent(config, storage, connectors)
+    workflow = WorkflowEngine(config, storage, agent, github, verifier)
+    application = Application(config, storage, connectors, github, agent, verifier, workflow)
+
+    with TestClient(create_server(application)) as client:
+        assert client.get("/health").json()["worker"] == "running"
+
+
 def test_cli_parsing() -> None:
     assert parse_arguments(["init"]).command == "init"
     assert parse_arguments(["serve", "--no-worker"]).no_worker
@@ -836,6 +887,26 @@ def test_cli_parsing() -> None:
     assert parse_arguments(["run", "incident.json"]).incident == Path("incident.json")
     assert parse_arguments(["export-systemd-env"]).command == "export-systemd-env"
     assert parse_arguments(["service-url"]).command == "service-url"
+    assert parse_arguments(["healthcheck", "--timeout", "5"]).timeout == 5
+
+
+def test_cli_healthcheck_uses_configured_local_service_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path = tmp_path / "config.toml"
+    save_config(Config(), config_path)
+    response = Mock(status=200)
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    open_url = Mock(return_value=response)
+    monkeypatch.setattr("src.__main__.urllib.request.urlopen", open_url)
+
+    main(["--config", str(config_path), "healthcheck", "--timeout", "1"])
+
+    open_url.assert_called_once_with("http://127.0.0.1:8765/health", timeout=2)
+
+    with pytest.raises(SystemExit, match="health check failed"):
+        main(["--config", str(config_path), "healthcheck", "--timeout", "0"])
 
 
 def test_systemd_env_export_follows_tui_config(
@@ -845,6 +916,7 @@ def test_systemd_env_export_follows_tui_config(
     from src.systemd_env import (
         build_systemd_environment,
         export_systemd_environment,
+        local_service_base_url,
         referenced_env_vars,
         service_base_url,
     )
@@ -886,6 +958,7 @@ def test_systemd_env_export_follows_tui_config(
         }
     )
     assert service_base_url(config) == "https://incidents.example.com"
+    assert local_service_base_url(config) == "http://127.0.0.1:9876"
 
     secrets_path = tmp_path / "secrets.env"
     secrets_path.write_text(
@@ -964,7 +1037,8 @@ def test_repository_graph_and_structure_adapters(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
     result = capture_structured_tree(tmp_path, tmp_path / "structure.seed", runner=runner)
-    assert result.succeeded and calls[0][0][:2] == ["seed", "capture"]
+    assert result.succeeded
+    assert Path(calls[0][0][0]).name == "seed" and calls[0][0][1] == "capture"
     review_graph = build_repository_graphs(tmp_path, runner=runner)
     assert review_graph.succeeded and len(calls) == 2
     with pytest.raises(NotADirectoryError):
@@ -1719,7 +1793,8 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
         model_input = app.query_one("#model", Input)
         model_input.scroll_visible()
         await pilot.pause()
-        await pilot.click("#model")
+        model_input.focus()
+        await pilot.pause()
         await pilot.press("end", "ctrl+u", *"new-model")
         assert model_input.value == "new-model"
         model_sections = [
@@ -1828,6 +1903,7 @@ async def test_tui_reports_incomplete_local_model_without_crashing(tmp_path: Pat
     path = tmp_path / "config.toml"
     app = ConfigurationApp(path)
     async with app.run_test() as pilot:
+        app.query_one("#model-runtime", Select).value = "agents-sdk"
         app.query_one("#model-mode", Select).value = "local"
         app.query_one("#save", Button).press()
         await pilot.pause()
@@ -1896,7 +1972,11 @@ async def test_tui_github_repository_setup_and_connection_test(tmp_path: Path) -
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(command, 0, "cloned", "")
-        if command[:2] == ["code-review-graph", "build"] and mode == "graph-failure":
+        if (
+            Path(command[0]).name == "code-review-graph"
+            and command[1] == "build"
+            and mode == "graph-failure"
+        ):
             return subprocess.CompletedProcess(command, 4, "", "graph failed")
         return subprocess.CompletedProcess(command, 0, "ok", "")
 
@@ -1930,7 +2010,10 @@ async def test_tui_github_repository_setup_and_connection_test(tmp_path: Path) -
         saved = load_config(path)
         assert saved.repositories[0].name == "company/application"
         assert Path(saved.repositories[0].local_path or "").is_dir()
-        assert any(command[:2] == ["code-review-graph", "build"] for command in calls)
+        assert any(
+            Path(command[0]).name == "code-review-graph" and command[1] == "build"
+            for command in calls
+        )
 
         app.query_one(TabbedContent).active = "connections-tab"
         await pilot.pause()
@@ -1978,7 +2061,7 @@ async def test_tui_repository_and_github_failures_are_reported(tmp_path: Path) -
             target.mkdir(parents=True, exist_ok=True)
             (target / ".git").mkdir(exist_ok=True)
             return subprocess.CompletedProcess(command, 0, "", "")
-        if command[:2] == ["code-review-graph", "build"]:
+        if Path(command[0]).name == "code-review-graph" and command[1] == "build":
             return subprocess.CompletedProcess(command, 4, "", "graph failed")
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -2079,13 +2162,16 @@ def test_cli_initialises_missing_runtime_tree(
         main(["init"])
     initialise.assert_called_once_with()
     assert capsys.readouterr().out == "created\n"
+    generated = load_config(tmp_path / ".agent" / "config.toml")
+    assert generated.server.host == "0.0.0.0"
+    assert generated.connectors[0].name == "grafana"
 
     with (
         patch("src.__main__.initialise_runtime_tree", return_value=success) as initialise,
         patch("src.__main__.run_tui") as tui,
     ):
         main(["tui"])
-    initialise.assert_called_once_with()
+    initialise.assert_not_called()
     tui.assert_called_once()
 
 
@@ -2723,6 +2809,28 @@ def test_server_error_resources_and_signed_incident(
             ).status_code
             == 202
         )
+        grafana_signature = hmac.new(b"intake-secret", body, hashlib.sha256).hexdigest()
+        assert (
+            client.post(
+                "/custom/incidents/sentry",
+                content=body,
+                headers={"x-grafana-alerting-signature": grafana_signature},
+            ).status_code
+            == 202
+        )
+        resolved_body = json.dumps(
+            {"alerts": [{"status": "resolved", "fingerprint": "resolved-1"}]}
+        ).encode()
+        resolved_signature = hmac.new(
+            b"intake-secret", resolved_body, hashlib.sha256
+        ).hexdigest()
+        resolved = client.post(
+            "/custom/incidents/sentry",
+            content=resolved_body,
+            headers={"x-grafana-alerting-signature": resolved_signature},
+        )
+        assert resolved.status_code == 202
+        assert resolved.json() == {"task_id": "", "state": "ignored"}
         assert client.get("/mcp/resources/tasks/missing/events").status_code == 404
         assert client.get("/mcp/resources/tasks/missing/result").status_code == 404
         assert client.post("/mcp/tools/cancel_task/missing").status_code == 404

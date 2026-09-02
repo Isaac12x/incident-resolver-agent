@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import json
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 import uvicorn
@@ -13,7 +15,7 @@ import uvicorn
 from .app import Application
 from .models import Incident, TaskState
 from .server import create_server
-from .systemd_env import export_systemd_environment, service_base_url
+from .systemd_env import export_systemd_environment, local_service_base_url, service_base_url
 from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
 from .tui import run_tui
 
@@ -47,6 +49,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         "service-url",
         help="print the health-check URL from server settings in config",
     )
+    healthcheck = commands.add_parser(
+        "healthcheck",
+        help="wait for the configured HTTP service to become ready",
+    )
+    healthcheck.add_argument("--timeout", type=float, default=30.0)
     run = commands.add_parser("run", help="submit an incident JSON file")
     run.add_argument("incident", type=Path)
     index = commands.add_parser("index", help="build the code-review-graph index")
@@ -83,7 +90,8 @@ async def _run_direct(application: Application, path: Path) -> None:
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
     should_initialise = args.command == "init" or (
-        args.command not in {"index", "tree", "export-systemd-env", "service-url"}
+        args.command
+        not in {"index", "tree", "export-systemd-env", "service-url", "healthcheck"}
         and not Path(".agent").is_dir()
     )
     if should_initialise:
@@ -93,6 +101,17 @@ def main(argv: list[str] | None = None) -> None:
         if not result.succeeded:
             raise SystemExit(result.returncode or 1)
         if args.command == "init":
+            # seed creates the runtime files, including an empty config.toml.
+            # Persist operational defaults so a fresh install can start intake
+            # without first requiring an interactive TUI session.
+            from .config import ConnectorConfig, load_config, save_config
+
+            config = load_config(args.config)
+            if not config.connectors:
+                config.connectors.append(
+                    ConnectorConfig(name="grafana", purpose="incident", type="webhook")
+                )
+                save_config(config, args.config)
             if result.stdout:
                 print(result.stdout, end="")
             return
@@ -132,6 +151,23 @@ def main(argv: list[str] | None = None) -> None:
 
         print(service_base_url(load_config(args.config, create=False)))
         return
+    if args.command == "healthcheck":
+        from .config import load_config
+
+        config = load_config(args.config, create=False)
+        url = local_service_base_url(config).rstrip("/") + "/health"
+        deadline = time.monotonic() + args.timeout
+        last_error = "service did not respond"
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310
+                    if 200 <= response.status < 300:
+                        return
+                    last_error = f"health endpoint returned HTTP {response.status}"
+            except (OSError, TimeoutError) as error:
+                last_error = str(error)
+            time.sleep(0.25)
+        raise SystemExit(f"health check failed for {url}: {last_error}")
     application = Application.build(args.config)
     if args.command in {"serve", "mcp"}:
         server = create_server(application, run_worker=not getattr(args, "no_worker", False))

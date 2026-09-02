@@ -74,3 +74,40 @@ def test_fixture_incidents_normalize_through_connector_manager() -> None:
         normalized = manager.normalize_incident(connector, payload)
         assert normalized.external_id == payload["external_id"]
         assert normalized.source == connector
+
+
+def test_native_grafana_webhook_normalizes_to_an_incident() -> None:
+    manager = ConnectorManager(
+        [ConnectorConfig(name="grafana", purpose="incident", type="webhook")]
+    )
+    payload = json.loads((FIXTURES / "grafana_alert_webhook.json").read_text())
+
+    incident = manager.normalize_incident("grafana", payload)
+
+    assert incident.external_id == "grafana-agent-harness-1842"
+    assert incident.repository == "company/application"
+    assert incident.environment == "production"
+    assert incident.summary == "Agent harness error rate is elevated"
+    assert incident.evidence[0].kind == "grafana_alert"
+    assert incident.evidence[0].metadata["labels"]["service"] == "agent-harness"
+
+
+def test_native_grafana_webhook_requires_an_alert_object() -> None:
+    manager = ConnectorManager([ConnectorConfig(name="grafana", type="webhook")])
+    with pytest.raises(ValueError, match="contains no alerts"):
+        manager.normalize_incident("grafana", {"alerts": []})
+    with pytest.raises(ValueError, match="must be an object"):
+        manager.normalize_incident("grafana", {"alerts": ["bad"]})
+
+
+def test_native_grafana_webhook_uses_single_repository_default() -> None:
+    manager = ConnectorManager(
+        [ConnectorConfig(name="grafana", type="webhook")],
+        default_repository="company/application",
+    )
+    payload = json.loads((FIXTURES / "grafana_alert_webhook.json").read_text())
+    del payload["alerts"][0]["labels"]["repository"]
+
+    incident = manager.normalize_incident("grafana", payload)
+
+    assert incident.repository == "company/application"

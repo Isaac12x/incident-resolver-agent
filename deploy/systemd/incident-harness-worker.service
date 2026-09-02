@@ -4,6 +4,9 @@ Documentation=file:///opt/incident-harness/README.md
 After=network-online.target incident-harness-http.service
 Wants=network-online.target
 PartOf=incident-harness.target
+Conflicts=incident-harness.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -19,7 +22,7 @@ ExecStartPre=/opt/incident-harness/.venv/bin/incident-agent export-systemd-env -
 EnvironmentFile=-/run/incident-harness/environment
 ExecStart=/opt/incident-harness/.venv/bin/incident-agent worker
 
-Restart=always
+Restart=on-failure
 RestartSec=5
 KillMode=mixed
 TimeoutStopSec=300
