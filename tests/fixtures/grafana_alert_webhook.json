@@ -1,0 +1,29 @@
+{
+  "receiver": "incident-harness",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "AgentHarnessErrorRate",
+        "repository": "company/application",
+        "environment": "production",
+        "service": "agent-harness"
+      },
+      "annotations": {
+        "summary": "Agent harness error rate is elevated",
+        "description": "The agent harness exceeded its error-rate threshold."
+      },
+      "startsAt": "2026-08-30T10:00:00Z",
+      "generatorURL": "https://grafana.example.test/alerting/grafana/agent-harness/view",
+      "fingerprint": "grafana-agent-harness-1842"
+    }
+  ],
+  "groupLabels": {"alertname": "AgentHarnessErrorRate"},
+  "commonLabels": {"team": "agents"},
+  "commonAnnotations": {},
+  "externalURL": "https://grafana.example.test/",
+  "groupKey": "{}:{alertname=\"AgentHarnessErrorRate\"}",
+  "title": "Agent harness alert",
+  "message": "One alert is firing"
+}

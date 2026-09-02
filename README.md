@@ -80,9 +80,21 @@ The CentOS/RHEL installer deploys the single service and an optional split HTTP/
 
 ```bash
 sudo deploy/systemd/install-centos.sh
-sudo -u incident-harness /opt/incident-harness/.venv/bin/incident-agent tui
-sudo systemctl enable --now incident-harness.service
 ```
+
+The installer copies the checkout's non-secret `.agent/config.toml` into a fresh deployment when
+present, otherwise it writes runnable defaults. It then enables the combined HTTP/worker service
+and waits for the readiness check to pass. To edit the installed configuration later, run:
+
+```bash
+sudo runuser -u incident-harness -w /opt/incident-harness -- \
+  /opt/incident-harness/.venv/bin/incident-agent tui
+sudo systemctl restart incident-harness.service
+```
+
+The default intake listener is `0.0.0.0:8765`; only the HTTP process listens on that port. Set
+`server.host`, `server.port`, and `server.public_url` in the TUI when a reverse proxy or a different
+bind address is required.
 
 The installer copies `deploy/systemd/incident-harness.env.example` to
 `/etc/incident-harness/environment`. Put API keys, webhook secrets, connector tokens, and other
@@ -113,6 +125,13 @@ Restart the service after changing TUI configuration or authentication:
 ```bash
 sudo systemctl restart incident-harness.service
 sudo systemctl status incident-harness.service
+```
+
+The combined service and optional split target conflict at the systemd level and cannot run at the
+same time. To install and start the split HTTP/worker topology instead, use:
+
+```bash
+sudo env INCIDENT_HARNESS_LAYOUT=split deploy/systemd/install-centos.sh
 ```
 
 The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
@@ -228,6 +247,17 @@ POST /a2a/tasks
 GET  /a2a/tasks/{task_id}
 POST /a2a/tasks/{task_id}/cancel
 ```
+
+Fresh configurations include a `grafana` webhook connector. Point the Grafana contact point at
+`http://HOST:8765/hooks/incidents/grafana`. Normalized incident JSON is accepted as before. Native
+Grafana Alerting payloads are also accepted when alert labels contain `repository` (or `repo`) and
+optionally `environment` (or `env`); absent environment labels default to `production`.
+When exactly one repository is configured, it is also used as the repository fallback for Grafana
+alerts, so an existing alert group does not need to duplicate that label.
+Grafana resolution notifications are acknowledged without creating a new incident task.
+When `AGENT_WEBHOOK_SECRET` is set, configure the same secret in Grafana's HMAC signature settings
+and use its default `X-Grafana-Alerting-Signature` header. The existing
+`X-Agent-Signature-256: sha256=...` contract remains supported for other producers.
 
 ## Local execution
 

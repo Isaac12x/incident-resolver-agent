@@ -28,8 +28,8 @@ from .models import (
 )
 from .skills import Skill, SkillResolver
 from .storage import Storage
-from .tools import WorkspaceTools
 from .tooling import subscription_cli_command
+from .tools import WorkspaceTools
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
 

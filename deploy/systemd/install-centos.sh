@@ -13,9 +13,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 UV_BIN="$(command -v uv)"
 VENV_BIN="${INSTALL_ROOT}/.venv/bin"
+SERVICE_LAYOUT="${INCIDENT_HARNESS_LAYOUT:-combined}"
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Run as root: sudo $0" >&2
+  exit 1
+fi
+
+if [[ "${SERVICE_LAYOUT}" != "combined" && "${SERVICE_LAYOUT}" != "split" ]]; then
+  echo "INCIDENT_HARNESS_LAYOUT must be 'combined' or 'split'." >&2
   exit 1
 fi
 
@@ -64,6 +70,8 @@ prepare_owned_dir "${SERVICE_HOME}/.ssh"
 prepare_owned_dir "${SERVICE_HOME}/.cache"
 
 echo "==> Syncing application to ${INSTALL_ROOT}"
+systemctl disable --now incident-harness.service incident-harness.target \
+  incident-harness-http.service incident-harness-worker.service >/dev/null 2>&1 || true
 install -d -m 0755 "${INSTALL_ROOT}"
 rsync -a --delete \
   --exclude .agent \
@@ -71,6 +79,17 @@ rsync -a --delete \
   --exclude .git \
   "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 prepare_owned_dir "${INSTALL_ROOT}/.agent"
+
+# Runtime state is intentionally excluded from rsync, but config.toml contains
+# only settings and environment-variable names. Seed a fresh installation from
+# the checkout's configured file when one is available; never overwrite a
+# non-empty deployed configuration during an upgrade.
+if [[ ! -s "${INSTALL_ROOT}/.agent/config.toml" ]] \
+  && [[ -s "${REPO_ROOT}/.agent/config.toml" ]] \
+  && [[ "${REPO_ROOT}/.agent/config.toml" != "${INSTALL_ROOT}/.agent/config.toml" ]]; then
+  install -m 0640 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+    "${REPO_ROOT}/.agent/config.toml" "${INSTALL_ROOT}/.agent/config.toml"
+fi
 
 echo "==> Creating virtualenv, syncing dependencies, and initializing .agent"
 install_uv_if_needed
@@ -87,11 +106,13 @@ install_uv_if_needed
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
 
 echo "==> Installing systemd units and environment template"
-install -d -m 0750 "${ENV_DIR}"
+install -d -m 0750 -o root -g "${SERVICE_USER}" "${ENV_DIR}"
 if [[ ! -f "${ENV_DIR}/environment" ]]; then
   install -m 0640 -o root -g "${SERVICE_USER}" \
     "${SCRIPT_DIR}/incident-harness.env.example" "${ENV_DIR}/environment"
 fi
+chown root:"${SERVICE_USER}" "${ENV_DIR}/environment"
+chmod 0640 "${ENV_DIR}/environment"
 
 install -m 0644 "${SCRIPT_DIR}/incident-harness.service" "${UNIT_DIR}/"
 install -m 0644 "${SCRIPT_DIR}/incident-harness-http.service" "${UNIT_DIR}/"
@@ -100,24 +121,42 @@ install -m 0644 "${SCRIPT_DIR}/incident-harness.target" "${UNIT_DIR}/"
 
 systemctl daemon-reload
 
-cat <<EOF
-Installed.
+echo "==> Starting ${SERVICE_LAYOUT} service layout"
+if [[ "${SERVICE_LAYOUT}" == "split" ]]; then
+  systemctl disable --now incident-harness.service >/dev/null 2>&1 || true
+  systemctl enable --now incident-harness.target
+  ACTIVE_UNIT="incident-harness.target"
+else
+  systemctl disable --now incident-harness.target incident-harness-http.service \
+    incident-harness-worker.service >/dev/null 2>&1 || true
+  systemctl enable --now incident-harness.service
+  ACTIVE_UNIT="incident-harness.service"
+fi
 
-Next steps:
-  1. Edit secrets (if not done yet):
+runuser -u "${SERVICE_USER}" -w "${INSTALL_ROOT}" -- \
+  "${VENV_BIN}/incident-agent" healthcheck --timeout 30
+
+cat <<EOF
+Installed and running (${ACTIVE_UNIT}).
+
+Configuration:
+  1. Edit secrets when required:
        ${ENV_DIR}/environment
-  2. Configure the harness:
+  2. Adjust the generated or copied configuration when required:
        runuser -u ${SERVICE_USER} -w ${INSTALL_ROOT} -- \\
          ${INSTALL_ROOT}/.venv/bin/incident-agent tui
-  3. Start the service:
-       systemctl enable --now incident-harness.service
-  4. Check status:
-       systemctl status incident-harness.service
+  3. Restart after configuration or authentication changes:
+       systemctl restart ${ACTIVE_UNIT}
+  4. Verify intake readiness:
+       systemctl status ${ACTIVE_UNIT}
        curl -s "\$(runuser -u ${SERVICE_USER} -w ${INSTALL_ROOT} -- \\
          ${INSTALL_ROOT}/.venv/bin/incident-agent service-url)/health"
 
-Optional split HTTP/worker layout:
-  systemctl enable --now incident-harness.target
+Grafana intake URL (default port 8765):
+  http://HOST:8765/hooks/incidents/grafana
+
+To install the mutually exclusive split HTTP/worker layout instead:
+  INCIDENT_HARNESS_LAYOUT=split ${SCRIPT_DIR}/install-centos.sh
 
 Subscription CLI (codex, etc.): authenticate as the service user before intake:
   runuser -u ${SERVICE_USER} -- env HOME=${SERVICE_HOME} codex login

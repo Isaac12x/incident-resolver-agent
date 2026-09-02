@@ -38,7 +38,12 @@ class Application:
         load_dotenv(Path.cwd() / ".env", override=False)
         config = load_config(Path(config_path))
         storage = Storage(config.runtime_root)
-        connectors = ConnectorManager(config.connectors)
+        connectors = ConnectorManager(
+            config.connectors,
+            default_repository=(
+                config.repositories[0].name if len(config.repositories) == 1 else None
+            ),
+        )
         github = GitHubService(
             config.github, webhook_secret=os.getenv(config.github.webhook_secret_env)
         )
