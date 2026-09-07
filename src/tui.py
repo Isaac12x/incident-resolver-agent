@@ -274,6 +274,11 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Static(
+                    "GitHub publishing uses the account from ‘Log in to GitHub’. "
+                    "The installer provisions that login for the service; "
+                    "the agent login below identifies review comments, not credentials."
+                ),
                 Label("GitHub webhook secret environment variable"),
                 self._input(github.webhook_secret_env, "github-webhook-secret-env"),
                 Label("Agent GitHub login"),
@@ -479,17 +484,21 @@ class ConfigurationApp(App[None]):
                 ("incident", "output", "observability", "other"),
             ),
             Label("Type"),
-            self._select(connector.type, f"{prefix}-type", ("mcp", "webhook")),
+            self._select(connector.type, f"{prefix}-type", ("mcp", "webhook", "loki", "grafana")),
             Label("MCP transport"),
             self._select(
                 connector.transport, f"{prefix}-transport", ("stdio", "streamable-http", "sse")
             ),
-            Label("URL (HTTP/SSE MCP)"),
+            Label("URL (HTTP/SSE MCP or Loki/Grafana base URL)"),
             self._input(connector.url, f"{prefix}-url"),
             Label("Command (stdio MCP; space-separated)"),
             self._input(" ".join(connector.command), f"{prefix}-command"),
             Label("Auth token environment variable"),
             self._input(connector.auth_token_env, f"{prefix}-auth-token-env"),
+            Label("Loki tenant ID (X-Scope-OrgID; blank for single tenant)"),
+            self._input(connector.tenant_id, f"{prefix}-tenant-id"),
+            Label("Grafana Loki datasource UID"),
+            self._input(connector.datasource_uid, f"{prefix}-datasource-uid"),
             Label("Capabilities (comma-separated)"),
             self._input(", ".join(connector.capabilities), f"{prefix}-capabilities"),
             Button("Test connection", id=f"test-{key}"),
@@ -681,6 +690,8 @@ class ConfigurationApp(App[None]):
             url=self._value(f"{prefix}-url").strip() or None,
             command=command.split(),
             auth_token_env=self._value(f"{prefix}-auth-token-env").strip() or None,
+            tenant_id=self._value(f"{prefix}-tenant-id").strip() or None,
+            datasource_uid=self._value(f"{prefix}-datasource-uid").strip() or None,
             capabilities=self._split(self._value(f"{prefix}-capabilities")),
         )
 
@@ -826,9 +837,7 @@ class ConfigurationApp(App[None]):
             )
             return
         failures = [
-            graph
-            for graph in (result.code_review_graph,)
-            if graph is None or not graph.succeeded
+            graph for graph in (result.code_review_graph,) if graph is None or not graph.succeeded
         ]
         if failures:
             messages = [

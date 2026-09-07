@@ -83,8 +83,12 @@ sudo deploy/systemd/install-centos.sh
 ```
 
 The installer copies the checkout's non-secret `.agent/config.toml` into a fresh deployment when
-present, otherwise it writes runnable defaults. It then enables the combined HTTP/worker service
-and waits for the readiness check to pass. To edit the installed configuration later, run:
+present, otherwise it writes runnable defaults. Configured local repositories are staged as bare
+Git mirrors under `/opt/incident-harness/.agent/repositories`, and their `local_path` settings are
+rewritten to those deployed mirrors. Existing deployed repositories are preserved during upgrades;
+untracked checkout files and other runtime state are not copied. The installer then enables the
+combined HTTP/worker service and waits for the readiness check to pass. To edit the installed
+configuration later, run:
 
 ```bash
 sudo runuser -u incident-harness -w /opt/incident-harness -- \
@@ -134,6 +138,81 @@ same time. To install and start the split HTTP/worker topology instead, use:
 sudo env INCIDENT_HARNESS_LAYOUT=split deploy/systemd/install-centos.sh
 ```
 
+### GitHub login, service credentials, and PR publishing
+
+Install GitHub CLI (`gh`) alongside Git before running the installer. In the TUI's Repositories
+tab, **Log in to GitHub and load repositories**, select the repository, then **Clone/pull and
+index** and save configuration. This login configures Git's HTTPS credential helper too.
+The Runtime tab's **Agent GitHub login** is a review-filter identity, not an authentication field.
+
+The installer seeds the selected checkout into `/opt/incident-harness/.agent/repositories`,
+resolves GitHub repository names without regard to letter case, and saves the deployed `local_path`.
+On upgrades it preserves `/opt/incident-harness/.agent/config.toml`; edit the installed TUI to
+change the service's selection. Changes to a separate development checkout's TUI do not overwrite
+an existing deployed configuration.
+
+On first setup, the installer provisions the setup account's authenticated GitHub CLI token for
+`incident-harness` through stdin. The service account keeps its own protected CLI credential store
+under `/var/lib/incident-harness/.config/gh`. Existing service logins are preserved on upgrades.
+Run the installer as the account used for setup (root in the documented installation); if `sudo`
+changes accounts, authenticate the service account first instead:
+
+```bash
+cd /opt/incident-harness
+sudo runuser -u incident-harness -- gh auth login --hostname github.com --git-protocol https --web
+sudo runuser -u incident-harness -- gh auth setup-git --hostname github.com
+```
+
+Both Git operations and the built-in PR publisher use this account. The installer rewrites
+GitHub SSH URLs to HTTPS for the service so old repository selections also use these credentials.
+The account needs repository read/write and pull-request creation access. PRs are authored by the
+authenticated account; changing the TUI's agent login does not change their author.
+For token rotation, `GH_TOKEN` (or `GITHUB_TOKEN`) in `/etc/incident-harness/environment` overrides
+the stored login after a restart. These values are exported to systemd; never put them in
+`config.toml`. See [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login) and
+[credential precedence](https://cli.github.com/manual/gh_help_environment).
+
+For the subscription runtime, install the complete Codex CLI bundle somewhere the service can
+execute it. A standalone release with `codex-code-mode-host` needs that matching helper beside
+`codex`; copying only the main executable can allow login while leaving every agent run broken.
+Use **Test subscription CLI** in the installed TUI to verify an actual structured response.
+The harness converts its checkpoint models to the strict output schema required by Codex.
+
+For a GitHub selection, `publish_mode = "auto"` now publishes to GitHub and reports authentication
+errors rather than silently completing locally. `publish_mode = "github"` explicitly requires
+GitHub publication; `local` remains an explicit local-only option. After successful local checks,
+the harness commits the fix, pushes `incident-harness/fix/FIX-NAME` (a summary slug with a unique
+incident suffix), and opens a PR against the selected base branch. Draft status follows the TUI.
+The PR includes investigation evidence and local verification, and waits for verification of its
+exact preview SHA. A retry reuses an existing open PR for the same branch.
+
+Check the installed account and repository access from the service's working directory:
+
+```bash
+cd /opt/incident-harness
+sudo runuser -u incident-harness -- gh auth status --hostname github.com
+sudo runuser -u incident-harness -- gh repo view OWNER/REPOSITORY --json nameWithOwner,viewerPermission
+sudo runuser -u incident-harness -- git ls-remote git@github.com:OWNER/REPOSITORY.git HEAD
+sudo systemctl restart incident-harness.service
+```
+
+If you deliberately configure SSH instead of the installer's HTTPS mapping, the service needs
+its own authorized SSH key and verified host entries in
+`/var/lib/incident-harness/.ssh/known_hosts` (owned by `incident-harness`, mode `0600`).
+Use the entries from [GitHub's published SSH host keys](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints),
+or compare scanned fingerprints against that page before installing them. Do not disable host
+verification. An SSH deploy key authenticates Git; the GitHub CLI still needs its login to open PRs.
+
+`/health` performs live connection checks, in parallel with a five-second deadline per dependency.
+It returns HTTP 503 and per-connection errors when Loki tenant queries, Grafana's authenticated
+Loki datasource/proxy, or GitHub repository/PR access and Git base-branch reads fail. GitHub checks
+also require repository push permission; they do not create a PR or prove every token write scope.
+The worker status remains separate. An incoming Grafana webhook without a log-query connector
+is reported as missing observability, rather than healthy. Outages after startup and recovery are
+checked on subsequent requests. Failed/blocked tasks retain their original events and do not
+restart automatically when authentication is repaired or the service restarts.
+Concurrent incidents wait for a busy repository lock without consuming their failure budget.
+
 The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
 the task and sub-agent histories in `.agent/sessions.sqlite3`. `subscription-cli` starts `codex --yolo
 exec` by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,
@@ -149,6 +228,47 @@ which is included together with global and repository memory on every resume. Se
 The Safety tab also contains the complete system prompt. That prompt and the positive goals,
 negative goals, guardrails, and safeguards are assembled into every investigation, implementation,
 and review agent run as a binding instruction contract.
+
+### Read-only production log connections
+
+Incoming webhooks supply alert metadata; they do not provide a log-query client. Add native
+`loki` and `grafana` connections in the TUI Connections tab, or configure them in
+`.agent/config.toml`. Keep the existing Grafana webhook and give its query connection a distinct
+name, or use a `grafana` query connection with the same name to support both intake and queries.
+Use the address reachable from the service host (including the published port):
+
+```toml
+[[connectors]]
+name = "loki"
+purpose = "observability"
+type = "loki"
+url = "http://127.0.0.1:3100"
+tenant_id = "your-tenant"
+capabilities = ["logs", "metrics"]
+
+[[connectors]]
+name = "grafana"
+purpose = "incident"
+type = "grafana"
+url = "http://127.0.0.1:3200"
+datasource_uid = "your-loki-datasource"
+auth_token_env = "GRAFANA_SERVICE_ACCOUNT_TOKEN"
+capabilities = ["logs", "metrics"]
+```
+
+Save a Grafana Viewer service-account token in `/etc/incident-harness/environment` under the
+configured environment variable. The existing systemd exporter includes that referenced variable.
+Use `auth_token_env` for Loki too if its gateway requires a bearer token. Omit `tenant_id` only for
+single-tenant Loki. Grafana proxy queries use the tenant headers provisioned on its datasource.
+See the [Loki HTTP API](https://grafana.com/docs/loki/latest/reference/loki-http-api/) and
+[Grafana datasource API](https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/data_source/).
+
+Both agent runtimes receive `<connection_name>_query_range` and `<connection_name>_labels` tools.
+Range queries require explicit incident start/end timestamps and are capped at 200 log records,
+1 MB of response data, and 20 seconds. Tools can only read from the configured endpoint; agents
+cannot override its URL, credentials, or tenant. Health failures omit upstream response bodies.
+Restart the service after configuration changes, check `/health`, then explicitly resume the
+relevant blocked tasks while preserving their original evidence and session histories.
 
 ### Durable agent lifecycle
 
@@ -208,8 +328,8 @@ saved in `.agent/config.toml`.
 Add at least one repository with its `clone_url` (or `local_path`), accepted incident environments,
 preview environment, and Playwright command. Configure trigger mode, webhook security, MCP
 connections for incident input, PR output, and observability, plus positive/negative goals,
-guardrails, and safeguards from the same TUI. Authentication for an injected GitHub API adapter or
-GitHub MCP connector belongs to that adapter and is not a built-in GitHub App setting.
+guardrails, and safeguards from the same TUI. The built-in GitHub publisher uses the TUI GitHub CLI login as described above.
+Optional GitHub MCP connectors authenticate separately through their configured token references.
 
 ### Local-only repository mode
 

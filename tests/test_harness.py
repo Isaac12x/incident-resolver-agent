@@ -55,6 +55,7 @@ from src.tooling import (
     clone_and_index_repository,
     github_login,
     initialise_runtime_tree,
+    install_configured_repositories,
     list_github_repositories,
     probe_subscription_cli,
     repository_name_from_url,
@@ -162,6 +163,7 @@ def test_systemd_install_is_ready_and_uses_one_service_layout() -> None:
     assert "systemctl enable --now incident-harness.service" in installer
     assert "systemctl enable --now incident-harness.target" in installer
     assert "healthcheck --timeout 30" in installer
+    assert '"${VENV_BIN}/incident-agent" install-repositories' in installer
     assert "Conflicts=incident-harness.target" in combined
     assert "ExecStartPost=" in combined and "healthcheck --timeout 30" in combined
     assert "Restart=on-failure" in combined
@@ -169,6 +171,94 @@ def test_systemd_install_is_ready_and_uses_one_service_layout() -> None:
     assert "Conflicts=incident-harness.service" in worker
     assert "Conflicts=incident-harness.service" in target
     assert "Requires=incident-harness-http.service incident-harness-worker.service" in target
+
+
+def test_systemd_install_ports_configured_repository_and_rewrites_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote = tmp_path / "remote.git"
+    source_root = tmp_path / "source" / ".agent" / "repositories"
+    source = source_root / "Company--Application"
+    destination_root = tmp_path / "installed" / ".agent" / "repositories"
+    config_path = tmp_path / "installed" / ".agent" / "config.toml"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(remote)], check=True)
+    source_root.mkdir(parents=True)
+    subprocess.run(["git", "clone", str(remote), str(source)], check=True)
+    subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True
+    )
+    (source / "tracked.txt").write_text("portable\n", encoding="utf-8")
+    (source / ".env").write_text("DO_NOT_COPY=secret\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(source), "commit", "-m", "initial"], check=True)
+    subprocess.run(["git", "-C", str(source), "push", "origin", "main"], check=True)
+    save_config(
+        Config(
+            runtime_root=tmp_path / "installed" / ".agent",
+            repositories=[
+                RepositoryConfig(
+                    name="Company/Application",
+                    clone_url=str(remote),
+                    local_path=source,
+                )
+            ],
+        ),
+        config_path,
+    )
+
+    main(
+        [
+            "--config",
+            str(config_path),
+            "install-repositories",
+            "--source-root",
+            str(source_root),
+            "--destination-root",
+            str(destination_root),
+        ]
+    )
+
+    mirror = (destination_root / "Company--Application.git").resolve()
+    assert capsys.readouterr().out == f"Installed repository: {mirror}\n"
+    assert (
+        subprocess.run(
+            ["git", "-C", str(mirror), "rev-parse", "--is-bare-repository"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == "true"
+    )
+    assert (
+        subprocess.run(
+            ["git", "-C", str(mirror), "show", "main:tracked.txt"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        == "portable\n"
+    )
+    assert not (mirror / ".env").exists()
+    assert load_config(config_path).repositories[0].local_path == mirror
+
+    # Re-running an upgrade preserves the deployed mirror rather than replacing it.
+    head = subprocess.run(
+        ["git", "-C", str(mirror), "rev-parse", "main"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert install_configured_repositories(config_path, source_root, destination_root) == [mirror]
+    assert (
+        subprocess.run(
+            ["git", "-C", str(mirror), "rev-parse", "main"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        == head
+    )
 
 
 def test_compatible_model_and_safety_configuration_round_trip(tmp_path: Path) -> None:
@@ -837,9 +927,7 @@ def test_server_health_submission_resources_and_github_security(
         connectors.errors["observability"] = "connection refused"
         unavailable = client.get("/health")
         assert unavailable.status_code == 503
-        assert unavailable.json()["connector_errors"] == {
-            "observability": "connection refused"
-        }
+        assert unavailable.json()["connector_errors"] == {"observability": "connection refused"}
         connectors.errors.clear()
         response = client.post("/mcp/tools/submit_incident", json=incident.model_dump(mode="json"))
         assert response.status_code == 200
@@ -903,7 +991,7 @@ def test_cli_healthcheck_uses_configured_local_service_url(
 
     main(["--config", str(config_path), "healthcheck", "--timeout", "1"])
 
-    open_url.assert_called_once_with("http://127.0.0.1:8765/health", timeout=2)
+    open_url.assert_called_once_with("http://127.0.0.1:8765/health", timeout=6)
 
     with pytest.raises(SystemExit, match="health check failed"):
         main(["--config", str(config_path), "healthcheck", "--timeout", "0"])
@@ -970,7 +1058,7 @@ def test_systemd_env_export_follows_tui_config(
                 "CUSTOM_GITHUB_SECRET=github-secret",
                 "CUSTOM_GH_TOKEN=gh-secret",
                 "CUSTOM_PREVIEW_URL=https://preview.example.com",
-                'GIT_SSH_COMMAND=ssh -i /var/lib/incident-harness/.ssh/id_ed25519',
+                "GIT_SSH_COMMAND=ssh -i /var/lib/incident-harness/.ssh/id_ed25519",
                 "UNUSED_SECRET=ignored",
             ]
         ),
@@ -1016,10 +1104,14 @@ def test_systemd_env_export_follows_tui_config(
         merge_secret_stores,
     )
 
-    assert service_base_url(
-        Config(server=ServerConfig(host="0.0.0.0", port=8765))
-    ) == "http://127.0.0.1:8765"
-    assert service_base_url(Config(server=ServerConfig(host="::", port=8765))) == "http://127.0.0.1:8765"
+    assert (
+        service_base_url(Config(server=ServerConfig(host="0.0.0.0", port=8765)))
+        == "http://127.0.0.1:8765"
+    )
+    assert (
+        service_base_url(Config(server=ServerConfig(host="::", port=8765)))
+        == "http://127.0.0.1:8765"
+    )
     assert merge_secret_stores([tmp_path / "missing.env"]) == {}
     assert _format_env_value("") == '""'
     assert format_systemd_environment({}) == ""
@@ -2673,7 +2765,9 @@ async def test_worker_runs_queued_task_and_waits_for_shutdown(
 async def test_local_repository_branch_commit_and_local_pr(
     tmp_path: Path, incident: Incident
 ) -> None:
-    incident = incident.model_copy(update={"external_id": "INC bad@{ref..lock"})
+    incident = incident.model_copy(
+        update={"external_id": "INC bad@{ref..lock", "summary": "INC bad@{ref..lock"}
+    )
     runtime = tmp_path / ".agent"
     checkout = tmp_path / ".agents" / "repositories" / "company--application"
     checkout.mkdir(parents=True)
@@ -2709,7 +2803,7 @@ async def test_local_repository_branch_commit_and_local_pr(
     )
     task = await workflow.submit(incident)
     worktree = storage.create_worktree(task, base_branch="main")
-    assert task.branch and task.branch.startswith("agent/inc-bad-ref-lock-")
+    assert task.branch and task.branch.startswith("incident-harness/fix/inc-bad-ref-lock-")
     (worktree / "FIX.md").write_text("local fix\n")
     (worktree / ".code-review-graph").mkdir()
     (worktree / ".code-review-graph" / "graph.db").write_bytes(b"graph")
@@ -2821,9 +2915,7 @@ def test_server_error_resources_and_signed_incident(
         resolved_body = json.dumps(
             {"alerts": [{"status": "resolved", "fingerprint": "resolved-1"}]}
         ).encode()
-        resolved_signature = hmac.new(
-            b"intake-secret", resolved_body, hashlib.sha256
-        ).hexdigest()
+        resolved_signature = hmac.new(b"intake-secret", resolved_body, hashlib.sha256).hexdigest()
         resolved = client.post(
             "/custom/incidents/sentry",
             content=resolved_body,

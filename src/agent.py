@@ -708,7 +708,13 @@ its lifecycle command succeeds.
                     if isinstance(tool, dict)
                     else getattr(tool, "name", "tool")
                 )
-                tool_names.append(str(name_value))
+                if hasattr(tool, "inputSchema"):
+                    tool_names.append(
+                        f"{name_value}: {tool.description or ''} "
+                        f"arguments={json.dumps(tool.inputSchema)}"
+                    )
+                else:
+                    tool_names.append(str(name_value))
             lines.append(f"- {name}: {', '.join(tool_names) or 'no tools reported'}")
         return "\n".join(lines) or "- No runtime MCP adapters are connected."
 
@@ -807,6 +813,8 @@ its lifecycle command succeeds.
                     if server is None:
                         raise ValueError(f"unknown connector: {connector}")
                     result = await server.call_tool(tool_name, tool_arguments)
+                    if hasattr(result, "model_dump"):
+                        result = result.model_dump(mode="json")
                 elif name == "code_graph_search":
                     from code_review_graph.tools import semantic_search_nodes
 
@@ -926,7 +934,11 @@ its lifecycle command succeeds.
         files.mkdir(parents=True, exist_ok=True)
         schema_path = files / "session-output.schema.json"
         output_path = files / "session-output.json"
-        schema_path.write_text(json.dumps(output_type.model_json_schema()), encoding="utf-8")
+        from agents import AgentOutputSchema
+
+        schema_path.write_text(
+            json.dumps(AgentOutputSchema(output_type).json_schema()), encoding="utf-8"
+        )
         with suppress(FileNotFoundError):
             output_path.unlink()
 
