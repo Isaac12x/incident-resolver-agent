@@ -5,6 +5,16 @@
   "description": "Incident investigation, repair, verification, and pull-request workflow skills",
   "skills": [
     {
+      "name": "ponytail",
+      "path": "ponytail/SKILL.md",
+      "description": "Select the smallest correct repair using existing code and platform features"
+    },
+    {
+      "name": "show-me",
+      "path": "show-me/SKILL.md",
+      "description": "Draft concise visual details for a new incident pull-request body"
+    },
+    {
       "name": "coding",
       "path": "coding/SKILL.md",
       "description": "Implement the narrowest incident fix while preserving repository conventions"

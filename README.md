@@ -74,6 +74,52 @@ provider label, model name, OpenAI-compatible base URL, and the names of environ
 holding credentials. Local mode supports Ollama, vLLM, LM Studio, and similar servers; remote mode
 supports OpenAI and hosted compatible APIs. The TUI never asks for or writes secret values.
 
+New configurations use `gpt-6-astra` with `max` reasoning, the quality-first choice from
+the [OpenAI model catalog](https://developers.openai.com/api/docs/models/gpt-6-astra)
+checked on 2026-09-07. The SDK lead and its research/implementation agents share those
+settings. The subscription CLI receives the selected model and reasoning on every fresh
+and resumed incident run. Model access must be available through the configured account;
+the harness does not retry with a cheaper model when that selection fails.
+
+Saved OpenAI flagship configurations upgrade automatically, including `gpt-5/high` to
+`gpt-6-astra/max`. The shipped `src/model-policy.json` lists the reviewed predecessors and target;
+future releases update this policy after checking model and runtime support. A running worker
+reads configuration and policy on every poll and applies changes to its next model invocation,
+including resumed subscription sessions. Active calls finish normally; no manual restart is needed
+for model settings or policy updates. Invalid updates retain the last working configuration.
+Set `model.auto_upgrade = false` to pin a selection. Custom models, local servers and compatible
+endpoints are preserved. Sampling, budgets, and session memory remain configurable in the TUI.
+
+The resolver first fixes and verifies the incident, then expands through graph neighbors in
+concentric rings. Set each repository's `responsibility_paths` to the owned directories/files
+(default `["."]`, the configured repository). `verification_plan(seed_paths)` starts from the
+incident files; `verification_plan([])` resumes the next unfinished ring. After graph neighbors,
+the final ring checks remaining files in that area for relationships the graph may have missed.
+Related defects receive repairs and regression checks within the existing task budget.
+
+`run_tests(command, paths)` records the files actually verified in
+`artifacts/local/verification-graph.json` under the task directory. Its `nodes` and `edges` use
+code-review-graph fields, with repository-relative qualified names so worktree paths are stable.
+Each run retains its command, result and SHA-256 input hashes. Successful matching commands are
+reused across task resumes; source, dependency, test, fixture and configuration changes invalidate
+affected evidence. Missing/stale graphs fall back to hashing all repository inputs. Unscoped
+commands hash the whole checkout and do not claim coverage for individual paths. Use `force=true`
+for changing external state or deliberate reproduction. Publication requires a completed area
+plan and current passing checks; deployment verification still runs against the exact PR SHA.
+
+Incident investigation establishes expected behavior from repository contracts, callers,
+tests, and history before proposing a repair. Coding and testing skills require the fix to
+restore that behavior, preserve intentional failures, and verify an actual regression.
+The bundled [Ponytail adaptation](skills/ponytail/SKILL.md) runs before implementation and
+review changes: reuse existing code, standard libraries, and platform features before adding
+code. The simplify-and-verify loop lives in skills and uses the existing lifecycle tools and
+retry budget. It adds no model router, dependency, or second orchestration loop.
+
+The Ponytail adaptation includes its upstream [MIT notice](skills/ponytail/LICENSE).
+Skills are shipped with the wheel and work offline. Repository-specific policies belong in
+the configured project instructions and skill directories; examples use placeholder projects
+and endpoints. Run `uv run pytest` and `uv run ruff check src tests` before contributing.
+
 ### systemd deployment
 
 The CentOS/RHEL installer deploys the single service and an optional split HTTP/worker target:
@@ -93,8 +139,10 @@ configuration later, run:
 ```bash
 sudo runuser -u incident-harness -w /opt/incident-harness -- \
   /opt/incident-harness/.venv/bin/incident-agent tui
-sudo systemctl restart incident-harness.service
 ```
+
+Model changes reload automatically. Restart the service after changes to listener, connector,
+credential environment or other startup settings: `sudo systemctl restart incident-harness.service`.
 
 The default intake listener is `0.0.0.0:8765`; only the HTTP process listens on that port. Set
 `server.host`, `server.port`, and `server.public_url` in the TUI when a reverse proxy or a different

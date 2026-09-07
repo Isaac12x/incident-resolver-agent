@@ -10,7 +10,11 @@ triggers:
 # Coding
 
 - Preserve repository conventions.
-- Make the narrowest reasonable change.
+- Confirm the proposed fix restores the expected behavior established during investigation.
+- Apply the loaded Ponytail skill before choosing an implementation and when reviewing the diff.
+- Fix the demonstrated cause at the appropriate shared boundary; check affected callers.
+- Never silence errors, return fabricated success, weaken validation, or change test expectations
+  merely to make an alert disappear. Preserve intentional rejection and failure behavior.
 - Avoid unrelated refactoring.
 - Inspect files before replacing them.
 - Add a regression test whenever practical.
