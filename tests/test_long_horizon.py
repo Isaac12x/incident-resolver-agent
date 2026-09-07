@@ -304,6 +304,7 @@ async def test_lifecycle_tools_fail_closed_and_support_repository_memory(tmp_pat
         "scope": "repository",
     }
     assert "repository fact" in storage.read_memory(task.repository)
+    subprocess.run(["git", "init", "-q", str(worktree)], check=True)
     failed = await lifecycle.run_tests("python --version")
     assert not failed["passed"]
     assert failed["state"] == TaskState.BLOCKED
@@ -433,15 +434,21 @@ async def test_agents_sdk_attaches_durable_main_and_subagent_sessions(
         "Incident Implementer",
         "Incident Resolver",
     ]
+    assert all(agent.model == "gpt-6-astra" for agent in created_agents)
+    assert all(agent.model_settings.reasoning.effort == "max" for agent in created_agents)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model,reasoning", [("gpt-6-astra", "max"), ("custom-model", None)])
 async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str, reasoning: str | None
 ) -> None:
     config = Config(
         runtime_root=tmp_path / ".agent",
-        model=ModelConfig(runtime="subscription-cli", subscription_command=["codex"]),
+        model=ModelConfig(
+            runtime="subscription-cli", subscription_command=["codex"], name=model,
+            reasoning=reasoning,
+        ),
         connectors=[
             ConnectorConfig(
                 name="logs",
@@ -623,6 +630,10 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
             )
         )
     assert commands[1][3:5] == ["resume", "thread-123"]
+    for command in commands:
+        assert command[command.index("--model") + 1] == model
+        overrides = [argument for argument in command if argument.startswith("model_reasoning_")]
+        assert overrides == ([f'model_reasoning_effort="{reasoning}"'] if reasoning else [])
     assert parsed[0]["root_cause"] == "bad cache key"
     assert parsed[1]["changed"] and parsed[1]["tests_passed"]
     assert parsed[2]["summary"] == "reviewed"

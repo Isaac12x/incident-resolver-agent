@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from .models import (
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
+from .verification_graph import VerificationGraph
 from .verify import DeploymentVerifier
 
 GraphIndexer = Callable[[Path], ToolResult]
@@ -100,7 +102,28 @@ class _TaskLifecycle:
         task = self.workflow.storage.transition(self.task_id, TaskState.REPRODUCING)
         return {"state": task.state.value, "reproduced": reproduced}
 
-    async def run_tests(self, command: str) -> dict[str, Any]:
+    def _verification(self) -> VerificationGraph:
+        return VerificationGraph(
+            self.worktree,
+            self.workflow.storage.task_directory(self.task_id)
+            / "artifacts/local/verification-graph.json",
+        )
+
+    async def verification_plan(self, seed_paths: list[str]) -> dict[str, Any]:
+        """Return the next concentric ring; seed regression must pass first."""
+        if self.workflow.repository_indexer:
+            result = await asyncio.to_thread(self.workflow.repository_indexer, self.worktree)
+            if not result.succeeded:
+                raise RuntimeError("cannot plan verification with a failed graph refresh")
+        repository = self.workflow.config.repository(self._task().repository)
+        return self._verification().plan(seed_paths, repository.responsibility_paths)
+
+    async def run_tests(
+        self,
+        command: str,
+        paths: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
         task = self._task()
         if task.state not in {
             TaskState.REPRODUCING,
@@ -119,10 +142,50 @@ class _TaskLifecycle:
                 self.task_id, TaskEvent(type=str(data.pop("type")), data=data)
             ),
         )
+        ledger = self._verification()
+        if paths:
+            paths = sorted({ledger.relative(path) for path in paths})
+        if ledger.data["seeds"]:
+            repository = self.workflow.config.repository(task.repository)
+            plan = ledger.plan([], repository.responsibility_paths)
+            if paths and plan["next_ring"] is not None:
+                permitted = set().union(
+                    *(set(ring) for ring in plan["rings"][: plan["next_ring"] + 1])
+                )
+                nodes, _ = ledger.graph()
+                permitted.update(node["file_path"] for node in nodes if node["kind"] == "Test")
+                if not set(paths) <= permitted:
+                    raise RuntimeError("verify the current ring before expanding outward")
+        inputs = ledger.snapshot(paths, command)
+        cached = (
+            None if force or self.workflow.local_tester else ledger.cached(command, paths, inputs)
+        )
+        if cached:
+            self.workflow.storage.transition(self.task_id, TaskState.TESTING_LOCAL, error=None)
+            self.workflow.storage.append_event(
+                self.task_id,
+                TaskEvent(
+                    type="verification.reused",
+                    data={"command": command, "paths": paths},
+                ),
+            )
+            return {**cached, "state": TaskState.TESTING_LOCAL.value, "cached": True}
         result = await tools.shell(command)
         passed = result.returncode == 0
         if passed and self.workflow.local_tester:
             passed = await self.workflow.local_tester(task, self.worktree)
+        stable = inputs == ledger.snapshot(paths, command)
+        ledger.record(
+            command,
+            paths,
+            inputs,
+            {
+                "passed": passed and stable,
+                "returncode": result.returncode,
+                "stdout": result.stdout[-2000:],
+                "stderr": result.stderr[-2000:],
+            },
+        )
         self.workflow.storage.append_event(
             self.task_id,
             TaskEvent(
@@ -159,12 +222,25 @@ class _TaskLifecycle:
             "returncode": result.returncode,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "cached": False,
+            "inputs_stable": stable,
         }
 
     async def open_pr(self, summary: str) -> dict[str, Any]:
         task = self._task()
         if task.state not in {TaskState.TESTING_LOCAL, TaskState.PUBLISHING_PR}:
             raise RuntimeError("pull requests require successful local verification")
+        ledger = self._verification()
+        if ledger.pending_checks():
+            raise RuntimeError(
+                "pull requests require current passing results for every local check"
+            )
+        if (self.worktree / ".code-review-graph/graph.db").exists() or ledger.data["seeds"]:
+            plan = await self.verification_plan([])
+            if plan["next_ring"] is not None:
+                raise RuntimeError(
+                    "complete verification of the responsibility area before publishing"
+                )
         self.workflow.storage.write_artifact(
             self.task_id, "artifacts/local/fix.txt", summary.strip()
         )
@@ -262,6 +338,7 @@ class WorkflowEngine:
         self.reproducer = reproducer
         self.local_tester = local_tester
         self.repository_indexer = repository_indexer
+        self.reload_model: Callable[[], None] | None = None
         self._wakeups: asyncio.Queue[str] = asyncio.Queue()
         self._stopping = asyncio.Event()
         self._review_comments: dict[str, list[ReviewComment]] = {}
@@ -715,6 +792,13 @@ class WorkflowEngine:
 
         running: set[asyncio.Task[None]] = set()
         while not self._stopping.is_set():
+            if self.reload_model:
+                try:
+                    self.reload_model()
+                except (OSError, ValueError, KeyError):
+                    logging.getLogger(__name__).warning(
+                        "Model configuration reload failed; retaining the last valid settings"
+                    )
             try:
                 task_id = await asyncio.wait_for(
                     self._wakeups.get(), timeout=self.config.poll_interval_seconds

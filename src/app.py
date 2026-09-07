@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,4 +70,29 @@ class Application:
             verifier,
             repository_indexer=build_repository_graphs,
         )
+
+        def reload_model() -> None:
+            # Read the policy as data on every poll so package upgrades are visible
+            # even to an already imported worker. In-flight calls finish normally.
+            path = Path(config_path)
+            if not path.is_file() or not path.stat().st_size:
+                raise ValueError("model configuration is missing or empty")
+            updated = load_config(path).model
+            if updated == config.model:
+                return
+            config.model = updated
+            if agent_backend is None:
+                agent.backend = (
+                    SubscriptionCLIBackend(config)
+                    if updated.runtime == "subscription-cli"
+                    else OpenAIAgentsBackend(config)
+                )
+            logging.getLogger(__name__).warning(
+                "Model settings reloaded: %s/%s (%s)",
+                updated.name,
+                updated.reasoning,
+                updated.runtime,
+            )
+
+        workflow.reload_model = reload_model
         return cls(config, storage, connectors, github, agent, verifier, workflow)

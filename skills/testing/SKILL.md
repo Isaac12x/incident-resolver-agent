@@ -19,3 +19,9 @@ Run verification in this order:
 6. Final diff inspection.
 
 Never claim that a fix works without reporting executed verification.
+
+The regression must assert the intended behavior, not mirror the patch. Demonstrate
+that it fails on the original defect and passes with the fix when practical; record
+any reproduction limitation. Check a relevant unaffected or failure path as well.
+If verification contradicts the hypothesis, return to investigation within the task
+budget. Do not weaken assertions or stack speculative patches to obtain a green run.
