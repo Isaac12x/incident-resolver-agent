@@ -11,6 +11,9 @@ from dotenv import dotenv_values
 from .config import Config, load_config
 
 PASSTHROUGH_ENV_VARS = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_CONFIG_DIR",
     "GIT_SSH_COMMAND",
     "GIT_ASKPASS",
     "SSH_AUTH_SOCK",
