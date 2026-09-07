@@ -45,7 +45,14 @@ class AgentLifecycle(Protocol):
         reproducible: bool = False,
     ) -> dict[str, Any]: ...
 
-    async def run_tests(self, command: str) -> dict[str, Any]: ...
+    async def run_tests(
+        self,
+        command: str,
+        paths: list[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]: ...
+
+    async def verification_plan(self, seed_paths: list[str]) -> dict[str, Any]: ...
 
     async def open_pr(self, summary: str) -> dict[str, Any]: ...
 
@@ -452,9 +459,18 @@ class OpenAIAgentsBackend:
                 )
 
             @function_tool
-            async def run_tests(command: str) -> str:
+            async def run_tests(
+                command: str,
+                paths: list[str] | None = None,
+                force: bool = False,
+            ) -> str:
                 """Run a verification command and durably record its result and state."""
-                return json.dumps(await run_context.lifecycle.run_tests(command))
+                return json.dumps(await run_context.lifecycle.run_tests(command, paths, force))
+
+            @function_tool
+            async def verification_plan(seed_paths: list[str]) -> str:
+                """Plan fix-first verification rings; pass [] to resume the existing plan."""
+                return json.dumps(await run_context.lifecycle.verification_plan(seed_paths))
 
             @function_tool
             async def open_pr(summary: str) -> str:
@@ -469,6 +485,7 @@ class OpenAIAgentsBackend:
             lifecycle_tools = [
                 mark_investigation_complete,
                 run_tests,
+                verification_plan,
                 open_pr,
                 remember,
             ]
@@ -662,7 +679,8 @@ JSON object as the final argument and use the returned JSON as authoritative:
 
 - `harness-out/incident-session-tool mark_investigation_complete JSON`
   (`root_cause`, `evidence`, `proposed_fix`, `reproducible`)
-- `harness-out/incident-session-tool run_tests JSON` (`command`)
+- `harness-out/incident-session-tool run_tests JSON` (`command`, optional `paths`, `force`)
+- `harness-out/incident-session-tool verification_plan JSON` (`seed_paths`, [] to resume)
 - `harness-out/incident-session-tool open_pr JSON` (`summary`)
 - `harness-out/incident-session-tool remember JSON` (`note`, optional `scope`)
 - `harness-out/incident-session-tool shell JSON` (`command`)
@@ -756,6 +774,7 @@ its lifecycle command succeeds.
                 if name not in {
                     "mark_investigation_complete",
                     "run_tests",
+                    "verification_plan",
                     "open_pr",
                     "remember",
                     "shell",
@@ -774,6 +793,7 @@ its lifecycle command succeeds.
                 if name in {
                     "mark_investigation_complete",
                     "run_tests",
+                    "verification_plan",
                     "open_pr",
                     "remember",
                 }:
@@ -792,9 +812,7 @@ its lifecycle command succeeds.
                     workspace.write_file(arguments["path"], arguments["content"])
                     result = {"written": True}
                 elif name == "replace_in_file":
-                    workspace.replace_in_file(
-                        arguments["path"], arguments["old"], arguments["new"]
-                    )
+                    workspace.replace_in_file(arguments["path"], arguments["old"], arguments["new"])
                     result = {"replaced": True}
                 elif name == "connector_call":
                     connector = str(arguments.get("connector", ""))
@@ -872,17 +890,14 @@ its lifecycle command succeeds.
             if connector.transport == "stdio":
                 arguments.extend(["-c", f"{prefix}.command={json.dumps(connector.command[0])}"])
                 if len(connector.command) > 1:
-                    arguments.extend(
-                        ["-c", f"{prefix}.args={json.dumps(connector.command[1:])}"]
-                    )
+                    arguments.extend(["-c", f"{prefix}.args={json.dumps(connector.command[1:])}"])
             else:
                 arguments.extend(["-c", f"{prefix}.url={json.dumps(connector.url)}"])
                 if connector.auth_token_env:
                     arguments.extend(
                         [
                             "-c",
-                            f"{prefix}.bearer_token_env_var="
-                            f"{json.dumps(connector.auth_token_env)}",
+                            f"{prefix}.bearer_token_env_var={json.dumps(connector.auth_token_env)}",
                         ]
                     )
         return arguments
@@ -951,6 +966,12 @@ its lifecycle command succeeds.
         command.extend(self._mcp_arguments(run_context.capabilities))
         if self.config.model.subscription_profile:
             command.extend(["--profile", self.config.model.subscription_profile])
+        # Pin every fresh/resumed run; host profiles must not silently choose a weaker model.
+        command.extend(["--model", self.config.model.name])
+        if self.config.model.reasoning is not None:
+            command.extend(
+                ["-c", f"model_reasoning_effort={json.dumps(self.config.model.reasoning)}"]
+            )
         command.extend(
             [
                 "--json",
@@ -973,7 +994,7 @@ its lifecycle command succeeds.
         )
         progress = _ConsoleProgress(self.config.model.show_execution_details)
         progress.start(
-            model="subscription-cli",
+            model=self.config.model.name,
             max_turns=self.config.model.max_turns_per_iteration,
             tool_count=4,
         )
@@ -1002,8 +1023,7 @@ its lifecycle command succeeds.
             stderr = stderr_bytes.decode(errors="replace")
             if process.returncode:
                 raise RuntimeError(
-                    f"subscription CLI exited {process.returncode}: "
-                    + (stderr or stdout)[-4000:]
+                    f"subscription CLI exited {process.returncode}: " + (stderr or stdout)[-4000:]
                 )
             discovered_session, decoded = self._decode_output(stdout, output_path)
             if discovered_session and discovered_session != "None":
@@ -1103,6 +1123,23 @@ class IncidentAgent:
             "decisions that must survive compaction. Yield once the task is waiting for an "
             "external deployment or review event, and resume the same session when the harness "
             "supplies it."
+        )
+        parts.append(
+            "# Fix First, Then Expand in Circles\n\n"
+            "First reproduce and fix the reported incident. Call `verification_plan` with the "
+            "incident's source files as seed_paths, then run the narrow regression using "
+            "`run_tests(command, paths)` with every source/test/fixture path the check verifies. "
+            "Only after that regression passes, follow each next_ring from verification_plan([]): "
+            "inspect callers, callees, siblings and shared dependencies for related errors, repair "
+            "demonstrated defects, and verify each ring before widening within the area. "
+            "Finish remaining files in that area; do not make unrelated cleanup changes. "
+            "Record only paths actually exercised by the command, never inferred test coverage. "
+            "The verification graph retains commands, node/edge identities and input hashes. "
+            "Matching passing checks are reused automatically; changed inputs invalidate them. "
+            "Include tests and fixtures in paths; use unscoped commands for whole-project checks. "
+            "Use force=true for checks of changing external state or explicit reproduction. "
+            "If a path cannot be verified, record the blocker instead of claiming coverage. "
+            "Complete the plan and all required checks before open_pr."
         )
         if skills:
             loaded = ", ".join(skill.name for skill in skills)
@@ -1261,6 +1298,7 @@ class IncidentAgent:
             [
                 "code-review-graph",
                 "incident-investigation",
+                "ponytail",
                 "coding",
                 "testing",
                 "github",
@@ -1293,7 +1331,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["code-review-graph", "coding", "testing", "github"],
+            ["code-review-graph", "ponytail", "coding", "testing", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)
@@ -1308,7 +1346,7 @@ class IncidentAgent:
             worktree,
             "address_review",
             "\n".join(f"{comment.author}: {comment.body}" for comment in comments),
-            ["code-review-graph", "review-comments", "coding", "testing"],
+            ["code-review-graph", "review-comments", "ponytail", "coding", "testing"],
             set(),
         )
         validated = ReviewResult.model_validate(result)

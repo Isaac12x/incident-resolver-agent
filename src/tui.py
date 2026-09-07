@@ -8,11 +8,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.theme import Theme
 from textual.widgets import (
     Button,
     Checkbox,
+    Collapsible,
     Footer,
     Header,
     Input,
@@ -27,6 +31,7 @@ from textual.widgets import (
 from .config import (
     Config,
     ConnectorConfig,
+    ModelConfig,
     PlaywrightConfig,
     RepositoryConfig,
     load_config,
@@ -56,22 +61,39 @@ def _lines(value: list[str]) -> str:
 class ConfigurationApp(App[None]):
     """A tabbed, form-based editor that never asks for secret values."""
 
+    TITLE = "Incident Harness"
+    SUB_TITLE = "Configuration"
+    BINDINGS = [Binding("ctrl+s", "save", "Save", priority=True)]
+    HORIZONTAL_BREAKPOINTS = [(0, "narrow"), (70, "wide")]
+
     CSS = """
-    Screen { background: $surface; }
+    Screen { background: $background; }
+    Header { background: $panel; }
+    HeaderIcon { display: none; }
     #content { height: 1fr; }
     .page { padding: 1 2; }
-    .section { height: auto; border: round $primary-darken-2; padding: 1; margin-bottom: 1; }
-    .card { height: auto; border: round $secondary-darken-2; padding: 1; margin-bottom: 1; }
+    .page > Static { height: auto; margin-bottom: 1; color: $text-muted; }
+    .section, .card {
+        height: auto; border-left: thick $primary; padding: 0 1; margin-bottom: 1;
+    }
+    .section-title { text-style: bold; color: $primary; margin-bottom: 1; }
+    Collapsible { padding: 0; margin-bottom: 1; }
     .row { height: auto; }
     .row Input, .row Select { width: 1fr; margin-right: 1; }
     Input, Select, TextArea { margin-bottom: 1; }
     TextArea { height: 7; }
     Checkbox { margin-bottom: 1; }
-    Label { color: $text-muted; }
+    Label { color: $text; width: 1fr; height: auto; }
     Button { margin-right: 1; margin-bottom: 1; }
     #repositories-list, #connectors-list { height: auto; }
     .inline-status { height: auto; min-height: 1; color: $text-muted; margin-bottom: 1; }
-    #status { height: 3; padding: 1 2; }
+    #status { height: auto; max-height: 5; overflow-y: auto; padding: 0 2; }
+    #status.error { color: $error; }
+    #actions { height: 3; padding: 0 2; background: $panel; }
+    #actions Button { min-width: 8; margin-bottom: 0; }
+    .narrow .page { padding: 1 0; }
+    .narrow #actions { padding: 0; }
+    .narrow HeaderClock { display: none; }
     #model-help { height: auto; color: $text-muted; margin-bottom: 1; }
     """
 
@@ -82,6 +104,23 @@ class ConfigurationApp(App[None]):
         command_runner: CommandRunner = subprocess.run,
     ) -> None:
         super().__init__()
+        self.register_theme(
+            Theme(
+                name="incident-graphite",
+                primary="#66d9c3",
+                secondary="#a8b8c4",
+                accent="#e9b96e",
+                foreground="#e4edf2",
+                background="#10181f",
+                surface="#17232c",
+                panel="#20313b",
+                success="#66d9a0",
+                warning="#e9b96e",
+                error="#ff8c82",
+                dark=True,
+            )
+        )
+        self.theme = "incident-graphite"
         self.path = path
         self.command_runner = command_runner
         self.config = load_config(path)
@@ -97,19 +136,19 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._model_page(), classes="page")
             with TabPane("Runtime", id="runtime-tab"):
                 yield VerticalScroll(*self._runtime_page(), classes="page")
-            with TabPane("Repositories", id="repositories-tab"):
+            with TabPane("Repos", id="repositories-tab"):
                 yield VerticalScroll(*self._repositories_page(), classes="page")
-            with TabPane("Connections", id="connections-tab"):
+            with TabPane("Sources", id="connections-tab"):
                 yield VerticalScroll(*self._connections_page(), classes="page")
             with TabPane("Safety", id="safety-tab"):
                 yield VerticalScroll(*self._safety_page(), classes="page")
         # Validation errors can contain Pydantic markup such as ``[type=...]``. Render the
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
-        yield Static("", id="status", markup=False)
+        yield Static(str(self.path), id="status", markup=False)
         yield Horizontal(
-            Button("Save configuration", id="save", variant="primary"),
+            Button("Save", id="save", variant="primary"),
             Button("Quit", id="quit"),
-            classes="row",
+            id="actions",
         )
         yield Footer()
 
@@ -133,8 +172,7 @@ class ConfigurationApp(App[None]):
         model = self.config.model
         return [
             Static(
-                "Use the Agents SDK with an OpenAI-compatible endpoint, or a host-authenticated "
-                "subscription CLI. Secrets are referenced, never saved here."
+                "Choose the model for incident investigation, repair, and review."
             ),
             Vertical(
                 Label("Agent runtime"),
@@ -143,6 +181,16 @@ class ConfigurationApp(App[None]):
                     "model-runtime",
                     ("agents-sdk", "subscription-cli"),
                 ),
+                classes="section",
+            ),
+            Vertical(
+                Label("Incident model", classes="section-title"),
+                Label("Model name"),
+                self._input(model.name, "model", placeholder="Provider model identifier"),
+                Label("Reasoning effort (blank uses provider default)"),
+                self._input(model.reasoning, "model-reasoning"),
+                Button("Use OpenAI defaults", id="model-defaults"),
+                id="model-selection-section",
                 classes="section",
             ),
             Vertical(
@@ -166,8 +214,6 @@ class ConfigurationApp(App[None]):
             Vertical(
                 Label("Provider label (for your records)"),
                 self._input(model.provider, "provider", placeholder="ollama, vllm, openai, ..."),
-                Label("Model name"),
-                self._input(model.name, "model", placeholder="the model identifier"),
                 Label("OpenAI-compatible base URL (include /v1 when required)"),
                 self._input(
                     model.base_url, "model-base-url", placeholder="https://api.example.com/v1"
@@ -179,9 +225,7 @@ class ConfigurationApp(App[None]):
                 id="agents-sdk-endpoint-section",
                 classes="section",
             ),
-            Vertical(
-                Label("Reasoning preference"),
-                self._input(model.reasoning, "model-reasoning", placeholder="high"),
+            Collapsible(
                 Label("Temperature (blank uses provider default)"),
                 self._input(model.temperature, "model-temperature"),
                 Label("Top P (blank uses provider default)"),
@@ -215,7 +259,8 @@ class ConfigurationApp(App[None]):
                 ),
                 Label("Maximum durable sub-agents per task"),
                 self._input(self.config.agent.max_subagents, "max-subagents"),
-                classes="section",
+                title="Sampling, budgets & session memory",
+                id="model-advanced",
             ),
         ]
 
@@ -632,7 +677,7 @@ class ConfigurationApp(App[None]):
         )
         repositories = [self._collect_repository(key) for key in self._repository_keys]
         connectors = [self._collect_connector(key) for key in self._connector_keys]
-        return Config(
+        draft = Config(
             runtime_root=self._value("runtime-root").strip(),
             max_concurrent_tasks=self._number("max-concurrent-tasks", integer=True),
             poll_interval_seconds=self._number("worker-poll-interval"),
@@ -647,6 +692,8 @@ class ConfigurationApp(App[None]):
             repositories=repositories,
             connectors=connectors,
         )
+        # model_copy deliberately permits incomplete drafts; validate all nested fields on save.
+        return Config.model_validate(draft.model_dump())
 
     def _collect_repository(self, key: str) -> RepositoryConfig:
         prefix = f"repo-{key}"
@@ -899,6 +946,11 @@ class ConfigurationApp(App[None]):
         if button_id == "quit":
             self.exit()
             return
+        if button_id == "model-defaults":
+            defaults = ModelConfig()
+            self.query_one("#model", Input).value = defaults.name
+            self.query_one("#model-reasoning", Input).value = defaults.reasoning or ""
+            return
         if button_id == "add-repository":
             key = self._new_key("repository")
             self._repository_keys.append(key)
@@ -932,12 +984,27 @@ class ConfigurationApp(App[None]):
             return
         if button_id != "save":
             return
+        self.action_save()
+
+    def action_save(self) -> None:
+        status = self.query_one("#status", Static)
         try:
-            self.config = self._collect()
-            save_config(self.config, self.path)
+            draft = self._collect()
+            save_config(draft, self.path)
+            self.config = draft
+            status.remove_class("error")
             self._set_status(f"Saved {self.path}")
-        except (TypeError, ValueError) as error:
-            self._set_status(f"Invalid configuration: {error}")
+        except (OSError, TypeError, ValueError) as error:
+            status.add_class("error")
+            message = (
+                "; ".join(
+                    f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
+                    for item in error.errors(include_input=False, include_url=False)
+                )
+                if isinstance(error, ValidationError)
+                else str(error)
+            )
+            self._set_status(f"Could not save: {message}")
 
 
 def run_tui(path: Path = Path(".agent/config.toml")) -> None:
