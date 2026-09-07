@@ -1124,14 +1124,15 @@ class IncidentAgent:
             "external deployment or review event, and resume the same session when the harness "
             "supplies it."
         )
-        parts.append(
-            "# Pull Request Body Copy\n\n"
-            "When calling `open_pr`, make its summary the final body copy for the PR. Follow the "
-            "loaded `show-me` skill: keep prose brief and include one concise Mermaid flow or "
-            "code-shape sketch when the incident evidence supports it. Ground every file, state, "
-            "relationship, and verification claim in repository evidence. Cover root cause, "
-            "changed behavior, executed checks, and deployment verification."
-        )
+        if any(skill.name == "show-me" for skill in skills):
+            parts.append(
+                "# Pull Request Body Copy\n\n"
+                "Apply the loaded `show-me` skill only while drafting the summary passed to "
+                "`open_pr` for a new pull request. Make that summary the final PR body copy. "
+                "Ground every file, state, relationship, and verification claim in repository "
+                "evidence. Cover root cause, changed behavior, executed checks, and deployment "
+                "verification. Do not apply `show-me` to any other lifecycle work."
+            )
         parts.append(
             "# Fix First, Then Expand in Circles\n\n"
             "First reproduce and fix the reported incident. Call `verification_plan` with the "
@@ -1307,9 +1308,9 @@ class IncidentAgent:
                 "code-review-graph",
                 "incident-investigation",
                 "ponytail",
-                "show-me",
                 "coding",
                 "testing",
+                "show-me",
                 "github",
             ],
             {"incidents", "errors", "logs", "traces", "metrics", "runtime"},
@@ -1340,7 +1341,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["code-review-graph", "ponytail", "show-me", "coding", "testing", "github"],
+            ["code-review-graph", "ponytail", "coding", "testing", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)
@@ -1359,7 +1360,6 @@ class IncidentAgent:
                 "code-review-graph",
                 "review-comments",
                 "ponytail",
-                "show-me",
                 "coding",
                 "testing",
             ],

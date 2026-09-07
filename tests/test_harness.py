@@ -42,6 +42,7 @@ from src.models import (
     PullRequestReference,
     ReviewComment,
     ReviewResult,
+    SessionResult,
     TaskEvent,
     TaskState,
     VerificationResult,
@@ -1318,7 +1319,9 @@ async def _connected_server(_created):  # noqa: ANN001, ANN202
 
 
 @pytest.mark.asyncio
-async def test_agent_context_and_all_entry_points(config: Config, incident: Incident) -> None:
+async def test_agent_context_and_all_entry_points(
+    config: Config, incident: Incident, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config.agent.system_prompt = "Follow the incident resolution policy."
     config.safety.positive_goals = ["restore the service"]
     config.safety.negative_goals = ["do not expose secrets"]
@@ -1352,14 +1355,17 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
             tools,
             connector_tools,
             output_type=None,  # noqa: ANN001
+            **_kwargs,
         ):  # noqa: ANN202
             calls.append(instructions + prompt)
             output_types.append(output_type)
-            if len(calls) == 1:
+            if output_type is InvestigationResult:
                 return {"root_cause": "bug", "evidence": ["trace"], "proposed_fix": "fix"}
-            if len(calls) == 2:
+            if output_type is FixResult:
                 return {"changed": True, "summary": "fixed", "tests_passed": True}
-            return {"changed": False, "summary": "answered", "tests_passed": True}
+            if output_type is ReviewResult:
+                return {"changed": False, "summary": "answered", "tests_passed": True}
+            return {"summary": "published", "waiting_for_external_event": True}
 
     agent = IncidentAgent(config, storage, ConnectorManager([]), Backend(config))
     assert (await agent.investigate(task, worktree)).root_cause == "bug"
@@ -1376,6 +1382,8 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
         }
     )
     assert comment and not (await agent.address_review(task, [comment], worktree)).changed
+    monkeypatch.setattr(storage, "refresh_worktree", lambda *_args: None)
+    await agent.run_session(task, worktree, object())  # type: ignore[arg-type]
     assert "repository rules" in calls[0] and "remember this" in calls[0]
     assert "Follow the incident resolution policy." in calls[0]
     assert "Binding Safety Contract" in calls[0]
@@ -1388,19 +1396,29 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
-    assert "# Show me" in calls[1] and "# Coding" in calls[1]
+    assert all("# Show me" not in call for call in calls[:3])
+    assert "# Coding" in calls[1]
     assert "# Testing" in calls[1] and "# GitHub" in calls[1]
-    assert "# Review Comments" in calls[2]
-    assert output_types == [InvestigationResult, FixResult, ReviewResult]
-    assert len(storage.messages(task.conversation_id)) == 6
+    assert "# Show me" not in calls[2] and "# Review Comments" in calls[2]
+    assert "Pull Request Body Copy" not in "".join(calls[:3])
+    assert "# Show me" in calls[3] and "# Pull Request Body Copy" in calls[3]
+    assert calls[3].index("# Testing") < calls[3].index("# Show me") < calls[3].index("# GitHub")
+    assert output_types == [InvestigationResult, FixResult, ReviewResult, SessionResult]
+    assert len(storage.messages(task.conversation_id)) == 8
     skill_events = [
         event for event in storage.events(task.task_id) if event.type == "agent.skills_resolved"
     ]
-    assert len(skill_events) == 3
+    assert len(skill_events) == 4
     assert "checkout-diagnostics" in skill_events[0].data["loaded"]
-    for event in skill_events[1:]:
+    assert all("show-me" not in event.data["loaded"] for event in skill_events[:3])
+    for event in skill_events[1:3]:
         assert event.data["loaded"].index("ponytail") < event.data["loaded"].index("coding")
-        assert event.data["loaded"].index("show-me") < event.data["loaded"].index("coding")
+    assert skill_events[3].data["loaded"].index("testing") < skill_events[3].data["loaded"].index(
+        "show-me"
+    )
+    assert skill_events[3].data["loaded"].index("show-me") < skill_events[3].data["loaded"].index(
+        "github"
+    )
 
 
 @pytest.mark.asyncio

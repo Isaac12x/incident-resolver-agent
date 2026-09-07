@@ -9,8 +9,8 @@ Read a matching skill before acting; when several skills apply, follow them in l
 | Investigate or reproduce a production incident | `skills/incident-investigation/SKILL.md` |
 | Implement or modify an incident fix | `skills/coding/SKILL.md` |
 | Select or simplify an incident repair | `skills/ponytail/SKILL.md` |
-| Explain an incident or change visually | `skills/show-me/SKILL.md` |
 | Test or verify an incident fix locally | `skills/testing/SKILL.md` |
+| Draft visual details for an incident pull-request body | `skills/show-me/SKILL.md` |
 | Create, update, or monitor an incident pull request | `skills/github/SKILL.md` |
 | Verify the current pull request's preview deployment | `skills/deployment-verification/SKILL.md` |
 | Address authorized pull-request review feedback | `skills/review-comments/SKILL.md` |

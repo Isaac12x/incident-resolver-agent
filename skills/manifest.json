@@ -12,7 +12,7 @@
     {
       "name": "show-me",
       "path": "show-me/SKILL.md",
-      "description": "Explain incident behavior and changes with concise, evidence-based visuals"
+      "description": "Draft concise visual details for a new incident pull-request body"
     },
     {
       "name": "coding",
