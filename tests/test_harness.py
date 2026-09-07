@@ -1149,6 +1149,7 @@ def test_builtin_skill_manifest_and_routing_are_complete() -> None:
     entries = manifest["skills"]
     expected = {
         "ponytail",
+        "show-me",
         "coding",
         "deployment-verification",
         "github",
@@ -1387,7 +1388,8 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
-    assert "# Coding" in calls[1] and "# Testing" in calls[1] and "# GitHub" in calls[1]
+    assert "# Show me" in calls[1] and "# Coding" in calls[1]
+    assert "# Testing" in calls[1] and "# GitHub" in calls[1]
     assert "# Review Comments" in calls[2]
     assert output_types == [InvestigationResult, FixResult, ReviewResult]
     assert len(storage.messages(task.conversation_id)) == 6
@@ -1398,6 +1400,7 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "checkout-diagnostics" in skill_events[0].data["loaded"]
     for event in skill_events[1:]:
         assert event.data["loaded"].index("ponytail") < event.data["loaded"].index("coding")
+        assert event.data["loaded"].index("show-me") < event.data["loaded"].index("coding")
 
 
 @pytest.mark.asyncio
