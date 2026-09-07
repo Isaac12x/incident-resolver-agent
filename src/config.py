@@ -258,15 +258,33 @@ class DeploymentConfig(BaseModel):
 class ConnectorConfig(BaseModel):
     name: str
     purpose: Literal["incident", "output", "observability", "other"] = "other"
-    type: Literal["mcp", "webhook"] = "mcp"
+    type: Literal["mcp", "webhook", "loki", "grafana"] = "mcp"
     transport: Literal["stdio", "streamable-http", "sse"] = "streamable-http"
     url: str | None = None
     command: list[str] = Field(default_factory=list)
     auth_token_env: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+    tenant_id: str | None = None
+    datasource_uid: str | None = None
 
     @model_validator(mode="after")
     def transport_has_target(self) -> ConnectorConfig:
+        if self.type in {"loki", "grafana"}:
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(self.url or "")
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Loki/Grafana connectors require an HTTP(S) URL")
+            if parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("connector URL must not contain credentials, query, or fragment")
+            if self.type == "grafana" and not self.datasource_uid:
+                raise ValueError("Grafana connectors require a Loki datasource_uid")
+            if not self.capabilities:
+                self.capabilities = ["logs", "metrics"]
+        if self.tenant_id is not None and (
+            not self.tenant_id.strip() or any(c in self.tenant_id for c in "\r\n|")
+        ):
+            raise ValueError("tenant_id must identify one nonempty tenant")
         if self.type == "mcp" and self.transport == "stdio" and not self.command:
             raise ValueError("stdio connectors require command")
         if self.type == "mcp" and self.transport != "stdio" and not self.url:
@@ -300,7 +318,7 @@ class Config(BaseModel):
 
     def repository(self, name: str) -> RepositoryConfig:
         for repository in self.repositories:
-            if repository.name == name:
+            if repository.name.casefold() == name.casefold():
                 return repository
         raise KeyError(f"repository is not configured: {name}")
 

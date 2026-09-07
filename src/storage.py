@@ -13,6 +13,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .models import Incident, TaskEvent, TaskRecord, TaskState, utc_now
+from .tooling import repository_candidates
 
 BUCKETS = ("pending", "active", "waiting", "completed", "blocked", "failed")
 STATE_BUCKET = {
@@ -24,6 +25,10 @@ STATE_BUCKET = {
     TaskState.BLOCKED: "blocked",
     TaskState.FAILED: "failed",
 }
+
+
+class RepositoryBusyError(FileExistsError):
+    """Another live task is preparing a worktree in this repository."""
 
 
 class Storage:
@@ -162,7 +167,7 @@ class Storage:
             (
                 task
                 for task in self.list_tasks()
-                if task.repository == repository and task.pr_number == number
+                if task.repository.casefold() == repository.casefold() and task.pr_number == number
             ),
             None,
         )
@@ -300,14 +305,19 @@ class Storage:
                     except PermissionError:
                         pass
                 if owner > 0:
-                    raise FileExistsError(f"lock is held by process {owner}: {name}") from None
+                    raise RepositoryBusyError(f"lock is held by process {owner}: {name}") from None
                 try:
                     current_stat = path.stat()
                     if stale_identity == (current_stat.st_dev, current_stat.st_ino):
                         path.unlink()
                 except FileNotFoundError:
                     pass
-                descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                except FileExistsError:
+                    raise RepositoryBusyError(
+                        f"repository lock was acquired concurrently: {name}"
+                    ) from None
             stat = os.fstat(descriptor)
             identity = (stat.st_dev, stat.st_ino)
             os.write(descriptor, str(os.getpid()).encode())
@@ -330,7 +340,7 @@ class Storage:
         if slug.endswith(".lock"):
             slug = slug.removesuffix(".lock")
         slug = slug[:64].rstrip(".-_") or "incident"
-        return f"agent/{slug}-{task_id[-6:].lower()}"
+        return f"incident-harness/fix/{slug}-{task_id[-6:].lower()}"
 
     def create_worktree(
         self,
@@ -354,9 +364,8 @@ class Storage:
                 repository = mirror
                 if not mirror.exists():
                     subprocess.run(["git", "clone", "--mirror", clone_url, str(mirror)], check=True)
-                else:
-                    subprocess.run(["git", "-C", str(mirror), "fetch", "--prune"], check=True)
-            branch = task.branch or self._branch_name(task.external_id, task.task_id)
+                self._refresh_repository(mirror, base_branch)
+            branch = task.branch or self._branch_name(task.summary, task.task_id)
             base_ref = self._base_ref(repository, base_branch)
             subprocess.run(
                 [
@@ -381,16 +390,12 @@ class Storage:
     ) -> Path | None:
         candidates: list[Path] = []
         if configured_path:
-            candidates.append(Path(configured_path).expanduser())
+            configured = Path(configured_path).expanduser()
+            if configured.exists():
+                return configured.resolve()
         for runtime_root in (self.root, self.root.parent / ".agents"):
             repositories = runtime_root / "repositories"
-            candidates.extend(
-                (
-                    repositories / repository.replace("/", "--"),
-                    repositories / f"{repository.replace('/', '--')}.git",
-                    repositories / repository,
-                )
-            )
+            candidates.extend(repository_candidates(repositories, repository))
         for candidate in candidates:
             if candidate.exists() and (
                 (candidate / "HEAD").exists() or (candidate / ".git").is_dir()
@@ -420,7 +425,35 @@ class Storage:
             check=True,
         ).stdout.strip()
         if bare == "true":
-            subprocess.run(["git", "-C", str(repository), "fetch", "--prune", "origin"], check=True)
+            # Keep incident branches out of a mirror's destructive refs/* refresh/prune.
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "config",
+                    "--replace-all",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(repository), "config", "remote.origin.mirror", "false"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(repository),
+                    "fetch",
+                    "--prune",
+                    "origin",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                check=True,
+            )
             return
         status = subprocess.run(
             ["git", "-C", str(repository), "status", "--porcelain", "--untracked-files=no"],

@@ -102,8 +102,51 @@ install_uv_if_needed
     exit 1
   fi
   "${VENV_BIN}/incident-agent" init
+  "${VENV_BIN}/incident-agent" install-repositories \
+    --source-root "${REPO_ROOT}/.agent/repositories" \
+    --destination-root "${INSTALL_ROOT}/.agent/repositories"
 )
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
+
+if (cd "${INSTALL_ROOT}" && "${VENV_BIN}/python" -c '
+from src.config import load_config
+import sys
+sys.exit(0 if any(r.publish_mode == "github" or "github.com" in (r.clone_url or "")
+                  for r in load_config().repositories) else 1)
+'); then
+if ! command -v gh >/dev/null 2>&1; then
+  echo "GitHub CLI (gh) is required for repository login and PR publishing." >&2
+  exit 1
+fi
+
+# The TUI login belongs to the setup account. Provision that same GitHub account
+# for the service on first install, without copying an entire home or printing a token.
+# Preserve an existing service login on upgrades. Pipe credentials over stdin only.
+(
+  cd "${INSTALL_ROOT}"
+  service_gh() {
+    runuser -u "${SERVICE_USER}" -- env -u GH_TOKEN -u GITHUB_TOKEN \
+      -u GH_CONFIG_DIR -u XDG_CONFIG_HOME gh "$@"
+  }
+  if ! service_gh auth status --hostname github.com >/dev/null 2>&1; then
+    if gh auth status --hostname github.com >/dev/null 2>&1; then
+      echo "==> Provisioning the TUI GitHub account for ${SERVICE_USER}"
+      gh auth token --hostname github.com | \
+        service_gh auth login --hostname github.com --git-protocol https --with-token
+    else
+      echo "GitHub login required: run gh auth login in the TUI setup account or as ${SERVICE_USER}." >&2
+      exit 1
+    fi
+  fi
+  service_gh auth setup-git --hostname github.com
+  # Existing selections can contain SSH URLs. Use the same gh credential for Git and API calls.
+  runuser -u "${SERVICE_USER}" -- git config --global --replace-all \
+    url.https://github.com/.insteadOf git@github.com:
+  runuser -u "${SERVICE_USER}" -- git config --global --add \
+    url.https://github.com/.insteadOf ssh://git@github.com/
+)
+
+fi
 
 echo "==> Installing systemd units and environment template"
 install -d -m 0750 -o root -g "${SERVICE_USER}" "${ENV_DIR}"

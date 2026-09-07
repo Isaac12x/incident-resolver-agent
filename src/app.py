@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend, SubscriptionCLIBackend
 from .config import Config, load_config
 from .connectors import ConnectorManager
-from .github import GitHubService
+from .github import GitHubCLIAdapter, GitHubService
 from .storage import Storage
 from .tooling import build_repository_graphs
 from .verify import DeploymentVerifier
@@ -45,7 +45,14 @@ class Application:
             ),
         )
         github = GitHubService(
-            config.github, webhook_secret=os.getenv(config.github.webhook_secret_env)
+            config.github,
+            webhook_secret=os.getenv(config.github.webhook_secret_env),
+            api=GitHubCLIAdapter(config, storage)
+            if any(
+                repository.publish_mode == "github" or "github.com" in (repository.clone_url or "")
+                for repository in config.repositories
+            )
+            else None,
         )
         backend = agent_backend or (
             SubscriptionCLIBackend(config)

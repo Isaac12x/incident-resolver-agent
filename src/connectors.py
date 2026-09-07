@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -29,13 +30,59 @@ class ConnectorManager:
         default_repository: str | None = None,
     ) -> None:
         self.configs = {config.name: config for config in configs}
-        self.factories = {
+        self.factories: dict[str, Callable[[ConnectorConfig], Awaitable[Any]]] = {
             config.name: self._mcp_factory for config in configs if config.type == "mcp"
         }
+        self.factories.update({
+            config.name: self._observability_factory
+            for config in configs if config.type in {"loki", "grafana"}
+        })
         self.factories.update(factories or {})
         self.sessions: dict[str, Any] = {}
         self.errors: dict[str, str] = {}
         self.default_repository = default_repository
+
+    @staticmethod
+    async def _observability_factory(config: ConnectorConfig) -> Any:
+        from .observability import ObservabilityServer
+
+        server = ObservabilityServer(config)
+        await server.connect()
+        return server
+
+    @staticmethod
+    async def _probe(session: Any) -> None:
+        if check := getattr(session, "check_health", None):
+            await check()
+        elif listing := getattr(session, "list_tools", None):
+            # Bypass MCP discovery caches so this proves the transport is alive.
+            if invalidate := getattr(session, "invalidate_tools_cache", None):
+                invalidate()
+            await listing()
+
+    async def health(self) -> dict[str, ConnectorTestResult]:
+        async def check(name: str) -> ConnectorTestResult:
+            try:
+                async with asyncio.timeout(5):
+                    result = await self.test_connection(name)
+                    return result
+            except TimeoutError:
+                return ConnectorTestResult(name, False, "connection check timed out")
+
+        names = [name for name in self.configs if name in self.factories]
+        results = dict(zip(
+            names, await asyncio.gather(*(check(name) for name in names)), strict=True
+        ))
+        # An intake webhook cannot retrieve the evidence behind a Grafana alert.
+        if (
+            any(c.name == "grafana" and c.type == "webhook" for c in self.configs.values())
+            and not any("logs" in c.capabilities and c.name in self.factories
+                        for c in self.configs.values())
+        ):
+            results["observability"] = ConnectorTestResult(
+                "observability", False, "Grafana intake has no configured log-query connector"
+            )
+        return results
 
     @staticmethod
     async def _mcp_factory(config: ConnectorConfig) -> Any:
@@ -59,9 +106,11 @@ class ConnectorManager:
                         f"environment variable {config.auth_token_env} is not configured"
                     )
                 headers["Authorization"] = f"Bearer {token}"
-            params = {"url": config.url or "", "headers": headers}
             server_type = MCPServerSse if config.transport == "sse" else MCPServerStreamableHttp
-            server = server_type(params, name=config.name, cache_tools_list=True)
+            server = server_type(
+                {"url": config.url or "", "headers": headers},
+                name=config.name, cache_tools_list=True,
+            )
         await server.connect()
         return server
 
@@ -101,7 +150,7 @@ class ConnectorManager:
                 ):
                     tools.append(session)
                     continue
-                session_tools = getattr(session, "tools", [])
+                session_tools: Any = getattr(session, "tools", [])
                 if callable(session_tools):
                     session_tools = await session_tools()
                 tools.extend(session_tools)
@@ -110,15 +159,17 @@ class ConnectorManager:
     async def test_connection(self, name: str) -> ConnectorTestResult:
         if name not in self.configs:
             return ConnectorTestResult(name, False, "unknown connector")
-        if name in self.sessions:
-            return ConnectorTestResult(name, True, "connected")
-        if name in self.errors:
-            return ConnectorTestResult(name, False, self.errors[name])
         if name not in self.factories:
             return ConnectorTestResult(name, False, "no runtime adapter configured")
         try:
-            session = await self.factories[name](self.configs[name])
-            await self._close(session)
+            if name in self.sessions:
+                await self._probe(self.sessions[name])
+            else:
+                session = await self.factories[name](self.configs[name])
+                try:
+                    await self._probe(session)
+                finally:
+                    await self._close(session)
             return ConnectorTestResult(name, True, "connected")
         except Exception as error:  # connector errors are returned, not allowed to kill the TUI
             return ConnectorTestResult(name, False, str(error))
