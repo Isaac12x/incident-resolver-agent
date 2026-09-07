@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -129,14 +130,17 @@ DEFAULT_SAFEGUARDS = (
 
 
 class ModelConfig(BaseModel):
+    auto_upgrade: bool = True
     runtime: Literal["agents-sdk", "subscription-cli"] = "agents-sdk"
     mode: Literal["local", "remote"] = "remote"
     provider: str = "openai"
     base_url: str | None = None
     api_key_env: str = "OPENAI_API_KEY"
     organization_env: str | None = None
-    name: str = "gpt-5"
-    reasoning: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = "high"
+    # Quality-first default, verified against the OpenAI model catalog on 2026-09-07.
+    # Keep explicit provider/model overrides for private and compatible deployments.
+    name: str = Field("gpt-6-astra", min_length=1)
+    reasoning: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = "max"
     temperature: float | None = Field(None, ge=0, le=2)
     top_p: float | None = Field(None, gt=0, le=1)
     max_tokens: int | None = Field(None, ge=1)
@@ -152,6 +156,13 @@ class ModelConfig(BaseModel):
     # non-interactive runs approval-free so the durable workflow can progress.
     subscription_command: list[str] = Field(default_factory=lambda: ["codex", "--yolo"])
     subscription_profile: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("model name cannot be blank")
+        return value.strip()
 
     @model_validator(mode="after")
     def local_mode_has_endpoint(self) -> ModelConfig:
@@ -244,10 +255,21 @@ class RepositoryConfig(BaseModel):
     local_path: Path | None = None
     publish_mode: Literal["auto", "github", "local"] = "auto"
     base_branch: str = "main"
+    responsibility_paths: list[str] = Field(default_factory=lambda: ["."])
     incident_environments: list[str] = Field(default_factory=lambda: ["production"])
     verification_environment: str = "preview"
     project_instructions: str = "AGENTS.md"
     playwright: PlaywrightConfig = Field(default_factory=PlaywrightConfig)
+
+    @field_validator("responsibility_paths")
+    @classmethod
+    def bounded_responsibility(cls, paths: list[str]) -> list[str]:
+        if not paths or any(
+            not path.strip() or Path(path).is_absolute() or ".." in Path(path).parts
+            for path in paths
+        ):
+            raise ValueError("responsibility_paths must be nonempty repository-relative paths")
+        return paths
 
 
 class DeploymentConfig(BaseModel):
@@ -333,11 +355,34 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
             else ModelConfig()
         )
         config = Config(runtime_root=path.parent, model=model)
+        upgrade_model(config.model)
         if create:
             save_config(config, path)
         return config
     with path.open("rb") as handle:
-        return Config.model_validate(tomllib.load(handle))
+        config = Config.model_validate(tomllib.load(handle))
+    if upgrade_model(config.model) and create:
+        save_config(config, path)
+    return config
+
+
+def upgrade_model(model: ModelConfig) -> bool:
+    """Apply the shipped, reviewed upgrade policy, including to saved configurations."""
+    if not model.auto_upgrade or model.provider != "openai" or model.base_url:
+        return False
+    if model.mode == "local":
+        return False
+    policy = json.loads(Path(__file__).with_name("model-policy.json").read_text())
+    if not isinstance(policy, dict) or not isinstance(policy.get("predecessors"), list):
+        raise ValueError("model upgrade policy requires a list of predecessors")
+    if model.name not in policy["predecessors"] and model.name != policy["name"]:
+        return False
+    updated = model.model_copy(update={"name": policy["name"], "reasoning": policy["reasoning"]})
+    updated = ModelConfig.model_validate(updated.model_dump())
+    if updated == model:
+        return False
+    model.name, model.reasoning = updated.name, updated.reasoning
+    return True
 
 
 def _toml_value(value: Any) -> str:

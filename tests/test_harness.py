@@ -42,11 +42,13 @@ from src.models import (
     PullRequestReference,
     ReviewComment,
     ReviewResult,
+    SessionResult,
     TaskEvent,
     TaskState,
     VerificationResult,
 )
 from src.server import create_server
+from src.skills import SkillResolver
 from src.storage import Storage
 from src.tooling import (
     ToolResult,
@@ -124,6 +126,8 @@ def test_configuration_round_trip_and_validation(config: Config, tmp_path: Path)
     assert created.server.host == "0.0.0.0"
     assert created.server.port == 8765
     assert created.connectors == []
+    assert created.model.name == "gpt-6-astra"
+    assert created.model.reasoning == "max"
     another = Config()
     created.safety.positive_goals.append("task-specific goal")
     assert "task-specific goal" not in another.safety.positive_goals
@@ -131,6 +135,8 @@ def test_configuration_round_trip_and_validation(config: Config, tmp_path: Path)
         ModelConfig(mode="local")
     with pytest.raises(ValueError, match="reasoning"):
         ModelConfig(reasoning="extreme")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="model name"):
+        ModelConfig(name="   ")
     assert TriggerConfig(hook_path="/custom/incidents/").hook_path == "/custom/incidents"
     with pytest.raises(ValueError, match="absolute route"):
         TriggerConfig(hook_path="custom/{connector}")
@@ -1143,6 +1149,8 @@ def test_builtin_skill_manifest_and_routing_are_complete() -> None:
     manifest = json.loads(Path("skills/manifest.json").read_text())
     entries = manifest["skills"]
     expected = {
+        "ponytail",
+        "show-me",
         "coding",
         "deployment-verification",
         "github",
@@ -1155,8 +1163,8 @@ def test_builtin_skill_manifest_and_routing_are_complete() -> None:
     resolver = Path("AGENTS.md").read_text()
     for entry in entries:
         skill_path = Path("skills") / entry["path"]
-        content = skill_path.read_text()
-        assert "\ntriggers:\n" in content
+        resolved = SkillResolver([Path("skills")], max_auto_skills=0).resolve([entry["name"]], "")
+        assert [skill.path for skill in resolved.selected] == [skill_path]
         assert f"`{skill_path}`" in resolver
 
 
@@ -1311,7 +1319,9 @@ async def _connected_server(_created):  # noqa: ANN001, ANN202
 
 
 @pytest.mark.asyncio
-async def test_agent_context_and_all_entry_points(config: Config, incident: Incident) -> None:
+async def test_agent_context_and_all_entry_points(
+    config: Config, incident: Incident, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config.agent.system_prompt = "Follow the incident resolution policy."
     config.safety.positive_goals = ["restore the service"]
     config.safety.negative_goals = ["do not expose secrets"]
@@ -1345,14 +1355,17 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
             tools,
             connector_tools,
             output_type=None,  # noqa: ANN001
+            **_kwargs,
         ):  # noqa: ANN202
             calls.append(instructions + prompt)
             output_types.append(output_type)
-            if len(calls) == 1:
+            if output_type is InvestigationResult:
                 return {"root_cause": "bug", "evidence": ["trace"], "proposed_fix": "fix"}
-            if len(calls) == 2:
+            if output_type is FixResult:
                 return {"changed": True, "summary": "fixed", "tests_passed": True}
-            return {"changed": False, "summary": "answered", "tests_passed": True}
+            if output_type is ReviewResult:
+                return {"changed": False, "summary": "answered", "tests_passed": True}
+            return {"summary": "published", "waiting_for_external_event": True}
 
     agent = IncidentAgent(config, storage, ConnectorManager([]), Backend(config))
     assert (await agent.investigate(task, worktree)).root_cause == "bug"
@@ -1369,6 +1382,8 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
         }
     )
     assert comment and not (await agent.address_review(task, [comment], worktree)).changed
+    monkeypatch.setattr(storage, "refresh_worktree", lambda *_args: None)
+    await agent.run_session(task, worktree, object())  # type: ignore[arg-type]
     assert "repository rules" in calls[0] and "remember this" in calls[0]
     assert "Follow the incident resolution policy." in calls[0]
     assert "Binding Safety Contract" in calls[0]
@@ -1381,15 +1396,29 @@ async def test_agent_context_and_all_entry_points(config: Config, incident: Inci
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
-    assert "# Coding" in calls[1] and "# Testing" in calls[1] and "# GitHub" in calls[1]
-    assert "# Review Comments" in calls[2]
-    assert output_types == [InvestigationResult, FixResult, ReviewResult]
-    assert len(storage.messages(task.conversation_id)) == 6
+    assert all("# Show me" not in call for call in calls[:3])
+    assert "# Coding" in calls[1]
+    assert "# Testing" in calls[1] and "# GitHub" in calls[1]
+    assert "# Show me" not in calls[2] and "# Review Comments" in calls[2]
+    assert "Pull Request Body Copy" not in "".join(calls[:3])
+    assert "# Show me" in calls[3] and "# Pull Request Body Copy" in calls[3]
+    assert calls[3].index("# Testing") < calls[3].index("# Show me") < calls[3].index("# GitHub")
+    assert output_types == [InvestigationResult, FixResult, ReviewResult, SessionResult]
+    assert len(storage.messages(task.conversation_id)) == 8
     skill_events = [
         event for event in storage.events(task.task_id) if event.type == "agent.skills_resolved"
     ]
-    assert len(skill_events) == 3
+    assert len(skill_events) == 4
     assert "checkout-diagnostics" in skill_events[0].data["loaded"]
+    assert all("show-me" not in event.data["loaded"] for event in skill_events[:3])
+    for event in skill_events[1:3]:
+        assert event.data["loaded"].index("ponytail") < event.data["loaded"].index("coding")
+    assert skill_events[3].data["loaded"].index("testing") < skill_events[3].data["loaded"].index(
+        "show-me"
+    )
+    assert skill_events[3].data["loaded"].index("show-me") < skill_events[3].data["loaded"].index(
+        "github"
+    )
 
 
 @pytest.mark.asyncio
@@ -1431,7 +1460,7 @@ async def test_agent_preloads_fresh_code_review_graph(
 
 @pytest.mark.asyncio
 async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatch, capsys) -> None:
-    assert OpenAIAgentsBackend(Config())._model(None) == "gpt-5"  # noqa: SLF001
+    assert OpenAIAgentsBackend(Config())._model(None) == "gpt-6-astra"  # noqa: SLF001
     config.model = ModelConfig(
         mode="local",
         provider="ollama",
@@ -1500,7 +1529,7 @@ async def test_default_agents_backend(config: Config, tmp_path: Path, monkeypatc
             assert isinstance(self.model_settings, ModelSettings)
             assert self.model_settings.tool_choice == "required"
             assert self.model_settings.parallel_tool_calls is False
-            assert self.model_settings.reasoning.effort == "high"
+            assert self.model_settings.reasoning.effort == "max"
             assert self.model["model"] == "local-model"
             assert self.reset_tool_choice is True
             assert self.mcp_servers in ([mcp_server], [])
@@ -1951,7 +1980,10 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tui_subscription_cli_probe_and_runtime_sections(tmp_path: Path) -> None:
+@pytest.mark.parametrize("size", [(120, 40), (80, 24), (40, 24)])
+async def test_tui_subscription_cli_probe_and_runtime_sections(
+    tmp_path: Path, size: tuple[int, int]
+) -> None:
     path = tmp_path / "config.toml"
     save_config(
         Config(
@@ -1971,9 +2003,14 @@ async def test_tui_subscription_cli_probe_and_runtime_sections(tmp_path: Path) -
         raise AssertionError(command)
 
     app = ConfigurationApp(path, command_runner=runner)
-    async with app.run_test() as pilot:
+    async with app.run_test(size=size) as pilot:
+        assert app.screen.has_class("narrow") == (size[0] < 70)
         assert app.query_one("#subscription-section").display is True
         assert app.query_one("#agents-sdk-endpoint-section").display is False
+        assert app.query_one("#model-selection-section").display is True
+        assert app.query_one("#model-advanced").collapsed is True
+        assert app.query_one("#save").region.right <= size[0]
+        assert app.query_one("#quit").region.right <= size[0]
         await pilot.pause(0.05)
         host_status = app.query_one("#subscription-host-status", Static).render().plain
         assert "authenticated" in host_status.lower()
@@ -1988,6 +2025,51 @@ async def test_tui_subscription_cli_probe_and_runtime_sections(tmp_path: Path) -
         assert app.query_one("#model-runtime", Select).display is True
         assert app.query_one("#subscription-section").display is False
         assert app.query_one("#agents-sdk-endpoint-section").display is True
+
+
+@pytest.mark.asyncio
+async def test_tui_validates_draft_and_restores_model_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    save_config(Config(model=ModelConfig(name="custom-model", reasoning="low")), path)
+    app = ConfigurationApp(path)
+    async with app.run_test() as pilot:
+        original = path.read_bytes()
+        app.query_one("#model-reasoning", Input).value = "unsupported"
+        await pilot.press("ctrl+s")
+        assert path.read_bytes() == original
+        assert app.config.model.reasoning == "low"
+        assert "Could not save" in app.query_one("#status", Static).render().plain
+        app.query_one("#model-defaults", Button).press()
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert load_config(path).model == ModelConfig(name="gpt-6-astra", reasoning="max")
+        assert not app.query_one("#status").has_class("error")
+
+
+@pytest.mark.asyncio
+async def test_tui_reports_cli_and_save_failures(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    save_config(Config(model=ModelConfig(runtime="subscription-cli")), path)
+
+    def runner(command, **_kwargs):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess(command, 1, "", "Not logged in")
+
+    app = ConfigurationApp(path, command_runner=runner)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "Not ready" in app.query_one("#subscription-status", Static).render().plain
+        app.query_one("#subscription-command", Input).value = 'codex "'
+        await app._refresh_subscription_status()  # noqa: SLF001
+        assert "Invalid" in app.query_one("#subscription-status", Static).render().plain
+        app.query_one("#test-subscription-cli", Button).press()
+        await pilot.pause()
+        assert "Invalid command" in app.query_one("#subscription-status", Static).render().plain
+        app.query_one("#subscription-command", Input).value = "codex"
+        original = path.read_bytes()
+        with patch("src.tui.save_config", side_effect=OSError("disk full")):
+            await pilot.press("ctrl+s")
+        assert "disk full" in app.query_one("#status", Static).render().plain
+        assert path.read_bytes() == original
 
 
 @pytest.mark.asyncio
