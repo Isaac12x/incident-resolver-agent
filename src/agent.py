@@ -1125,6 +1125,14 @@ class IncidentAgent:
             "supplies it."
         )
         parts.append(
+            "# Pull Request Body Copy\n\n"
+            "When calling `open_pr`, make its summary the final body copy for the PR. Follow the "
+            "loaded `show-me` skill: keep prose brief and include one concise Mermaid flow or "
+            "code-shape sketch when the incident evidence supports it. Ground every file, state, "
+            "relationship, and verification claim in repository evidence. Cover root cause, "
+            "changed behavior, executed checks, and deployment verification."
+        )
+        parts.append(
             "# Fix First, Then Expand in Circles\n\n"
             "First reproduce and fix the reported incident. Call `verification_plan` with the "
             "incident's source files as seed_paths, then run the narrow regression using "
@@ -1299,6 +1307,7 @@ class IncidentAgent:
                 "code-review-graph",
                 "incident-investigation",
                 "ponytail",
+                "show-me",
                 "coding",
                 "testing",
                 "github",
@@ -1331,7 +1340,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["code-review-graph", "ponytail", "coding", "testing", "github"],
+            ["code-review-graph", "ponytail", "show-me", "coding", "testing", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)
@@ -1346,7 +1355,14 @@ class IncidentAgent:
             worktree,
             "address_review",
             "\n".join(f"{comment.author}: {comment.body}" for comment in comments),
-            ["code-review-graph", "review-comments", "ponytail", "coding", "testing"],
+            [
+                "code-review-graph",
+                "review-comments",
+                "ponytail",
+                "show-me",
+                "coding",
+                "testing",
+            ],
             set(),
         )
         validated = ReviewResult.model_validate(result)
