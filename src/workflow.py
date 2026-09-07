@@ -19,7 +19,7 @@ from .models import (
     TaskRecord,
     TaskState,
 )
-from .storage import Storage
+from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
 from .verify import DeploymentVerifier
@@ -172,14 +172,24 @@ class _TaskLifecycle:
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
         repository = self.workflow.config.repository(task.repository)
-        if task.pr_number:
+        if task.pr_number and self.workflow.github.api is not None:
+            reference = await self.workflow.github.update_pull_request(task)
+            if reference is None:
+                raise RuntimeError("GitHub did not confirm the updated pull request")
+            task = self.workflow.storage.transition(
+                self.task_id,
+                TaskState.WAITING_FOR_DEPLOYMENT,
+                pr_head_sha=reference.head_sha,
+                pr_url=reference.url,
+            )
+        elif task.pr_number:
             result = await WorkspaceTools(self.worktree).shell("git rev-parse HEAD")
             if result.returncode:
                 raise RuntimeError(result.stderr or "could not determine updated PR head")
             if not task.branch:
                 raise RuntimeError("cannot update a pull request without its branch")
             push = await WorkspaceTools(self.worktree).shell(
-                f"git push origin HEAD:{task.branch}"
+                f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
             )
             if push.returncode:
                 raise RuntimeError(push.stderr or "could not push the updated pull-request head")
@@ -344,9 +354,7 @@ class WorkflowEngine:
                 ),
             )
             if not result.succeeded:
-                detail = (
-                    f"{result.command[0]} exited {result.returncode}: {result.stderr.strip()}"
-                )
+                detail = f"{result.command[0]} exited {result.returncode}: {result.stderr.strip()}"
                 raise RuntimeError(f"repository graph generation failed: {detail}")
             self.storage.write_artifact(
                 task.task_id,
@@ -458,10 +466,7 @@ class WorkflowEngine:
                 and callable(getattr(self.agent, "run_session", None))
             )
             if uses_durable_session and (
-                (
-                    task.state in ACTIVE_STATES
-                    and task.state != TaskState.TESTING_DEPLOYMENT
-                )
+                (task.state in ACTIVE_STATES and task.state != TaskState.TESTING_DEPLOYMENT)
                 or (
                     task.state == TaskState.WAITING_FOR_REVIEW
                     and self._has_review_comments(task_id)
@@ -623,6 +628,11 @@ class WorkflowEngine:
                         error=None,
                     )
             return task
+        except RepositoryBusyError:
+            # Contention is expected when several incidents target the same repository.
+            # The worker will requeue this active task after yielding to the lock owner.
+            await asyncio.sleep(max(1.0, self.config.poll_interval_seconds))
+            return self.storage.load_task(task_id)
         except Exception as error:
             latest = self.storage.load_task(task_id)
             attempts = latest.attempts + 1

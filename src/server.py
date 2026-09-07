@@ -13,7 +13,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from .app import Application
-from .github import WebhookSignatureError
+from .github import GitHubCLIAdapter, WebhookSignatureError
 from .models import Incident
 
 
@@ -38,6 +38,24 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     @server.get("/health")
     async def health() -> JSONResponse:
         connector_errors = dict(application.connectors.errors)
+        connections: dict[str, dict[str, str]] = {}
+        results, github_results = await asyncio.gather(
+            application.connectors.health(),
+            application.github.api.check_health()
+            if isinstance(application.github.api, GitHubCLIAdapter)
+            else asyncio.sleep(0, result={}),
+        )
+        for name, result in results.items():
+            connections[name] = {"status": "ok" if result.connected else "failed"}
+            if result.connected:
+                connector_errors.pop(name, None)
+            else:
+                connector_errors[name] = result.message
+                connections[name]["error"] = result.message
+        connections.update(github_results)
+        for name, result in github_results.items():
+            if result["status"] != "ok":
+                connector_errors[name] = result["error"]
         worker_status = "external"
         worker_error: str | None = None
         if run_worker:
@@ -55,6 +73,8 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
             "worker": worker_status,
             "connectors": "ok" if not connector_errors else "failed",
         }
+        if connections:
+            body["connections"] = connections
         if connector_errors:
             body["connector_errors"] = connector_errors
         if worker_error:

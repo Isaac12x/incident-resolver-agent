@@ -228,6 +228,7 @@ def probe_subscription_cli(
                 [
                     "--sandbox",
                     "read-only",
+                    "--skip-git-repo-check",
                     "--json",
                     "--output-schema",
                     str(schema_path),
@@ -301,9 +302,12 @@ def github_login(*, runner: CommandRunner = subprocess.run) -> ToolResult:
     """Ensure the GitHub CLI is authenticated, opening its web login when needed."""
     cwd = Path.cwd()
     status = _run(("gh", "auth", "status"), cwd, runner)
-    if status.succeeded:
+    if not status.succeeded:
+        status = _run(("gh", "auth", "login", "--web", "--git-protocol", "https"), cwd, runner)
+    if not status.succeeded:
         return status
-    return _run(("gh", "auth", "login", "--web", "--git-protocol", "https"), cwd, runner)
+    setup = _run(("gh", "auth", "setup-git", "--hostname", "github.com"), cwd, runner)
+    return status if setup.succeeded else setup
 
 
 def list_github_repositories(
@@ -361,6 +365,113 @@ def repository_slug(name: str) -> str:
     ):
         raise ValueError("repository name must use the owner/name format")
     return normalized.replace("/", "--")
+
+
+def install_configured_repositories(
+    config_path: Path | str,
+    source_root: Path | str,
+    destination_root: Path | str,
+) -> list[Path]:
+    """Seed configured checkouts into an installation and rewrite their local paths."""
+    from .config import load_config, save_config
+
+    path = Path(config_path).expanduser().resolve()
+    sources = Path(source_root).expanduser().resolve()
+    destinations = Path(destination_root).expanduser().resolve()
+    destinations.mkdir(parents=True, exist_ok=True)
+    config = load_config(path, create=False)
+    installed: list[Path] = []
+    changed = False
+
+    def is_repository(candidate: Path) -> bool:
+        return (
+            candidate.is_dir()
+            and subprocess.run(
+                ["git", "-c", f"safe.directory={candidate}", "-C", str(candidate),
+                 "rev-parse", "--git-dir"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).returncode
+            == 0
+        )
+
+    for repository in config.repositories:
+        slug = repository_slug(repository.name)
+        deployed_candidates = repository_candidates(destinations, repository.name)
+        deployed = next(
+            (candidate for candidate in deployed_candidates if is_repository(candidate)), None
+        )
+        if deployed is None:
+            source_candidates: list[Path] = []
+            if repository.local_path:
+                source_candidates.append(Path(repository.local_path).expanduser().resolve())
+            if not any(is_repository(candidate) for candidate in source_candidates):
+                source_candidates.extend(repository_candidates(sources, repository.name))
+            source = next(
+                (candidate for candidate in source_candidates if is_repository(candidate)), None
+            )
+            if source is None:
+                continue
+            deployed = destinations / f"{slug}.git"
+            if deployed.exists():
+                raise FileExistsError(
+                    f"repository destination exists but is not a Git repository: {deployed}"
+                )
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--mirror",
+                    "--no-hardlinks",
+                    str(source),
+                    str(deployed),
+                ],
+                check=True,
+            )
+            remote_url = repository.clone_url
+            if not remote_url:
+                remote = subprocess.run(
+                    ["git", "-C", str(source), "remote", "get-url", "origin"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                remote_url = remote.stdout.strip() if remote.returncode == 0 else None
+            if remote_url:
+                subprocess.run(
+                    ["git", "-C", str(deployed), "remote", "set-url", "origin", remote_url],
+                    check=True,
+                )
+        resolved = deployed.resolve()
+        installed.append(resolved)
+        if repository.local_path != resolved:
+            repository.local_path = resolved
+            changed = True
+
+    if changed:
+        save_config(config, path)
+    return installed
+
+
+def repository_candidates(root: Path, name: str) -> list[Path]:
+    """Match GitHub's case-insensitive names without recursively scanning unrelated paths."""
+    slug = repository_slug(name)
+    candidates = [root / slug, root / f"{slug}.git", root / name]
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if child.name.casefold() in {slug.casefold(), f"{slug}.git".casefold()}:
+                candidates.append(child)
+            elif child.name.casefold() == name.split("/")[0].casefold() and child.is_dir():
+                candidates.extend(
+                    p
+                    for p in sorted(child.iterdir())
+                    if p.name.casefold() == name.split("/")[1].casefold()
+                )
+    matches = {p.resolve() for p in candidates if p.exists()}
+    if len(matches) > 1:
+        raise ValueError(f"ambiguous repository paths for {name}; configure a local_path")
+    return list(dict.fromkeys(candidates))
 
 
 def clone_and_index_repository(

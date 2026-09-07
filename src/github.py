@@ -2,19 +2,233 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import subprocess
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
-from .config import GitHubConfig
+from .config import Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
+from .storage import Storage
 
 
 class WebhookSignatureError(PermissionError):
     pass
+
+
+class GitHubCLIAdapter:
+    """Publish with the same gh account used by repository selection in the TUI."""
+
+    def __init__(self, config: Config, storage: Storage) -> None:
+        self.config = config
+        self.storage = storage
+
+    @staticmethod
+    async def _health_command(*command: str) -> str:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=4)
+        except (TimeoutError, asyncio.CancelledError):
+            process.kill()
+            await process.wait()
+            raise
+        if process.returncode:
+            # gh/git stderr may echo credential-bearing remote URLs.
+            raise RuntimeError(f"{command[0]} connection/access check failed")
+        return stdout.decode()
+
+    async def check_health(self) -> dict[str, dict[str, str]]:
+        async def check(repository):
+            key = f"github:{repository.name}"
+            try:
+                async with asyncio.timeout(5):
+                    repo_json, _, _ = await asyncio.gather(
+                        self._health_command(
+                            "gh", "api", "--hostname", "github.com", f"repos/{repository.name}"
+                        ),
+                        self._health_command(
+                            "gh", "api", "--hostname", "github.com",
+                            f"repos/{repository.name}/pulls?per_page=1",
+                        ),
+                        self._health_command(
+                            "git", "ls-remote", "--exit-code",
+                            repository.clone_url or f"https://github.com/{repository.name}.git",
+                            f"refs/heads/{repository.base_branch}",
+                        ),
+                    )
+                    data = json.loads(repo_json)
+                    if data.get("archived") or not data.get("permissions", {}).get("push"):
+                        raise ValueError("repository archived or GitHub account lacks push access")
+                return key, {"status": "ok"}
+            except Exception as error:
+                message = str(error) if isinstance(error, (RuntimeError, ValueError)) else (
+                    "GitHub connection check timed out or could not run"
+                )
+                return key, {"status": "failed", "error": message}
+
+        repositories = [r for r in self.config.repositories if r.publish_mode != "local" and (
+            r.publish_mode == "github" or "github.com" in (r.clone_url or "")
+        )]
+        return dict(await asyncio.gather(*(check(r) for r in repositories)))
+
+    def _api(self, endpoint: str, method: str = "GET", data: dict | None = None) -> Any:
+        command = ["gh", "api", "--hostname", "github.com", endpoint, "--method", method]
+        if data is not None:
+            command.extend(["--input", "-"])
+        result = subprocess.run(
+            command,
+            input=json.dumps(data) if data is not None else None,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if result.returncode:
+            raise RuntimeError(f"GitHub {method} {endpoint} failed: {result.stderr.strip()}")
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    @staticmethod
+    def _git(worktree: Path, *arguments: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(worktree), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+        if result.returncode:
+            raise RuntimeError(f"Git {arguments[0]} failed: {result.stderr.strip()}")
+        return result.stdout.strip()
+
+    def _body(self, task: TaskRecord) -> str:
+        directory = self.storage.task_directory(task.task_id)
+        sections = [f"Fix incident {task.external_id}: {task.summary}"]
+        for title, relative in (
+            ("Root cause and evidence", "investigation.md"),
+            ("Changed behavior and local verification", "artifacts/local/fix.txt"),
+        ):
+            path = directory / relative
+            if path.exists():
+                sections.append(f"## {title}\n\n{path.read_text(encoding='utf-8').strip()}")
+        tests = [
+            event.data
+            for event in self.storage.events(task.task_id)
+            if event.type == "verification.local"
+        ]
+        if tests:
+            sections.append(
+                "## Executed checks\n\n"
+                + "\n".join(
+                    f"- `{test['command']}`: {'passed' if test['passed'] else 'failed'}"
+                    for test in tests
+                )
+            )
+        sections.append(
+            "## Deployment verification\n\nPending verification of this PR's exact head."
+        )
+        return "\n\n".join(sections)
+
+    def _publish(self, task: TaskRecord) -> dict[str, Any]:
+        if not task.branch:
+            raise RuntimeError("cannot publish without an incident branch")
+        repository = self.config.repository(task.repository)
+        worktree = self.storage.root / "worktrees" / task.task_id
+        # Do not create another commit when retrying a push or PR API failure.
+        changes = self._git(
+            worktree,
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            ":(exclude)harness-out",
+            ":(exclude).code-review-graph",
+            ":(exclude).code-review-graph.db",
+        )
+        if changes:
+            self.storage.commit_worktree(task, f"Fix incident {task.external_id}: {task.summary}")
+        sha = self._git(worktree, "rev-parse", "HEAD")
+        # A managed mirror has remote.origin.mirror=true; an incident must push only its branch.
+        self._git(
+            worktree,
+            "-c",
+            "remote.origin.mirror=false",
+            "push",
+            "origin",
+            f"HEAD:refs/heads/{task.branch}",
+        )
+        endpoint = f"repos/{task.repository}/pulls"
+        if task.pr_number:
+            pull = self._api(f"{endpoint}/{task.pr_number}")
+        else:
+            from urllib.parse import urlencode
+
+            query = urlencode(
+                {
+                    "state": "open",
+                    "head": f"{task.repository.split('/')[0]}:{task.branch}",
+                    "base": repository.base_branch,
+                }
+            )
+            existing = self._api(f"{endpoint}?{query}")
+            pull = (
+                existing[0]
+                if existing
+                else self._api(
+                    endpoint,
+                    "POST",
+                    {
+                        "title": f"fix: {task.summary}"[:256],
+                        "body": self._body(task),
+                        "head": task.branch,
+                        "base": repository.base_branch,
+                        "draft": self.config.github.draft_pull_requests,
+                    },
+                )
+            )
+        if pull["head"]["sha"] != sha:
+            raise RuntimeError("GitHub has not confirmed the pushed PR head; retry publication")
+        reference = PullRequestReference(
+            repository=task.repository,
+            number=pull["number"],
+            url=pull["html_url"],
+            head_sha=sha,
+            branch=task.branch,
+        )
+        self.storage._json_write(
+            self.storage.task_directory(task.task_id) / "pr.json", reference.model_dump(mode="json")
+        )
+        return reference.model_dump(mode="json")
+
+    def _operate(self, operation: str, payload: dict[str, Any]) -> Any:
+        if operation in {"create_pull_request", "update_pull_request"}:
+            return self._publish(TaskRecord.model_validate(payload))
+        if operation == "publish_verification":
+            task = TaskRecord.model_validate(payload["task"])
+            result = VerificationResult.model_validate(payload["result"])
+            return self._api(
+                f"repos/{task.repository}/statuses/{result.sha}",
+                "POST",
+                {
+                    "state": "success" if result.passed else "failure",
+                    "context": "incident-harness/preview",
+                    "description": (
+                        result.reason
+                        or "Preview verification " + ("passed" if result.passed else "failed")
+                    )[:140],
+                    "target_url": result.url,
+                },
+            )
+        raise ValueError(f"unsupported GitHub operation: {operation}")
+
+    async def __call__(self, operation: str, payload: dict[str, Any]) -> Any:
+        return await asyncio.to_thread(self._operate, operation, payload)
 
 
 class GitHubService:

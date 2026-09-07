@@ -572,6 +572,9 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
 
     async def create_subprocess(*command, **kwargs):  # noqa: ANN003, ANN202
         assert kwargs["cwd"] == worktree
+        schema = json.loads(Path(command[command.index("--output-schema") + 1]).read_text())
+        assert schema["additionalProperties"] is False
+        assert set(schema["required"]) == set(schema["properties"])
         commands.append(list(command))
         return Process(list(command))
 

@@ -16,7 +16,12 @@ from .app import Application
 from .models import Incident, TaskState
 from .server import create_server
 from .systemd_env import export_systemd_environment, local_service_base_url, service_base_url
-from .tooling import build_repository_graphs, capture_structured_tree, initialise_runtime_tree
+from .tooling import (
+    build_repository_graphs,
+    capture_structured_tree,
+    initialise_runtime_tree,
+    install_configured_repositories,
+)
 from .tui import run_tui
 
 
@@ -30,6 +35,12 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     commands.add_parser("worker", help="run only the durable task worker")
     commands.add_parser("tui", help="configure the harness")
     commands.add_parser("mcp", help="serve MCP-compatible HTTP endpoints")
+    install_repositories = commands.add_parser(
+        "install-repositories",
+        help="seed configured local repositories into a deployment runtime",
+    )
+    install_repositories.add_argument("--source-root", type=Path, required=True)
+    install_repositories.add_argument("--destination-root", type=Path, required=True)
     export_env = commands.add_parser(
         "export-systemd-env",
         help="write a systemd EnvironmentFile from TUI config and secret stores",
@@ -91,7 +102,14 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
     should_initialise = args.command == "init" or (
         args.command
-        not in {"index", "tree", "export-systemd-env", "service-url", "healthcheck"}
+        not in {
+            "index",
+            "tree",
+            "install-repositories",
+            "export-systemd-env",
+            "service-url",
+            "healthcheck",
+        }
         and not Path(".agent").is_dir()
     )
     if should_initialise:
@@ -136,6 +154,15 @@ def main(argv: list[str] | None = None) -> None:
         if not result.succeeded:
             raise SystemExit(result.returncode or 1)
         return
+    if args.command == "install-repositories":
+        installed = install_configured_repositories(
+            args.config,
+            args.source_root,
+            args.destination_root,
+        )
+        for repository in installed:
+            print(f"Installed repository: {repository}")
+        return
     if args.command == "export-systemd-env":
         from .systemd_env import default_secrets_paths
 
@@ -160,7 +187,8 @@ def main(argv: list[str] | None = None) -> None:
         last_error = "service did not respond"
         while time.monotonic() < deadline:
             try:
-                with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310
+                # /health includes parallel live probes bounded to five seconds.
+                with urllib.request.urlopen(url, timeout=6) as response:  # noqa: S310
                     if 200 <= response.status < 300:
                         return
                     last_error = f"health endpoint returned HTTP {response.status}"
