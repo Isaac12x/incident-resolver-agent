@@ -28,14 +28,46 @@ tasks remain inspectable and recoverable while the process is running or after a
 
 ## Install and run
 
-Python 3.12 or newer and `uv` are recommended.
+The harness requires Python 3.12 or newer. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
+then run these commands from the repository checkout:
 
 ```bash
-cp .env.example .env        # set up env variables
+cp .env.example .env
 uv sync
-uv run incident-agent init  # recreate the local .agent tree with seed-cli
-uv run incident-agent tui   # configure
+uv run incident-agent init
+uv run incident-agent tui
+```
+
+Set `OPENAI_API_KEY` in `.env` when using the default hosted model. For a local
+OpenAI-compatible model, leave it blank and select `local` in the TUI. In the TUI,
+configure the model, repositories, connectors, and GitHub settings required by your
+deployment. Secrets are read from environment variables whose names are stored in the
+configuration; secret values are not written to `.agent/config.toml`.
+
+Start the HTTP server and durable worker together with:
+
+```bash
 uv run incident-agent serve
+```
+
+The default listener is `http://127.0.0.1:8765`. In another terminal, check readiness:
+
+```bash
+uv run incident-agent healthcheck
+```
+
+To submit an incident directly from a JSON file, use:
+
+```bash
+uv run incident-agent run tests/fixtures/incident.json
+```
+
+For development, run the HTTP server without its embedded worker and start the worker
+separately:
+
+```bash
+uv run incident-agent serve --no-worker
+uv run incident-agent worker
 ```
 
 The committed `.seed/specs/runtime.tree` is the source of truth for the untracked runtime layout.
@@ -478,3 +510,8 @@ This was built as a time-boxed prototype (over a 3hr window). And so I left piec
 I have solved some of these pitfalls using code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
 
 I have used skills written by others alongside those that I created for this exercise.
+
+
+## LICENSE
+
+See the LICENSE file at the root of this repository for more information.
