@@ -7,8 +7,9 @@
 
 - Complete runtime integrations for contextual tool selection, digest-pinned callable extensions,
   versioned configuration/skill bundles, and installed readiness/update commands.
-- Enrich new incidents with history-based predictions, related incidents, and a configurable
-  explain-code JSON adapter with bounded subprocess execution and explicit fallback.
+- Enrich new incidents with history-based predictions, related incidents, and summaries derived from
+  model-generated investigation/fix artifacts, with an explicit extractive fallback before artifacts
+  exist. Extend the show-me guidance to incident summaries and investigation explanations.
 - Add chronological holdout/retrieval evaluations and a repair evaluation through the real workflow.
 - Move task state, ordered events, leases, and workspace identity into a durable SQLite catalog;
   retain task folders as recoverable artifacts and migrate existing state.

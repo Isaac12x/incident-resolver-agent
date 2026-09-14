@@ -28,6 +28,7 @@ async def test_agent_run_manifest_fingerprints_prompt_skills_and_connectors(tmp_
     skills = tmp_path / "skills"
     _skill(skills, "code-review-graph")
     _skill(skills, "incident-investigation")
+    _skill(skills, "show-me")
     storage = Storage(tmp_path / ".agent")
     task = storage.create_task(
         Incident(
@@ -66,6 +67,7 @@ async def test_agent_run_manifest_fingerprints_prompt_skills_and_connectors(tmp_
     assert [item["name"] for item in manifest.data["skills"]] == [
         "code-review-graph",
         "incident-investigation",
+        "show-me",
     ]
     assert manifest.data["connectors_sha256"]
     from src.tooling import stable_hash

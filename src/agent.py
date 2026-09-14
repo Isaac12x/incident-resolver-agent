@@ -1300,12 +1300,15 @@ class IncidentAgent:
         )
         if any(skill.name == "show-me" for skill in skills):
             parts.append(
-                "# Pull Request Body Copy\n\n"
-                "Apply the loaded `show-me` skill only while drafting the summary passed to "
-                "`open_pr` for a new pull request. Make that summary the final PR body copy. "
-                "Ground every file, state, relationship, and verification claim in repository "
-                "evidence. Cover root cause, changed behavior, executed checks, and deployment "
-                "verification. Do not apply `show-me` to any other lifecycle work."
+                "# Incident Summaries and Pull Request Body Copy\n\n"
+                "Apply the loaded HumanLayer `show-me` skill when explaining the incident "
+                "root cause, proposed fix, and implementation summary. Keep the explanation "
+                "concise and include a small diagram or code-shape sketch only when it helps. "
+                "Persist it in the investigation fields and fix summary through the existing "
+                "lifecycle tools; these artifacts also supply the incident summary API. "
+                "For `open_pr`, make the summary final PR body copy covering root cause, "
+                "changed behavior, executed checks, and deployment verification. Ground all "
+                "claims and visuals in observed evidence and preserve the required output schema."
             )
         parts.append(
             "# Fix First, Then Expand in Circles\n\n"
@@ -1550,7 +1553,7 @@ class IncidentAgent:
             worktree,
             "investigate",
             incident.model_dump_json(indent=2),
-            ["code-review-graph", "incident-investigation"],
+            ["code-review-graph", "incident-investigation", "show-me"],
             {"incidents", "errors", "logs", "traces", "metrics"},
         )
         validated = InvestigationResult.model_validate(result)
@@ -1564,7 +1567,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["code-review-graph", "ponytail", "coding", "testing", "github"],
+            ["code-review-graph", "ponytail", "coding", "testing", "show-me", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)
