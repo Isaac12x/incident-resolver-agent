@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -13,6 +14,14 @@ from pathlib import Path
 import uvicorn
 
 from .app import Application
+from .config import ConnectorConfig, load_config, save_config
+from .lifecycle import (
+    bootstrap,
+    default_config_path,
+    default_runtime_path,
+    ensure_user_config,
+    update_installation,
+)
 from .models import Incident, TaskState
 from .server import create_server
 from .systemd_env import export_systemd_environment, local_service_base_url, service_base_url
@@ -27,13 +36,14 @@ from .tui import run_tui
 
 def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="incident-agent")
-    parser.add_argument("--config", type=Path, default=Path(".agent/config.toml"))
+    parser.add_argument("--config", type=Path, default=None)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="create or repair the local .agent runtime tree")
     serve = commands.add_parser("serve", help="start the HTTP server")
     serve.add_argument("--no-worker", action="store_true")
     commands.add_parser("worker", help="run only the durable task worker")
-    commands.add_parser("tui", help="configure the harness")
+    commands.add_parser("tui", aliases=["config"], help="configure the harness")
+    commands.add_parser("update", help="update the isolated installation through uv")
     commands.add_parser("mcp", help="serve MCP-compatible HTTP endpoints")
     install_repositories = commands.add_parser(
         "install-repositories",
@@ -65,8 +75,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="wait for the configured HTTP service to become ready",
     )
     healthcheck.add_argument("--timeout", type=float, default=30.0)
-    run = commands.add_parser("run", help="submit an incident JSON file")
-    run.add_argument("incident", type=Path)
+    run = commands.add_parser("run", help="submit an incident JSON file, or start the server")
+    run.add_argument("incident", type=Path, nargs="?")
+    eval_command = commands.add_parser("eval", help="run the packaged evaluation dataset")
+    eval_command.add_argument("dataset", type=Path, nargs="?")
+    eval_command.add_argument("--output", type=Path)
     index = commands.add_parser("index", help="build the code-review-graph index")
     index.add_argument("path", type=Path, nargs="?", default=Path("."))
     tree = commands.add_parser("tree", help="capture a structured tree with seed-cli")
@@ -100,7 +113,63 @@ async def _run_direct(application: Application, path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
-    should_initialise = args.command == "init" or (
+    using_default_config = args.config is None
+    configured_path = bool(os.environ.get("INCIDENT_AGENT_CONFIG"))
+    if args.config is None:
+        source_checkout = (Path(__file__).resolve().parents[1] / "pyproject.toml").is_file()
+        args.config = (
+            Path(".agent/config.toml")
+            if args.command == "init" and source_checkout and not configured_path
+            else default_config_path()
+        )
+    if args.command == "eval":
+        from .evals import run_evaluations
+
+        report = run_evaluations(args.dataset)
+        rendered = json.dumps(report, indent=2)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(rendered + "\n", encoding="utf-8")
+        else:
+            print(rendered)
+        if report.get("failed", 0):
+            raise SystemExit(1)
+        return
+    if args.command == "update":
+        result = update_installation()
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode:
+            raise SystemExit(result.returncode)
+        return
+    config_commands = {
+        "init", "serve", "worker", "tui", "config", "mcp", "run",
+    }
+    if args.command in config_commands:
+        args.config = bootstrap(args.config)
+    local_config = args.config.parent == (Path.cwd() / ".agent").resolve()
+    if args.command == "init" and not local_config:
+        config_missing = not args.config.exists()
+        config = load_config(args.config)
+        if using_default_config and config_missing:
+            config.runtime_root = default_runtime_path()
+            config.server.require_api_auth = True
+        if not config.connectors:
+            config.connectors.append(
+                ConnectorConfig(name="grafana", purpose="incident", type="webhook")
+            )
+        save_config(config, args.config)
+        print(f"Initialized {args.config}")
+        return
+    if (
+        args.command in config_commands
+        and using_default_config
+        and not (args.command == "init" and local_config)
+    ):
+        ensure_user_config(args.config)
+    should_initialise = (args.command == "init" and local_config) or (
         args.command
         not in {
             "index",
@@ -110,6 +179,7 @@ def main(argv: list[str] | None = None) -> None:
             "service-url",
             "healthcheck",
         }
+        and local_config
         and not Path(".agent").is_dir()
     )
     if should_initialise:
@@ -122,8 +192,6 @@ def main(argv: list[str] | None = None) -> None:
             # seed creates the runtime files, including an empty config.toml.
             # Persist operational defaults so a fresh install can start intake
             # without first requiring an interactive TUI session.
-            from .config import ConnectorConfig, load_config, save_config
-
             config = load_config(args.config)
             if not config.connectors:
                 config.connectors.append(
@@ -133,7 +201,7 @@ def main(argv: list[str] | None = None) -> None:
             if result.stdout:
                 print(result.stdout, end="")
             return
-    if args.command == "tui":
+    if args.command in {"tui", "config"}:
         run_tui(args.config)
         return
     if args.command == "tree":
@@ -174,13 +242,9 @@ def main(argv: list[str] | None = None) -> None:
         )
         return
     if args.command == "service-url":
-        from .config import load_config
-
         print(service_base_url(load_config(args.config, create=False)))
         return
     if args.command == "healthcheck":
-        from .config import load_config
-
         config = load_config(args.config, create=False)
         url = local_service_base_url(config).rstrip("/") + "/health"
         deadline = time.monotonic() + args.timeout
@@ -207,7 +271,15 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "worker":
         asyncio.run(_worker(application))
     elif args.command == "run":
-        asyncio.run(_run_direct(application, args.incident))
+        if args.incident is None:
+            server = create_server(application)
+            uvicorn.run(
+                server,
+                host=application.config.server.host,
+                port=application.config.server.port,
+            )
+        else:
+            asyncio.run(_run_direct(application, args.incident))
 
 
 if __name__ == "__main__":

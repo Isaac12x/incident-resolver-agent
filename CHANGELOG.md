@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Add a curlable uv tool installer, update/config commands, foreground `run`, and persistent
+  per-user configuration and state while retaining incident-file submission.
+- Embed Grafana event logging, grouping and duplicate metadata, incident history, bounded
+  logistic root-cause prediction, extractive summaries, and optional FAISS similarity search.
+- Add offline contract evaluations with reproducible JSON reports and packaged datasets.
+- Add control-API bearer authentication and fail-closed webhook configuration for new user
+  installations; export API credentials to systemd through environment references.
+- Record prompt, skill and connection content hashes; retry MCP discovery within a fixed budget
+  and reject workspace directory replacement.
+- Fix repository discovery on case-insensitive filesystems and the package license resource.
+
 - Keep deployment verification outside the durable-agent routing path, persist authorized review
   comments across worker restarts, and explicitly push/update existing pull-request heads.
 - Bridge runtime MCP adapters into the subscription CLI alongside static connector configuration;

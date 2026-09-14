@@ -28,6 +28,77 @@ tasks remain inspectable and recoverable while the process is running or after a
 
 ## Install and run
 
+For a per-user installation without a checkout, install `uv` and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
+incident-agent init
+incident-agent config
+incident-agent run
+```
+
+`incident-agent update` upgrades the isolated uv tool installation and its dependencies.
+The installer accepts `INCIDENT_HARNESS_SOURCE` to select a Git revision or fork. The script
+becomes available at the URL above when this change is merged. `config` and `tui` open the same
+editor; `run FILE.json` continues to submit a single incident. `run` without a file starts the
+HTTP server and worker in the foreground.
+
+Outside a checkout, configuration lives in `$XDG_CONFIG_HOME/incident-harness/config.toml`
+(default `~/.config/incident-harness/config.toml`) and state in
+`$XDG_STATE_HOME/incident-harness` (default `~/.local/state/incident-harness`). An existing
+`.agent` directory, `INCIDENT_AGENT_CONFIG`, or `--config PATH` selects an explicit workspace.
+Git worktrees remain isolated per incident; the state directory name is configurable.
+
+New user configurations enable `server.require_api_auth`. Export `INCIDENT_AGENT_API_TOKEN`
+for control API clients and `AGENT_WEBHOOK_SECRET` for signed alert intake before running.
+API requests under `/mcp/*` and `/a2a/*` use `Authorization: Bearer TOKEN`; alert webhooks
+use their existing HMAC signatures. Missing required credentials return HTTP 503 and incorrect
+credentials return HTTP 401. Existing configs retain their previous authentication setting:
+enable `server.require_api_auth = true` to migrate. Setting the API token also enforces bearer
+authentication when the compatibility flag is false. Health and agent discovery stay public.
+Credentials are environment values; configuration stores their variable names.
+
+### Incident history and evaluations
+
+Grafana intake stores events, grouping keys, fingerprints, duplicate references, and task links
+in the runtime SQLite database. Resolved alerts are logged without starting a repair. Incident
+history retains investigation root causes for an explicit intelligence rebuild.
+
+The authenticated APIs include:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /mcp/resources/intelligence/events` | Filter recent intake by `source`, `group_key`, and bounded `limit` |
+| `GET /mcp/resources/tasks/{task_id}/summary` | Extractive summary of the incident |
+| `POST /mcp/tools/rebuild_intelligence` | Train from labeled history and rebuild optional vector search |
+| `POST /mcp/tools/predict_root_cause` | Rank learned causes for a JSON `text` field |
+| `POST /mcp/tools/search_similar_incidents` | Search using JSON `query` and optional `limit` |
+
+Root-cause prediction uses bounded logistic regression and needs at least two distinct labels.
+Scores are experimental model outputs, not verified causes or calibrated confidence. Rebuild
+after collecting labels or new history. FAISS search uses sentence-transformers and requires
+the optional `intelligence` package extra; first use may download the embedding model.
+Unavailable dependencies or an untrained model are reported explicitly. Extractive summarization
+works offline; integration with an external explain-code provider remains open.
+
+Run the packaged offline contract evaluations without configuration, network calls, or a model:
+
+```bash
+incident-agent eval
+incident-agent eval cases.jsonl --output report.json
+```
+
+The JSONL schema and examples are in [`src/eval_cases.jsonl`](src/eval_cases.jsonl). Reports include
+a dataset digest, case outcomes, and pass rate; failures exit nonzero. These evaluate intake,
+deployment matching, and review authorization, not model repair quality.
+
+Each agent invocation records content hashes for its prompt, selected skills, and configured
+connections. Endpoint URLs and command arguments are hashed rather than copied into manifests.
+Configured MCP servers provide extensions beyond skills, with bounded discovery retries.
+This retry policy is deterministic; learned RL selection and automatic tool research/installation
+remain open work. Workspace identity checks detect a replaced directory; existing permissions
+and command/path checks still apply and are not an operating-system sandbox.
+
 The harness requires Python 3.12 or newer. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 then run these commands from the repository checkout:
 

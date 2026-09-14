@@ -3,7 +3,7 @@ name = "incident-harness"
 version = "0.1.0"
 description = "A durable agent harness that turns production incidents into verified fixes"
 readme = "README.md"
-license = { file = "LICENSE.md" }
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "openai-agents>=0.19,<0.20",
@@ -21,6 +21,12 @@ dependencies = [
     "seed-cli",
 ]
 
+[project.optional-dependencies]
+intelligence = [
+    "faiss-cpu",
+    "sentence-transformers",
+]
+
 [project.scripts]
 incident-agent = "src.__main__:main"
 
@@ -33,6 +39,7 @@ packages = ["src"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "src/builtin_skills"
+"src/eval_cases.jsonl" = "src/eval_cases.jsonl"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -28,7 +28,7 @@ from .models import (
 )
 from .skills import Skill, SkillResolver
 from .storage import Storage
-from .tooling import subscription_cli_command
+from .tooling import stable_hash, subscription_cli_command
 from .tools import WorkspaceTools
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
@@ -1233,8 +1233,35 @@ class IncidentAgent:
                 task.conversation_id, pattern, limit
             ),
         )
-        connector_tools = await self.connectors.tools_for(capabilities)
+        discover = getattr(self.connectors, "discover_tools", None)
+        connector_tools = await (
+            discover(capabilities, retries=2)
+            if callable(discover)
+            else self.connectors.tools_for(capabilities)
+        )
         prompt = await self._graph_context(task, worktree, tools) + prompt
+        connector_descriptors = (
+            self.connectors.descriptors()
+            if callable(getattr(self.connectors, "descriptors", None))
+            else [{"name": getattr(item, "name", type(item).__name__)} for item in connector_tools]
+        )
+        manifest = {
+            "manifest_version": 1,
+            "operation": operation,
+            "model": self.config.model.name,
+            "model_config_sha256": stable_hash(self.config.model.model_dump(mode="json")),
+            "prompt_sha256": stable_hash(prompt),
+            "system_prompt_sha256": stable_hash(self.config.agent.system_prompt),
+            "instructions_sha256": stable_hash(instructions),
+            "permissions_sha256": stable_hash(self.config.permissions.model_dump(mode="json")),
+            "skills": resolution.manifest(),
+            "connectors": connector_descriptors,
+            "connectors_sha256": stable_hash(connector_descriptors),
+        }
+        self.storage.append_event(
+            task.task_id,
+            TaskEvent(type="agent.run_manifest", data=manifest),
+        )
         self.storage.add_message(task.conversation_id, "user", f"{operation}: {prompt}")
         if isinstance(self.backend, (OpenAIAgentsBackend, SubscriptionCLIBackend)):
             output_types: dict[str, type[BaseModel]] = {

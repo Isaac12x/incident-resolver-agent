@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -10,6 +11,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,12 @@ class RepositorySetupResult:
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 RUNTIME_SEED_SPEC = Path(__file__).with_name("runtime.tree")
+
+
+def stable_hash(value: Any) -> str:
+    """Return a deterministic SHA-256 fingerprint for auditable runtime inputs."""
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _validate_base(base: Path | str) -> Path:
@@ -468,10 +476,27 @@ def repository_candidates(root: Path, name: str) -> list[Path]:
                     for p in sorted(child.iterdir())
                     if p.name.casefold() == name.split("/")[1].casefold()
                 )
-    matches = {p.resolve() for p in candidates if p.exists()}
-    if len(matches) > 1:
+    # Path.resolve() preserves case aliases on case-insensitive filesystems. Compare
+    # filesystem identity as well, otherwise one checkout can look like two matches.
+    identities: dict[tuple[int, int], Path] = {}
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            stat = candidate.stat()
+        except OSError:
+            continue
+        identity = (stat.st_dev, stat.st_ino)
+        # Later directory-entry matches preserve the checkout's real casing.
+        identities[identity] = candidate
+    if len(identities) > 1:
         raise ValueError(f"ambiguous repository paths for {name}; configure a local_path")
-    return list(dict.fromkeys(candidates))
+    representatives = set(identities.values())
+    return [
+        candidate
+        for candidate in candidates
+        if not candidate.exists() or candidate in representatives
+    ]
 
 
 def clone_and_index_repository(
