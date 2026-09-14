@@ -138,7 +138,7 @@ def test_managed_tool_update_failure_and_permission_gate(
     result = update_installation(
         managed_tools=("seed",),
         runner=lambda command, **kwargs: CompletedProcess(
-            command, 1 if command[-1] == "seed" else 0, "", "failed"
+            command, 1 if command[-1] == "seed-cli" else 0, "", "failed"
         ),
     )
     assert result.returncode == 1
@@ -176,3 +176,39 @@ def test_rollback_selects_most_recent_activation_not_oldest(tmp_path):
         activate_bundle(config, bundle.version)
         versions.append(bundle.version)
     assert rollback_bundle(config).version == versions[1]
+
+
+def test_nested_unexpected_manifest_invalidates_bundle(tmp_path):
+    config = Config(runtime_root=tmp_path / "state")
+    bundle = build_bundle(config)
+    nested = bundle.path / "skills" / "unexpected" / "manifest.json"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("{}")
+    assert list_bundles(config) == []
+
+
+def test_helper_resolution_keeps_interpreter_environment(tmp_path, monkeypatch):
+    import sys
+
+    from src.tooling import _tool_executable, executable_status, install_uv_tools
+
+    bindir = tmp_path / "venv" / "bin"
+    bindir.mkdir(parents=True)
+    (bindir / "python").symlink_to(sys.executable)
+    (bindir / "seed").write_text("helper")
+    monkeypatch.setattr(sys, "executable", str(bindir / "python"))
+    monkeypatch.setattr(
+        "src.tooling.shutil.which", lambda name: "/bin/uv" if name == "uv" else None
+    )
+    assert _tool_executable("seed") == str(bindir / "seed")
+    assert executable_status(["seed"])["seed"]
+    commands = []
+
+    def runner(command, **kwargs):
+        commands.append(command)
+        return CompletedProcess(command, 0, "", "")
+
+    install_uv_tools(["seed"], runner=runner)
+    assert commands[0][-1] == "seed-cli"
+    update_installation(managed_tools=("seed",), runner=runner)
+    assert commands[-1][-2:] == ["--upgrade", "seed-cli"]

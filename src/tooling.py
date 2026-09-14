@@ -62,6 +62,8 @@ class RepositorySetupResult:
         )
 
 
+TOOL_PACKAGES = {"seed": "seed-cli", "code-review-graph": "code-review-graph"}
+
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
 
@@ -70,7 +72,7 @@ def executable_status(names: Sequence[str]) -> dict[str, bool]:
     import sys
 
     return {
-        name: bool(shutil.which(name) or Path(sys.executable).resolve().with_name(name).is_file())
+        name: bool(shutil.which(name) or Path(sys.executable).absolute().with_name(name).is_file())
         for name in names
     }
 
@@ -83,7 +85,7 @@ def install_uv_tools(
     if not uv:
         raise RuntimeError("uv is required to install helper tools")
     return [
-        _run((uv, "tool", "install", name), Path.cwd(), runner)
+        _run((uv, "tool", "install", TOOL_PACKAGES.get(name, name)), Path.cwd(), runner)
         for name in names
         if shutil.which(name) is None
     ]
@@ -109,7 +111,7 @@ def _tool_executable(name: str) -> str:
     """Resolve a project CLI next to the running interpreter, then fall back to PATH."""
     import sys
 
-    sibling = Path(sys.executable).resolve().with_name(name)
+    sibling = Path(sys.executable).absolute().with_name(name)
     if sibling.is_file():
         return str(sibling)
     resolved = shutil.which(name)
