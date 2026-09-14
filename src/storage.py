@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from .models import Incident, TaskEvent, TaskRecord, TaskState, utc_now
+from .models import Incident, TaskEvent, TaskRecord, TaskState, new_task_id, utc_now
+from .task_catalog import TaskCatalog
+from .telemetry import Telemetry
 from .tooling import repository_candidates
 
 BUCKETS = ("pending", "active", "waiting", "completed", "blocked", "failed")
@@ -34,6 +38,7 @@ class RepositoryBusyError(FileExistsError):
 class Storage:
     def __init__(self, root: Path | str = ".agent") -> None:
         self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.tasks_root = self.root / "tasks"
         for directory in (
             self.root / "memory" / "repositories",
@@ -47,6 +52,32 @@ class Storage:
         global_memory = self.root / "memory" / "global.md"
         global_memory.touch(exist_ok=True)
         self._initialise_sessions()
+        self.catalog = TaskCatalog(self.root / "tasks.sqlite3")
+        self._migrate_catalog()
+        self.telemetry = Telemetry(self.root)
+
+    def _migrate_catalog(self) -> None:
+        """Import legacy snapshots without overwriting committed database state."""
+        for bucket in BUCKETS:
+            for snapshot in (self.tasks_root / bucket).glob("*/state.json"):
+                try:
+                    task = TaskRecord.model_validate_json(snapshot.read_text())
+                    incident = Incident.model_validate_json(
+                        snapshot.with_name("input.json").read_text()
+                    )
+                    event_file = snapshot.with_name("events.jsonl")
+                    events = (
+                        [
+                            TaskEvent.model_validate_json(line)
+                            for line in event_file.read_text().splitlines()
+                        ]
+                        if event_file.exists()
+                        else []
+                    )
+                    self.catalog.create(task, incident, events)
+                except (OSError, ValueError):
+                    # A corrupt legacy snapshot cannot become authoritative state.
+                    continue
 
     def _initialise_sessions(self) -> None:
         with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
@@ -54,61 +85,286 @@ class Storage:
                 "CREATE TABLE IF NOT EXISTS messages ("
                 "conversation_id TEXT, role TEXT, content TEXT, created_at TEXT)"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS observability_events ("
+                "event_id TEXT PRIMARY KEY, source TEXT NOT NULL, group_key TEXT NOT NULL, "
+                "fingerprint TEXT, payload TEXT NOT NULL, received_at TEXT NOT NULL, "
+                "duplicate_of TEXT, task_id TEXT)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_observability_group "
+                "ON observability_events(source, group_key)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS incident_history ("
+                "task_id TEXT PRIMARY KEY, external_id TEXT NOT NULL, source TEXT NOT NULL, "
+                "repository TEXT NOT NULL, environment TEXT NOT NULL, summary TEXT NOT NULL, "
+                "description TEXT NOT NULL, root_cause TEXT, outcome TEXT, "
+                "created_at TEXT NOT NULL)"
+            )
+            connection.commit()
+
+    def record_observability_event(
+        self, source: str, payload: dict[str, object], *, task_id: str | None = None
+    ) -> dict[str, object]:
+        """Persist a raw intake event and return stable grouping/deduplication metadata."""
+        encoded = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False)
+        alerts = payload.get("alerts") if isinstance(payload, dict) else None
+        group_key = str(payload.get("groupKey") or payload.get("group_key") or "")
+        if not group_key and isinstance(alerts, list):
+            group_key = str(payload.get("receiver") or payload.get("title") or source)
+        group_key = group_key or source
+        common = payload.get("commonLabels")
+        common = common if isinstance(common, dict) else {}
+        scopes = set()
+        for alert in alerts if isinstance(alerts, list) and alerts else [{}]:
+            labels = alert.get("labels", {}) if isinstance(alert, dict) else {}
+            labels = {**common, **labels} if isinstance(labels, dict) else common
+            repository = labels.get("repository") or labels.get("repo") or payload.get("repository")
+            environment = (
+                labels.get("environment") or labels.get("env") or payload.get("environment")
+            )
+            if repository or environment:
+                scopes.add((str(repository or "").casefold(), str(environment or "")))
+        if scopes:
+            scope_hash = hashlib.sha256(json.dumps(sorted(scopes)).encode()).hexdigest()
+            group_key = f"{group_key}:{scope_hash}"
+        fingerprints = (
+            [
+                str(item.get("fingerprint"))
+                for item in alerts
+                if isinstance(item, dict) and item.get("fingerprint")
+            ]
+            if isinstance(alerts, list)
+            else []
+        )
+        fingerprint = ",".join(sorted(fingerprints)) or str(payload.get("external_id") or "")
+        event_id = hashlib.sha256(f"{source}\0{encoded}".encode()).hexdigest()
+        received = utc_now().isoformat()
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT event_id, task_id FROM observability_events WHERE event_id=?", (event_id,)
+            ).fetchone()
+            if prior:
+                return {
+                    "event_id": event_id,
+                    "group_key": group_key,
+                    "fingerprint": fingerprint,
+                    "duplicate": True,
+                    "duplicate_of": prior[0],
+                    "task_id": prior[1],
+                }
+            grouped = (
+                connection.execute(
+                    "SELECT event_id, task_id FROM observability_events "
+                    "WHERE source=? AND group_key=? "
+                    "AND fingerprint=? ORDER BY received_at DESC LIMIT 1",
+                    (source, group_key, fingerprint),
+                ).fetchone()
+                if fingerprint
+                else None
+            )
+            connection.execute(
+                "INSERT INTO observability_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    source,
+                    group_key,
+                    fingerprint,
+                    encoded,
+                    received,
+                    grouped[0] if grouped else None,
+                    task_id,
+                ),
+            )
+            connection.commit()
+        return {
+            "event_id": event_id,
+            "group_key": group_key,
+            "fingerprint": fingerprint,
+            "duplicate": bool(grouped),
+            "duplicate_of": grouped[0] if grouped else None,
+            "task_id": task_id,
+        }
+
+    def list_observability_events(
+        self, *, source: str | None = None, group_key: str | None = None, limit: int = 100
+    ) -> list[dict[str, object]]:
+        if not 1 <= limit <= 500:
+            raise ValueError("event limit must be between 1 and 500")
+        query = (
+            "SELECT event_id, source, group_key, fingerprint, payload, received_at, "
+            "duplicate_of, task_id FROM observability_events"
+        )
+        params: list[str | int] = []
+        clauses = []
+        if source:
+            clauses.append("source=?")
+            params.append(source)
+        if group_key:
+            clauses.append("group_key=?")
+            params.append(group_key)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY received_at DESC LIMIT ?"
+        params.append(limit)
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "source": row[1],
+                "group_key": row[2],
+                "fingerprint": row[3],
+                "payload": json.loads(row[4]),
+                "received_at": row[5],
+                "duplicate_of": row[6],
+                "task_id": row[7],
+            }
+            for row in rows
+        ]
+
+    def attach_event_task(self, event_id: str, task_id: str) -> None:
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            connection.execute(
+                "UPDATE observability_events SET task_id=? WHERE event_id=?", (task_id, event_id)
+            )
+            connection.commit()
+
+    def record_incident_history(
+        self,
+        task_id: str,
+        incident: Incident,
+        *,
+        root_cause: str | None = None,
+        outcome: str | None = None,
+    ) -> None:
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            connection.execute(
+                "INSERT INTO incident_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(task_id) DO UPDATE SET "
+                "root_cause=COALESCE(excluded.root_cause, incident_history.root_cause), "
+                "outcome=COALESCE(excluded.outcome, incident_history.outcome)",
+                (
+                    task_id,
+                    incident.external_id,
+                    incident.source,
+                    incident.repository,
+                    incident.environment,
+                    incident.summary,
+                    incident.description,
+                    root_cause,
+                    outcome,
+                    incident.received_at.isoformat(),
+                ),
+            )
+            connection.commit()
+
+    def incident_history(
+        self, *, labeled_only: bool = False, limit: int = 1000
+    ) -> list[dict[str, object]]:
+        query = (
+            "SELECT task_id, external_id, source, repository, environment, summary, "
+            "description, root_cause, outcome, created_at FROM incident_history"
+        )
+        if labeled_only:
+            query += " WHERE root_cause IS NOT NULL AND root_cause != ''"
+        query += " ORDER BY created_at DESC LIMIT ?"
+        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
+            rows = connection.execute(query, (limit,)).fetchall()
+        keys = (
+            "task_id",
+            "external_id",
+            "source",
+            "repository",
+            "environment",
+            "summary",
+            "description",
+            "root_cause",
+            "outcome",
+            "created_at",
+        )
+        return [dict(zip(keys, row, strict=True)) for row in rows]
 
     @staticmethod
     def _json_write(path: Path, value: object) -> None:
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(value, indent=2, default=str, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        temporary.replace(path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".snapshot-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle, indent=2, default=str, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def create_task(self, incident: Incident) -> TaskRecord:
-        existing = self.find_by_incident(incident.source, incident.external_id)
+        existing = self.find_by_incident(
+            incident.source, incident.external_id, incident.repository, incident.environment
+        )
         if existing:
             return existing
+        task_id = new_task_id()
         task = TaskRecord(
+            task_id=task_id,
             external_id=incident.external_id,
             source=incident.source,
-            conversation_id=f"incident:{incident.repository}:{incident.external_id}",
-            agent_session_id=f"task:{incident.repository}:{incident.external_id}",
+            conversation_id=f"incident:{task_id}",
+            agent_session_id=f"task:{task_id}",
             repository=incident.repository,
             environment=incident.environment,
             summary=incident.summary,
         )
-        directory = self.tasks_root / "pending" / task.task_id
-        directory.mkdir(parents=True)
-        (directory / "artifacts" / "incident").mkdir(parents=True)
-        self._json_write(directory / "input.json", incident.model_dump(mode="json"))
-        self._json_write(directory / "state.json", task.model_dump(mode="json"))
-        self.append_event(task.task_id, TaskEvent(type="task.received"))
+        task, _created = self.catalog.create(task, incident)
+        self.task_directory(task.task_id)
+        if _created:
+            self.telemetry.record("task.created", task_id=task.task_id)
         return task
 
     def task_directory(self, task_id: str) -> Path:
         if not task_id or "/" in task_id or ".." in task_id:
             raise ValueError("invalid task id")
+        task = self.catalog.load(task_id)
+        destination = self.tasks_root / STATE_BUCKET.get(task.state, "active") / task_id
         matches = [self.tasks_root / bucket / task_id for bucket in BUCKETS]
         found = [path for path in matches if path.is_dir()]
-        if len(found) != 1:
-            raise FileNotFoundError(task_id)
-        return found[0]
+        if len(found) > 1:
+            raise ValueError("multiple artifact directories exist for a registered task")
+        if found and found[0] != destination:
+            os.replace(found[0], destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "artifacts" / "incident").mkdir(parents=True, exist_ok=True)
+        if not (destination / "input.json").exists():
+            self._json_write(
+                destination / "input.json", self.catalog.incident(task_id).model_dump(mode="json")
+            )
+        if not (destination / "state.json").exists():
+            self._json_write(destination / "state.json", task.model_dump(mode="json"))
+        event_path = destination / "events.jsonl"
+        if not event_path.exists():
+            event_path.write_text(
+                "".join(event.model_dump_json() + "\n" for event in self.catalog.events(task_id))
+            )
+        return destination
 
     def load_task(self, task_id: str) -> TaskRecord:
-        path = self.task_directory(task_id) / "state.json"
-        return TaskRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return self.catalog.load(task_id)
 
     def load_incident(self, task_id: str) -> Incident:
-        path = self.task_directory(task_id) / "input.json"
-        return Incident.model_validate_json(path.read_text(encoding="utf-8"))
+        return self.catalog.incident(task_id)
 
     def save_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()
+        self.catalog.save(task)
         self._json_write(
             self.task_directory(task.task_id) / "state.json", task.model_dump(mode="json")
         )
 
     def transition(self, task_id: str, state: TaskState, **updates: object) -> TaskRecord:
-        source = self.task_directory(task_id)
         task = self.load_task(task_id)
         task.state = state
         for key, value in updates.items():
@@ -116,48 +372,63 @@ class Storage:
                 raise ValueError(f"unknown task field: {key}")
             setattr(task, key, value)
         task.updated_at = utc_now()
-        destination = self.tasks_root / STATE_BUCKET.get(state, "active") / task_id
-        if source != destination:
-            if destination.exists():
-                raise FileExistsError(destination)
-            os.replace(source, destination)
+        self.catalog.save(task, TaskEvent(type=f"task.{state.value}"))
+        self.telemetry.record(
+            "task.transition",
+            task_id=task_id,
+            success=state not in {TaskState.FAILED, TaskState.BLOCKED},
+        )
+        destination = self.task_directory(task_id)
         self._json_write(destination / "state.json", task.model_dump(mode="json"))
-        self.append_event(task_id, TaskEvent(type=f"task.{state.value}"))
+        (destination / "events.jsonl").write_text(
+            "".join(event.model_dump_json() + "\n" for event in self.catalog.events(task_id))
+        )
         return task
 
     def append_event(self, task_id: str, event: TaskEvent) -> None:
         path = self.task_directory(task_id) / "events.jsonl"
+        self.catalog.append_event(task_id, event)
+        if event.type == "tool.shell":
+            self.telemetry.record(
+                "tool.shell",
+                task_id=task_id,
+                success=event.data.get("returncode", 0) == 0,
+                seconds=float(event.data.get("duration_seconds", 0)),
+            )
         with path.open("a", encoding="utf-8") as handle:
             handle.write(event.model_dump_json() + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
     def events(self, task_id: str) -> list[TaskEvent]:
-        path = self.task_directory(task_id) / "events.jsonl"
-        if not path.exists():
-            return []
-        return [TaskEvent.model_validate_json(line) for line in path.read_text().splitlines()]
+        return self.catalog.events(task_id)
 
     def list_tasks(self, *buckets: str) -> list[TaskRecord]:
         selected = buckets or BUCKETS
-        records: list[TaskRecord] = []
         for bucket in selected:
             if bucket not in BUCKETS:
                 raise ValueError(f"unknown task bucket: {bucket}")
-            for directory in (self.tasks_root / bucket).iterdir():
-                if directory.is_dir():
-                    try:
-                        records.append(self.load_task(directory.name))
-                    except (OSError, ValueError):
-                        continue
-        return sorted(records, key=lambda task: task.created_at)
+        return [
+            task
+            for task in self.catalog.tasks()
+            if STATE_BUCKET.get(task.state, "active") in selected
+        ]
 
-    def find_by_incident(self, source: str, external_id: str) -> TaskRecord | None:
+    def find_by_incident(
+        self,
+        source: str,
+        external_id: str,
+        repository: str | None = None,
+        environment: str | None = None,
+    ) -> TaskRecord | None:
         return next(
             (
                 task
                 for task in self.list_tasks()
-                if task.source == source and task.external_id == external_id
+                if task.source == source
+                and task.external_id == external_id
+                and (repository is None or task.repository.casefold() == repository.casefold())
+                and (environment is None or task.environment.casefold() == environment.casefold())
             ),
             None,
         )
@@ -382,6 +653,7 @@ class Storage:
                 check=True,
             )
         task.branch = branch
+        self.catalog.register_workspace(task.task_id, worktree)
         self.save_task(task)
         return worktree
 
@@ -592,3 +864,4 @@ class Storage:
             )
         elif worktree.exists():
             shutil.rmtree(worktree)
+        self.catalog.release_workspace(task.task_id)

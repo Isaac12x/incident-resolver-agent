@@ -1,4 +1,4 @@
-"""Filesystem-backed incident workflow and event routing."""
+"""Catalog-backed incident workflow and event routing."""
 
 from __future__ import annotations
 
@@ -6,14 +6,22 @@ import asyncio
 import json
 import logging
 import subprocess
+import threading
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .agent import IncidentAgent
 from .code_review import review
 from .config import Config, RepositoryConfig
 from .github import GitHubService
+from .intelligence import (
+    LogisticRootCauseModel,
+    SimilarIncidentSearch,
+    summarize_incident,
+)
 from .models import (
     DeploymentReference,
     Incident,
@@ -91,6 +99,9 @@ class _TaskLifecycle:
             f"## Investigation\n\nRoot cause: {root_cause.strip()}\n\n"
             f"Proposed fix: {proposed_fix.strip()}\n",
         )
+        self.workflow.storage.record_incident_history(
+            self.task_id, self.workflow.storage.load_incident(self.task_id), root_cause=root_cause
+        )
         if task.state == TaskState.COLLECTING_CONTEXT:
             task = self.workflow.storage.transition(self.task_id, TaskState.INVESTIGATING)
         reproduced = (
@@ -146,6 +157,7 @@ class _TaskLifecycle:
             self.worktree,
             timeout=self.workflow.config.model.tool_timeout_seconds,
             permissions=self.workflow.config.permissions,
+            execution=self.workflow.config.execution,
             logger=lambda data: self.workflow.storage.append_event(
                 self.task_id, TaskEvent(type=str(data.pop("type")), data=data)
             ),
@@ -358,6 +370,27 @@ class WorkflowEngine:
         self._queued_task_ids: set[str] = set()
         self._running_task_ids: set[str] = set()
         self._deferred_wakeups: set[str] = set()
+        self.root_cause_model = LogisticRootCauseModel([], [], {}, 0)
+        self.similar_incidents = SimilarIncidentSearch(allow_download=False)
+        self._intelligence_lock = threading.RLock()
+        self._history_signature = self._current_history_signature()
+        self._intelligence_initialized = False
+
+    def _current_history_signature(self) -> tuple[tuple[str, str | None], ...]:
+        return tuple(
+            (str(item.get("task_id")), item.get("root_cause"))
+            for item in self.storage.incident_history(limit=1000)
+        )
+
+    def _refresh_intelligence(self) -> None:
+        signature = self._current_history_signature()
+        if self._intelligence_initialized and signature == self._history_signature:
+            return
+        records = self.storage.incident_history(labeled_only=True)
+        self.root_cause_model = LogisticRootCauseModel.train(records)
+        self.similar_incidents = SimilarIncidentSearch(allow_download=False)
+        self._history_signature = signature
+        self._intelligence_initialized = True
 
     def _has_review_comments(self, task_id: str) -> bool:
         task = self.storage.load_task(task_id)
@@ -394,11 +427,80 @@ class WorkflowEngine:
             raise ValueError(
                 f"environment {incident.environment!r} is not enabled for {incident.repository}"
             )
-        existing = self.storage.find_by_incident(incident.source, incident.external_id)
+        existing = self.storage.find_by_incident(
+            incident.source, incident.external_id, incident.repository, incident.environment
+        )
         task = self.storage.create_task(incident)
+        self.storage.record_incident_history(task.task_id, incident)
         if existing is None:
             await self.wake(task.task_id)
         return task
+
+    def intelligence_summary(self, task_id: str) -> dict[str, Any]:
+        incident = self.storage.load_incident(task_id)
+        text = " ".join(filter(None, (incident.summary, incident.description)))
+        directory = self.storage.task_directory(task_id)
+        for source in ("artifacts/local/fix.txt", "investigation.md"):
+            artifact = directory / source
+            if artifact.is_file():
+                summary = artifact.read_text(encoding="utf-8").strip()
+                if summary:
+                    return {
+                        "summary": summary,
+                        "method": "agent-artifact",
+                        "source": source,
+                        "format": "markdown",
+                    }
+        return {
+            **summarize_incident(text),
+            "method": "extractive-fallback",
+            "reason": "agent investigation summary is not available yet",
+        }
+
+    def _intelligence_context(self, task_id: str) -> dict[str, Any]:
+        """Build bounded, durable context used by the agent for every new intake."""
+        incident = self.storage.load_incident(task_id)
+        text = " ".join(filter(None, (incident.summary, incident.description)))
+        with self._intelligence_lock:
+            self._refresh_intelligence()
+            prediction = self.root_cause_model.predict(text)
+            related = self.similar_incidents_search(text, limit=5)
+            related["results"] = [
+                item for item in related.get("results", []) if item.get("task_id") != task_id
+            ]
+        return {
+            "schema_version": 1,
+            "summary": self.intelligence_summary(task_id),
+            "prediction": prediction,
+            "related_incidents": related,
+        }
+
+    def predict_root_cause(self, text: str) -> dict[str, Any]:
+        with self._intelligence_lock:
+            self._refresh_intelligence()
+            return self.root_cause_model.predict(text)
+
+    def similar_incidents_search(self, text: str, limit: int = 5) -> dict[str, Any]:
+        with self._intelligence_lock:
+            self._refresh_intelligence()
+            if self.similar_incidents._index is None:
+                self.similar_incidents.build(self.storage.incident_history())
+            return self.similar_incidents.search(text, limit=limit)
+
+    def rebuild_intelligence(self) -> dict[str, Any]:
+        with self._intelligence_lock:
+            records = self.storage.incident_history(labeled_only=True)
+            self.root_cause_model = LogisticRootCauseModel.train(records)
+            vector = self.similar_incidents.build(self.storage.incident_history())
+            self._history_signature = self._current_history_signature()
+            self._intelligence_initialized = True
+        return {
+            "root_cause": {
+                "available": bool(self.root_cause_model.weights),
+                "trained_samples": self.root_cause_model.trained_samples,
+            },
+            "similar_incidents": vector,
+        }
 
     async def wake(self, task_id: str) -> None:
         if task_id in self._running_task_ids:
@@ -426,6 +528,7 @@ class WorkflowEngine:
                 repository.base_branch,
                 repository.local_path,
             )
+        self.storage.catalog.verify_workspace(task.task_id, worktree)
         graph_marker = (
             self.storage.task_directory(task.task_id) / "artifacts" / "repository" / "graphs-ready"
         )
@@ -643,6 +746,33 @@ class WorkflowEngine:
         return latest
 
     async def process(self, task_id: str) -> TaskRecord:
+        owner = uuid4().hex
+        ttl = max(60, self.config.model.tool_timeout_seconds * 2 + 300)
+        if not self.storage.catalog.acquire(task_id, owner, ttl):
+            return self.storage.load_task(task_id)
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(ttl / 3)
+                if not self.storage.catalog.acquire(task_id, owner, ttl):
+                    raise RuntimeError("durable task lease was lost")
+
+        renewal = asyncio.create_task(heartbeat())
+        work = asyncio.create_task(self._process_unleased(task_id))
+        try:
+            done, _ = await asyncio.wait({renewal, work}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal in done:
+                await renewal  # Losing ownership stops work before any further mutation.
+            return await work
+        finally:
+            for pending in (renewal, work):
+                pending.cancel()
+            for pending in (renewal, work):
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending
+            self.storage.catalog.release(task_id, owner)
+
+    async def _process_unleased(self, task_id: str) -> TaskRecord:
         task = self.storage.load_task(task_id)
         try:
             if task.state == TaskState.RECEIVED:
@@ -652,10 +782,20 @@ class WorkflowEngine:
                     if self.context_collector
                     else self.storage.load_incident(task_id).model_dump_json(indent=2)
                 )
+                import json
+
+                intelligence = await asyncio.to_thread(self._intelligence_context, task_id)
+                self.storage.write_artifact(
+                    task_id,
+                    "artifacts/intelligence.json",
+                    json.dumps(intelligence, indent=2) + "\n",
+                )
+                context += "\n\n## Incident intelligence\n\n" + json.dumps(intelligence, indent=2)
                 self.storage.write_artifact(task_id, "context.md", context)
                 return self.storage.transition(task_id, TaskState.COLLECTING_CONTEXT)
 
             worktree = await self._worktree(task)
+            self.storage.catalog.verify_workspace(task.task_id, worktree)
             uses_durable_session = bool(
                 getattr(self.agent, "supports_durable_session", False)
                 and callable(getattr(self.agent, "run_session", None))
@@ -670,6 +810,11 @@ class WorkflowEngine:
                 return await self._process_agent_session(task, worktree)
             if task.state == TaskState.COLLECTING_CONTEXT:
                 investigation = await self.agent.investigate(task, worktree)
+                self.storage.record_incident_history(
+                    task_id,
+                    self.storage.load_incident(task_id),
+                    root_cause=investigation.root_cause,
+                )
                 markdown = (
                     "# Investigation\n\n## Root Cause\n\n"
                     + investigation.root_cause

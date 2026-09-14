@@ -196,6 +196,8 @@ class TriggerConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
+    tool_registry: str | None = None
+    max_tool_retries: int = Field(2, ge=0, le=5)
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     skill_directories: list[str] = Field(
         default_factory=lambda: ["skills", ".agents/skills", ".claude/skills", ".codex/skills"]
@@ -240,6 +242,9 @@ class ServerConfig(BaseModel):
     port: int = Field(8765, ge=1, le=65535)
     public_url: str | None = None
     webhook_secret_env: str = "AGENT_WEBHOOK_SECRET"
+    api_token_env: str = "INCIDENT_AGENT_API_TOKEN"
+    # Existing private deployments retain their config; new user installs enable this.
+    require_api_auth: bool = False
 
 
 class PlaywrightConfig(BaseModel):
@@ -351,6 +356,21 @@ class PermissionsConfig(BaseModel):
     allow_review_resolution: bool = True
 
 
+class ExecutionConfig(BaseModel):
+    mode: Literal["host", "container"] = "host"
+    image: str = "python:3.12-slim"
+    network: bool = False
+    memory_mb: int = Field(512, ge=64, le=32768)
+    pids_limit: int = Field(128, ge=16, le=4096)
+
+    @field_validator("image")
+    @classmethod
+    def image_reference(cls, value: str) -> str:
+        if not value or value.startswith("-") or any(c.isspace() for c in value):
+            raise ValueError("container image must be a nonempty image reference")
+        return value
+
+
 class Config(BaseModel):
     runtime_root: Path = Path(".agent")
     max_concurrent_tasks: int = Field(2, ge=1)
@@ -364,6 +384,7 @@ class Config(BaseModel):
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
     code_review: CodeReviewConfig = Field(default_factory=CodeReviewConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
     connectors: list[ConnectorConfig] = Field(default_factory=list)
 
@@ -460,6 +481,7 @@ def save_config(config: Config, path: Path = Path(".agent/config.toml")) -> None
         "deployment",
         "code_review",
         "permissions",
+        "execution",
     ):
         _write_table(lines, section, data[section])
     for repository in data["repositories"]:
