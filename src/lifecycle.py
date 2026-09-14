@@ -222,9 +222,11 @@ def update_installation(
     )
     if result.returncode:
         return result
+    from .tooling import TOOL_PACKAGES
+
     for tool in managed_tools:
         upgraded = runner(
-            [uv, "tool", "upgrade", tool],
+            [uv, "tool", "install", "--upgrade", TOOL_PACKAGES.get(tool, tool)],
             capture_output=True,
             text=True,
             check=False,

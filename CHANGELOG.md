@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Resolve bundled helper executables inside their Python environment, use the correct seed-cli
+  package for managed installation/update, and reject unexpected nested bundle manifests.
+
 - Complete runtime integrations for contextual tool selection, digest-pinned callable extensions,
   versioned configuration/skill bundles, and installed readiness/update commands.
 - Enrich new incidents with history-based predictions, related incidents, and a configurable

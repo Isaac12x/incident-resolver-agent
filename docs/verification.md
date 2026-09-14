@@ -5,7 +5,7 @@ worktree to preserve the original checkout's unresolved installer conflict and l
 
 ## Executed checks
 
-- Full `pytest -q`: **235 passed**, **95.14%** total coverage; every source module passed the
+- Full `pytest -q`: **237 passed**, **95.20%** total coverage; every source module passed the
   repository's strict **greater than 90%** gate. The run emitted 64 resource warnings, mainly
   SQLite connections from existing test/backend paths; it did not fail any assertions or gates.
 - Ruff and `git diff --check`: passed. `uv lock --check`: passed. Installer shell syntax: passed.
@@ -21,7 +21,9 @@ worktree to preserve the original checkout's unresolved installer conflict and l
 - Task catalog tests cover concurrent deduplication, durable worker exclusion, cancellation release,
   legacy migration, workspace replacement, and recovery after deleting artifact folders.
 - Version tests cover tampering, installed application loading, and rollback to the immediately
-  previous activation when three versions exist.
+  previous activation when three versions exist; unexpected nested manifests are rejected.
+- Installed helper resolution preserves the virtual environment across Python symlinks, and
+  managed tool install/update maps the `seed` executable to the `seed-cli` package.
 
 ## Evaluation results and limits
 

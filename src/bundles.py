@@ -195,7 +195,7 @@ def _verify_bundle(bundle: Bundle) -> None:
     actual = {
         str(file.relative_to(bundle.path))
         for file in bundle.path.rglob("*")
-        if file.is_file() and file.name != "manifest.json"
+        if file.is_file() and file != bundle.path / "manifest.json"
     }
     if any(Path(name).is_absolute() or ".." in Path(name).parts for name in allowed):
         raise ValueError(f"bundle manifest contains an unsafe path: {bundle.version}")
