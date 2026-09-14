@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Clarify CLI installation with working pre-merge curl/uv commands, PATH setup, credentials,
+  configuration locations, and the distinction between foreground operation and systemd deployment.
+
 - Resolve bundled helper executables inside their Python environment, use the correct seed-cli
   package for managed installation/update, and reject unexpected nested bundle manifests.
 
