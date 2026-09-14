@@ -152,6 +152,41 @@ Skills are shipped with the wheel and work offline. Repository-specific policies
 the configured project instructions and skill directories; examples use placeholder projects
 and endpoints. Run `uv run pytest` and `uv run ruff check src tests` before contributing.
 
+### Open Code Review before Playwright
+
+Run `incident-agent tui`, open **Code review**, enable the integration, and enter the
+model protocol, endpoint, model name, API-key environment variable name, and timeout.
+**Save configuration and install / test OCR** persists those settings before installing
+[`@alibaba-group/open-code-review`](https://github.com/alibaba/open-code-review) with npm
+and running `ocr llm test`. Git 2.41 or newer and npm are required. The API key is read
+from the environment; its value is never saved in the harness configuration.
+
+Setup uses an existing `ocr` on PATH or installs it under `<runtime_root>/tools/ocr`.
+For systemd, run this setup in the installed directory as the service user and supply
+the named credential variable to both the setup session and the worker service.
+Copying `config.toml` alone does not transfer the OCR executable or credentials.
+Existing configurations keep OCR disabled until explicitly enabled in the TUI.
+
+After a fix, the harness commits outstanding changes and runs:
+
+```bash
+ocr review --from main --to feature-branch --format json --output scan-result.json
+```
+
+The actual refs use the repository's configured base and incident branch; a remote-only
+base uses `origin/<base>`. Output goes into the task filetree at
+`artifacts/code-review/scan-result.json`, with an additional `<commit-sha>.json` report.
+The current report enters the fix agent's context and lifecycle tool feedback. Findings
+return the task to implementation via the reproduction state, within the task retry budget.
+After repairs, local checks and publication run again. Only a complete report with no
+findings can pass the gate; missing tools, credentials, invalid JSON, partial reviews,
+warnings, and timeouts block the task. No live OCR calls occur when it is disabled.
+
+The gate runs before publication and before configured Playwright lifecycle commands,
+and is checked again against the current PR commit before deployment verification.
+An unchanged reviewed commit reuses its passing result. Agents must use `run_tests`
+for Playwright so execution goes through the lifecycle gate.
+
 ### systemd deployment
 
 The CentOS/RHEL installer deploys the single service and an optional split HTTP/worker target:

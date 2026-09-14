@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add optional Open Code Review setup in the TUI, saving model configuration before installation
+  and connectivity testing. Review incident branches before publishing and Playwright, retain JSON
+  reports in task artifacts, and return findings to the fix context with bounded retries.
+- Correct the package license path so installations and builds use the existing `LICENSE` file.
 - Keep deployment verification outside the durable-agent routing path, persist authorized review
   comments across worker restarts, and explicitly push/update existing pull-request heads.
 - Bridge runtime MCP adapters into the subscription CLI alongside static connector configuration;
