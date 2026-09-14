@@ -14,7 +14,12 @@ from src.app import Application
 from src.config import Config, RepositoryConfig
 from src.connectors import ConnectorManager
 from src.github import GitHubService
-from src.intelligence import LogisticRootCauseModel, SimilarIncidentSearch, summarize_incident
+from src.intelligence import (
+    LogisticRootCauseModel,
+    SimilarIncidentSearch,
+    explain_code,
+    summarize_incident,
+)
 from src.models import Incident
 from src.server import create_server
 from src.storage import Storage
@@ -210,6 +215,56 @@ def test_faiss_empty_history_is_unavailable() -> None:
     result = SimilarIncidentSearch().build([])
     assert result["available"] is False
     assert result["reason"]
+
+
+def test_lexical_retrieval_is_explicit_when_vector_model_unavailable() -> None:
+    search = SimilarIncidentSearch()
+    built = search.build([{"task_id": "old", "summary": "database timeout"}])
+    result = search.search("database timeout")
+    assert result["results"][0]["task_id"] == "old"
+    if not built["available"]:
+        assert result["reason"]
+
+
+def test_explain_code_is_configurable_and_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert explain_code("why")["available"] is False
+    monkeypatch.setenv(
+        "EXPLAIN_CODE_COMMAND",
+        'python -c \'import sys; print("{\\"answer\\":1}")\'',
+    )
+    result = explain_code("why")
+    assert result["available"] is True
+    assert result["result"] == {"answer": 1}
+
+
+@pytest.mark.parametrize("output", ["not-json", "[]"])
+def test_explain_code_rejects_invalid_provider_output(output: str) -> None:
+    result = explain_code("why", command=[sys.executable, "-c", f"print({output!r})"])
+    assert result["available"] is False
+
+
+def test_explain_code_bounds_provider_runtime_and_output() -> None:
+    noisy = explain_code(
+        "why",
+        command=[sys.executable, "-c", "print('x' * 400)"],
+        max_bytes=256,
+    )
+    assert noisy["reason"] == "provider output exceeded limit"
+    timed_out = explain_code(
+        "why",
+        command=[sys.executable, "-c", "import time; time.sleep(1)"],
+        timeout_seconds=1,
+    )
+    assert timed_out["available"] is False
+
+
+def test_explain_code_validates_query_and_bounds() -> None:
+    with pytest.raises(ValueError):
+        explain_code("")
+    with pytest.raises(ValueError):
+        explain_code("x" * 40_000)
+    with pytest.raises(ValueError):
+        explain_code("x", timeout_seconds=0)
 
 
 def test_different_incident_scopes_have_isolated_sessions(tmp_path: Path) -> None:

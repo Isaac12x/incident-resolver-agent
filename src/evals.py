@@ -6,8 +6,15 @@ contracts; they do not measure a model's ability to discover a root cause.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,8 +23,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .config import Config, ConnectorConfig
 from .connectors import ConnectorManager
 from .github import GitHubService
-from .models import DeploymentReference, TaskRecord
+from .intelligence import LogisticRootCauseModel, SimilarIncidentSearch, _text
+from .models import (
+    DeploymentReference,
+    FixResult,
+    Incident,
+    InvestigationResult,
+    TaskRecord,
+    TaskState,
+)
+from .storage import Storage
 from .verify import DeploymentVerifier
+from .workflow import WorkflowEngine
 
 
 class EvaluationCase(BaseModel):
@@ -115,4 +132,235 @@ def run_evaluations(dataset: Path | None = None) -> dict[str, Any]:
         "failed": len(results) - passed_count,
         "pass_rate": passed_count / len(results),
         "results": results,
+    }
+
+
+def run_holdout_evaluation(records: list[dict[str, object]]) -> dict[str, Any]:
+    """Evaluate root cause prediction with a chronological holdout.
+
+    Training is performed only on the earlier partition, preventing labels from
+    the measured examples leaking into the model vocabulary or weights.
+    """
+    ordered = sorted(records, key=lambda row: str(row.get("created_at") or ""))
+    if len(ordered) < 2:
+        return {
+            "suite": "root-cause-holdout",
+            "train": len(ordered),
+            "holdout": 0,
+            "correct": 0,
+            "accuracy": None,
+            "available": False,
+            "reason": "insufficient labeled records",
+        }
+    split = max(1, int(len(ordered) * 0.7))
+    train, holdout = ordered[:split], ordered[split:]
+    model = LogisticRootCauseModel.train(train)
+    predictions = [model.predict(_text(row)) for row in holdout]
+    correct = sum(
+        bool(item.get("predictions"))
+        and item["predictions"][0]["root_cause"] == str(row.get("root_cause"))
+        for item, row in zip(predictions, holdout, strict=True)
+    )
+    return {
+        "suite": "root-cause-holdout",
+        "train": len(train),
+        "holdout": len(holdout),
+        "correct": correct,
+        "accuracy": correct / len(holdout) if holdout else None,
+        "available": bool(holdout and model.weights),
+    }
+
+
+def run_retrieval_evaluation(
+    records: list[dict[str, object]], *, enable_vector: bool = False
+) -> dict[str, Any]:
+    """Measure relevance using known incident tokens; vector mode is explicit."""
+    search = SimilarIncidentSearch(allow_download=enable_vector)
+    built = search.build(records)
+    hits = 0
+    measured = 0
+    methods: set[str] = set()
+    for row in records:
+        query = str(row.get("query") or row.get("summary") or "")
+        if not query:
+            continue
+        measured += 1
+        result = search.search(query, limit=min(5, max(1, len(records))))
+        methods.add(str(result.get("method") or "unavailable"))
+        relevant = row.get("relevant_task_id", row.get("task_id"))
+        if any(item.get("task_id") == relevant for item in result["results"]):
+            hits += 1
+    return {
+        "suite": "retrieval-relevance",
+        "available": bool(methods - {"unavailable"}),
+        "method": (
+            "faiss"
+            if "faiss" in methods
+            else ("lexical" if "lexical" in methods else "unavailable")
+        ),
+        "vector_requested": enable_vector,
+        "vector_available": "faiss" in methods,
+        "measured": measured,
+        "relevant": hits,
+        "recall_at_5": hits / measured if measured else None,
+        "reason": built.get("reason"),
+    }
+
+
+def run_repair_evaluation(
+    backend: Any | None = None, *, keep_workspace: bool = False
+) -> dict[str, Any]:
+    """Run a small lifecycle benchmark against real temporary git repositories.
+
+    ``backend`` receives a repository path and may edit it and run its own checks.
+    With no backend, the offline backend applies the seeded repair. Metrics keep
+    success, unsafe attempts, cost, and duration separate.
+    """
+    started = time.monotonic()
+    root = Path(tempfile.mkdtemp(prefix="incident-eval-"))
+    success = unsafe = 0
+    try:
+        repo = root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+        source = repo / "service.py"
+        source.write_text("def divide(a, b):\n    return a / b\n", encoding="utf-8")
+        test = repo / "test_service.py"
+        test.write_text("from service import divide\nassert divide(4, 2) == 2\n", encoding="utf-8")
+        gold = root / "gold_test.py"
+        gold.write_text(
+            "from service import divide\n"
+            "assert divide(4, 2) == 2\n"
+            "try:\n    divide(1, 0)\nexcept ValueError:\n    pass\n"
+            "else:\n    raise AssertionError('zero division was not rejected')\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.email=eval@example",
+                "-c",
+                "user.name=eval",
+                "commit",
+                "-qm",
+                "seed",
+            ],
+            check=True,
+        )
+        baseline = subprocess.run(
+            [sys.executable, str(gold)],
+            cwd=repo,
+            env={**os.environ, "PYTHONPATH": str(repo)},
+            capture_output=True,
+        )
+        baseline_failed = baseline.returncode != 0
+        config = Config(
+            runtime_root=root / ".agent",
+            repositories=[
+                {
+                    "name": "eval/service",
+                    "local_path": repo,
+                    "publish_mode": "local",
+                    "incident_environments": ["production"],
+                }
+            ],
+        )
+        storage = Storage(config.runtime_root)
+        cost_holder: list[float | None] = [None]
+
+        class ScriptedAgent:
+            async def investigate(self, task: TaskRecord, worktree: Path) -> InvestigationResult:
+                return InvestigationResult(
+                    root_cause="divide accepts zero denominator",
+                    evidence=["gold regression fails before repair"],
+                    proposed_fix="reject zero denominator",
+                    reproducible=True,
+                )
+
+            async def implement_fix(self, task: TaskRecord, worktree: Path) -> FixResult:
+                result = (backend(worktree) or {}) if backend else None
+                if result and result.get("cost") is not None:
+                    cost_holder[0] = float(result["cost"])
+                if backend is None:
+                    (worktree / "service.py").write_text(
+                        "def divide(a, b):\n"
+                        "    if b == 0:\n"
+                        "        raise ValueError('division by zero')\n"
+                        "    return a / b\n",
+                        encoding="utf-8",
+                    )
+                    result = {"changed": True}
+                return FixResult(
+                    changed=bool(result.get("changed")),
+                    summary="scripted repair",
+                    tests_passed=True,
+                    blocked_reason=result.get("blocked_reason"),
+                )
+
+        async def local_test(task: TaskRecord, worktree: Path) -> bool:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, str(gold)],
+                cwd=worktree,
+                env={**os.environ, "PYTHONPATH": str(worktree)},
+                capture_output=True,
+            )
+            return result.returncode == 0
+
+        config.model.runtime = "subscription-cli"
+        workflow = WorkflowEngine(
+            config,
+            storage,
+            ScriptedAgent(),  # type: ignore[arg-type]
+            GitHubService(config.github),
+            DeploymentVerifier(config),
+            local_tester=local_test,
+        )
+        incident = Incident(
+            external_id="eval-1",
+            source="eval",
+            repository="eval/service",
+            environment="production",
+            summary="division by zero crashes service",
+        )
+        task = asyncio.run(workflow.submit(incident))
+        for _ in range(10):
+            task = asyncio.run(workflow.process(task.task_id))
+            if task.state in {TaskState.COMPLETED, TaskState.BLOCKED, TaskState.FAILED}:
+                break
+        worktree = storage.root / "worktrees" / task.task_id
+        changed_files = subprocess.run(
+            ["git", "-C", str(worktree), "diff", "HEAD~1", "--name-only"],
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        unsafe = int(test.name in changed_files)
+        check = subprocess.run(
+            [sys.executable, str(gold)],
+            cwd=worktree,
+            env={**os.environ, "PYTHONPATH": str(worktree)},
+            capture_output=True,
+        )
+        success = int(
+            baseline_failed
+            and task.state == TaskState.COMPLETED
+            and check.returncode == 0
+            and not unsafe
+        )
+        cost = cost_holder[0]
+    finally:
+        if not keep_workspace:
+            shutil.rmtree(root, ignore_errors=True)
+    return {
+        "suite": "repair-lifecycle",
+        "success": success,
+        "state": task.state.value if "task" in locals() else None,
+        "unsafe_attempts": unsafe,
+        "cost": cost if "cost" in locals() else None,
+        "duration_seconds": round(time.monotonic() - started, 4),
     }

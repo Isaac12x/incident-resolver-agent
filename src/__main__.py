@@ -14,12 +14,22 @@ from pathlib import Path
 import uvicorn
 
 from .app import Application
+from .bundles import (
+    activate_bundle,
+    build_bundle,
+    list_bundles,
+    load_active_bundle,
+    rollback_bundle,
+)
 from .config import ConnectorConfig, load_config, save_config
 from .lifecycle import (
     bootstrap,
     default_config_path,
     default_runtime_path,
+    doctor,
+    ensure_runtime_tools,
     ensure_user_config,
+    require_ready,
     update_installation,
 )
 from .models import Incident, TaskState
@@ -44,6 +54,18 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     commands.add_parser("worker", help="run only the durable task worker")
     commands.add_parser("tui", aliases=["config"], help="configure the harness")
     commands.add_parser("update", help="update the isolated installation through uv")
+    doctor_command = commands.add_parser(
+        "doctor", help="validate runtime tools, credentials, and repositories"
+    )
+    doctor_command.add_argument(
+        "--install", action="store_true", help="install missing helper CLIs with uv"
+    )
+    commands.add_parser("status", help="show readiness and active runtime bundle")
+    bundle = commands.add_parser(
+        "bundle", help="build, list, activate, or roll back runtime bundles"
+    )
+    bundle.add_argument("action", choices=("build", "list", "activate", "rollback"))
+    bundle.add_argument("version", nargs="?")
     commands.add_parser("mcp", help="serve MCP-compatible HTTP endpoints")
     install_repositories = commands.add_parser(
         "install-repositories",
@@ -78,6 +100,11 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     run = commands.add_parser("run", help="submit an incident JSON file, or start the server")
     run.add_argument("incident", type=Path, nargs="?")
     eval_command = commands.add_parser("eval", help="run the packaged evaluation dataset")
+    eval_command.add_argument(
+        "--suite",
+        choices=("contracts", "repair", "root-cause", "retrieval"),
+        default="contracts",
+    )
     eval_command.add_argument("dataset", type=Path, nargs="?")
     eval_command.add_argument("--output", type=Path)
     index = commands.add_parser("index", help="build the code-review-graph index")
@@ -111,6 +138,24 @@ async def _run_direct(application: Application, path: Path) -> None:
     print(json.dumps(task.model_dump(mode="json"), indent=2))
 
 
+def _load_eval_records(path: Path) -> list[dict[str, object]]:
+    """Read and validate a JSON array or JSONL list of evaluation records."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+        decoded = json.loads(raw)
+        values = decoded if isinstance(decoded, list) else [decoded]
+    except json.JSONDecodeError:
+        try:
+            values = [json.loads(line) for line in raw.splitlines() if line.strip()]
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"invalid evaluation JSON/JSONL dataset: {error}") from error
+    except (OSError, UnicodeDecodeError) as error:
+        raise SystemExit(f"could not read evaluation dataset: {error}") from error
+    if not values or any(not isinstance(item, dict) for item in values):
+        raise SystemExit("evaluation dataset must contain JSON objects")
+    return [item for item in values if isinstance(item, dict)]
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
     using_default_config = args.config is None
@@ -123,9 +168,26 @@ def main(argv: list[str] | None = None) -> None:
             else default_config_path()
         )
     if args.command == "eval":
-        from .evals import run_evaluations
+        from .evals import (
+            run_evaluations,
+            run_holdout_evaluation,
+            run_repair_evaluation,
+            run_retrieval_evaluation,
+        )
 
-        report = run_evaluations(args.dataset)
+        if args.suite == "contracts":
+            report = run_evaluations(args.dataset)
+        elif args.suite == "repair":
+            report = run_repair_evaluation()
+        else:
+            if not args.dataset:
+                raise SystemExit(f"eval --suite {args.suite} requires a JSON or JSONL dataset")
+            records = _load_eval_records(args.dataset)
+            report = (
+                run_holdout_evaluation(records)
+                if args.suite == "root-cause"
+                else run_retrieval_evaluation(records)
+            )
         rendered = json.dumps(report, indent=2)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -136,7 +198,14 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(1)
         return
     if args.command == "update":
-        result = update_installation()
+        managed_tools: tuple[str, ...] = ()
+        if args.config and args.config.is_file():
+            managed_tools = (
+                ("seed", "code-review-graph")
+                if load_config(args.config, create=False).repositories
+                else ()
+            )
+        result = update_installation(managed_tools=managed_tools)
         if result.stdout:
             print(result.stdout, end="")
         if result.stderr:
@@ -144,8 +213,50 @@ def main(argv: list[str] | None = None) -> None:
         if result.returncode:
             raise SystemExit(result.returncode)
         return
+    if args.command in {"doctor", "status"}:
+        if args.command == "doctor" and args.install:
+            from .tooling import install_uv_tools
+
+            results = install_uv_tools(("seed", "code-review-graph"))
+            for result in results:
+                print(result.stdout or result.stderr, end="")
+        checks = doctor(args.config or default_config_path())
+        for check in checks:
+            print(f"{'OK' if check.ok else 'FAIL'} {check.name}: {check.message}")
+        if args.command == "status":
+            try:
+                active = load_active_bundle(
+                    load_config(args.config or default_config_path(), create=False)
+                )
+                print(f"active bundle: {active.version if active else 'none'}")
+            except Exception as error:
+                print(f"active bundle: unavailable ({error})")
+        if any(not check.ok for check in checks):
+            raise SystemExit(1)
+        return
+    if args.command == "bundle":
+        config_path = args.config or default_config_path()
+        config = load_config(config_path, create=False)
+        if args.action == "build":
+            print(build_bundle(config).version)
+        elif args.action == "list":
+            for item in list_bundles(config):
+                print(item.version)
+        elif args.action == "activate":
+            if not args.version:
+                raise SystemExit("bundle activate requires VERSION")
+            print(activate_bundle(config, args.version).version)
+        else:
+            print(rollback_bundle(config).version)
+        return
     config_commands = {
-        "init", "serve", "worker", "tui", "config", "mcp", "run",
+        "init",
+        "serve",
+        "worker",
+        "tui",
+        "config",
+        "mcp",
+        "run",
     }
     if args.command in config_commands:
         args.config = bootstrap(args.config)
@@ -260,6 +371,15 @@ def main(argv: list[str] | None = None) -> None:
                 last_error = str(error)
             time.sleep(0.25)
         raise SystemExit(f"health check failed for {url}: {last_error}")
+    # Refuse to start a configured service that cannot satisfy its declared
+    # runtime contract.  A missing explicit path is left to Application.build
+    # for backwards-compatible config creation; ``doctor`` reports it clearly.
+    if args.command in {"serve", "worker", "run", "mcp"} and args.config.is_file():
+        try:
+            ensure_runtime_tools(args.config)
+            require_ready(args.config)
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
     application = Application.build(args.config)
     if args.command in {"serve", "mcp"}:
         server = create_server(application, run_worker=not getattr(args, "no_worker", False))

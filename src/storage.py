@@ -9,11 +9,14 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .models import Incident, TaskEvent, TaskRecord, TaskState, new_task_id, utc_now
+from .task_catalog import TaskCatalog
+from .telemetry import Telemetry
 from .tooling import repository_candidates
 
 BUCKETS = ("pending", "active", "waiting", "completed", "blocked", "failed")
@@ -49,6 +52,32 @@ class Storage:
         global_memory = self.root / "memory" / "global.md"
         global_memory.touch(exist_ok=True)
         self._initialise_sessions()
+        self.catalog = TaskCatalog(self.root / "tasks.sqlite3")
+        self._migrate_catalog()
+        self.telemetry = Telemetry(self.root)
+
+    def _migrate_catalog(self) -> None:
+        """Import legacy snapshots without overwriting committed database state."""
+        for bucket in BUCKETS:
+            for snapshot in (self.tasks_root / bucket).glob("*/state.json"):
+                try:
+                    task = TaskRecord.model_validate_json(snapshot.read_text())
+                    incident = Incident.model_validate_json(
+                        snapshot.with_name("input.json").read_text()
+                    )
+                    event_file = snapshot.with_name("events.jsonl")
+                    events = (
+                        [
+                            TaskEvent.model_validate_json(line)
+                            for line in event_file.read_text().splitlines()
+                        ]
+                        if event_file.exists()
+                        else []
+                    )
+                    self.catalog.create(task, incident, events)
+                except (OSError, ValueError):
+                    # A corrupt legacy snapshot cannot become authoritative state.
+                    continue
 
     def _initialise_sessions(self) -> None:
         with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
@@ -260,11 +289,18 @@ class Storage:
 
     @staticmethod
     def _json_write(path: Path, value: object) -> None:
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(
-            json.dumps(value, indent=2, default=str, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
-        temporary.replace(path)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".snapshot-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle, indent=2, default=str, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def create_task(self, incident: Incident) -> TaskRecord:
         existing = self.find_by_incident(
@@ -283,39 +319,52 @@ class Storage:
             environment=incident.environment,
             summary=incident.summary,
         )
-        directory = self.tasks_root / "pending" / task.task_id
-        directory.mkdir(parents=True)
-        (directory / "artifacts" / "incident").mkdir(parents=True)
-        self._json_write(directory / "input.json", incident.model_dump(mode="json"))
-        self._json_write(directory / "state.json", task.model_dump(mode="json"))
-        self.append_event(task.task_id, TaskEvent(type="task.received"))
+        task, _created = self.catalog.create(task, incident)
+        self.task_directory(task.task_id)
+        if _created:
+            self.telemetry.record("task.created", task_id=task.task_id)
         return task
 
     def task_directory(self, task_id: str) -> Path:
         if not task_id or "/" in task_id or ".." in task_id:
             raise ValueError("invalid task id")
+        task = self.catalog.load(task_id)
+        destination = self.tasks_root / STATE_BUCKET.get(task.state, "active") / task_id
         matches = [self.tasks_root / bucket / task_id for bucket in BUCKETS]
         found = [path for path in matches if path.is_dir()]
-        if len(found) != 1:
-            raise FileNotFoundError(task_id)
-        return found[0]
+        if len(found) > 1:
+            raise ValueError("multiple artifact directories exist for a registered task")
+        if found and found[0] != destination:
+            os.replace(found[0], destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "artifacts" / "incident").mkdir(parents=True, exist_ok=True)
+        if not (destination / "input.json").exists():
+            self._json_write(
+                destination / "input.json", self.catalog.incident(task_id).model_dump(mode="json")
+            )
+        if not (destination / "state.json").exists():
+            self._json_write(destination / "state.json", task.model_dump(mode="json"))
+        event_path = destination / "events.jsonl"
+        if not event_path.exists():
+            event_path.write_text(
+                "".join(event.model_dump_json() + "\n" for event in self.catalog.events(task_id))
+            )
+        return destination
 
     def load_task(self, task_id: str) -> TaskRecord:
-        path = self.task_directory(task_id) / "state.json"
-        return TaskRecord.model_validate_json(path.read_text(encoding="utf-8"))
+        return self.catalog.load(task_id)
 
     def load_incident(self, task_id: str) -> Incident:
-        path = self.task_directory(task_id) / "input.json"
-        return Incident.model_validate_json(path.read_text(encoding="utf-8"))
+        return self.catalog.incident(task_id)
 
     def save_task(self, task: TaskRecord) -> None:
         task.updated_at = utc_now()
+        self.catalog.save(task)
         self._json_write(
             self.task_directory(task.task_id) / "state.json", task.model_dump(mode="json")
         )
 
     def transition(self, task_id: str, state: TaskState, **updates: object) -> TaskRecord:
-        source = self.task_directory(task_id)
         task = self.load_task(task_id)
         task.state = state
         for key, value in updates.items():
@@ -323,41 +372,47 @@ class Storage:
                 raise ValueError(f"unknown task field: {key}")
             setattr(task, key, value)
         task.updated_at = utc_now()
-        destination = self.tasks_root / STATE_BUCKET.get(state, "active") / task_id
-        if source != destination:
-            if destination.exists():
-                raise FileExistsError(destination)
-            os.replace(source, destination)
+        self.catalog.save(task, TaskEvent(type=f"task.{state.value}"))
+        self.telemetry.record(
+            "task.transition",
+            task_id=task_id,
+            success=state not in {TaskState.FAILED, TaskState.BLOCKED},
+        )
+        destination = self.task_directory(task_id)
         self._json_write(destination / "state.json", task.model_dump(mode="json"))
-        self.append_event(task_id, TaskEvent(type=f"task.{state.value}"))
+        (destination / "events.jsonl").write_text(
+            "".join(event.model_dump_json() + "\n" for event in self.catalog.events(task_id))
+        )
         return task
 
     def append_event(self, task_id: str, event: TaskEvent) -> None:
         path = self.task_directory(task_id) / "events.jsonl"
+        self.catalog.append_event(task_id, event)
+        if event.type == "tool.shell":
+            self.telemetry.record(
+                "tool.shell",
+                task_id=task_id,
+                success=event.data.get("returncode", 0) == 0,
+                seconds=float(event.data.get("duration_seconds", 0)),
+            )
         with path.open("a", encoding="utf-8") as handle:
             handle.write(event.model_dump_json() + "\n")
             handle.flush()
             os.fsync(handle.fileno())
 
     def events(self, task_id: str) -> list[TaskEvent]:
-        path = self.task_directory(task_id) / "events.jsonl"
-        if not path.exists():
-            return []
-        return [TaskEvent.model_validate_json(line) for line in path.read_text().splitlines()]
+        return self.catalog.events(task_id)
 
     def list_tasks(self, *buckets: str) -> list[TaskRecord]:
         selected = buckets or BUCKETS
-        records: list[TaskRecord] = []
         for bucket in selected:
             if bucket not in BUCKETS:
                 raise ValueError(f"unknown task bucket: {bucket}")
-            for directory in (self.tasks_root / bucket).iterdir():
-                if directory.is_dir():
-                    try:
-                        records.append(self.load_task(directory.name))
-                    except (OSError, ValueError):
-                        continue
-        return sorted(records, key=lambda task: task.created_at)
+        return [
+            task
+            for task in self.catalog.tasks()
+            if STATE_BUCKET.get(task.state, "active") in selected
+        ]
 
     def find_by_incident(
         self,
@@ -598,6 +653,7 @@ class Storage:
                 check=True,
             )
         task.branch = branch
+        self.catalog.register_workspace(task.task_id, worktree)
         self.save_task(task)
         return worktree
 
@@ -808,3 +864,4 @@ class Storage:
             )
         elif worktree.exists():
             shutil.rmtree(worktree)
+        self.catalog.release_workspace(task.task_id)

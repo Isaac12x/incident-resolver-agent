@@ -2285,7 +2285,11 @@ async def test_tui_repository_and_github_failures_are_reported(tmp_path: Path) -
         assert "must be a number" in app.query_one("#status", Static).render().plain
 
 
-def test_application_build_and_cli_dispatch(config: Config, tmp_path: Path) -> None:
+def test_application_build_and_cli_dispatch(
+    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "dispatch-test-key")
+    monkeypatch.setenv("AGENT_WEBHOOK_SECRET", "dispatch-test-secret")
     path = tmp_path / "config.toml"
     save_config(config, path)
     built = Application.build(path)

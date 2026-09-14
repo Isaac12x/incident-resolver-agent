@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.evals import run_evaluations
+from src.evals import (
+    run_evaluations,
+    run_holdout_evaluation,
+    run_repair_evaluation,
+    run_retrieval_evaluation,
+)
 
 
 def dataset(tmp_path: Path, *cases: dict) -> Path:
@@ -95,3 +100,49 @@ def test_errors_are_classified_without_leaking_details(
     assert report["passed"] == passed
     assert "private" not in json.dumps(report)
     assert "secret" not in json.dumps(report)
+
+
+def test_holdout_and_retrieval_metrics_are_real_and_separate() -> None:
+    records = [
+        {"task_id": "1", "summary": "database timeout", "root_cause": "database"},
+        {"task_id": "2", "summary": "cache miss", "root_cause": "cache"},
+        {"task_id": "3", "summary": "database timeout", "root_cause": "database"},
+        {"task_id": "4", "summary": "cache miss", "root_cause": "cache"},
+    ]
+    holdout = run_holdout_evaluation(records)
+    retrieval = run_retrieval_evaluation(records)
+    assert holdout["train"] + holdout["holdout"] == len(records)
+    assert 0 <= retrieval["recall_at_5"] <= 1
+    assert retrieval["method"] in {"lexical", "faiss", "unavailable"}
+
+
+def test_holdout_rejects_insufficient_records_and_retrieval_skips_empty_queries() -> None:
+    assert run_holdout_evaluation([])["available"] is False
+    result = run_retrieval_evaluation([{"task_id": "1", "summary": ""}])
+    assert result["measured"] == 0
+
+
+def test_repair_evaluation_runs_seeded_repository_and_catches_failure() -> None:
+    passed = run_repair_evaluation()
+    assert passed["success"] == 1
+    assert passed["unsafe_attempts"] == 0
+    failed = run_repair_evaluation(
+        lambda repo: {"changed": True, "tests_passed": True, "cost": 2.5}
+    )
+    assert failed["success"] == 0
+    assert failed["cost"] == 2.5
+
+
+def test_repair_eval_rejects_noop_and_test_tampering() -> None:
+    assert run_repair_evaluation(lambda _: None)["success"] == 0
+
+    def tamper(repo):
+        (repo / "service.py").write_text(
+            "def divide(a, b):\n    if b == 0: raise ValueError('zero')\n    return a / b\n"
+        )
+        (repo / "test_service.py").write_text("# removed test\n")
+        return {"changed": True}
+
+    result = run_repair_evaluation(tamper)
+    assert result["success"] == 0
+    assert result["unsafe_attempts"] == 1

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Complete runtime integrations for contextual tool selection, digest-pinned callable extensions,
+  versioned configuration/skill bundles, and installed readiness/update commands.
+- Enrich new incidents with history-based predictions, related incidents, and a configurable
+  explain-code JSON adapter with bounded subprocess execution and explicit fallback.
+- Add chronological holdout/retrieval evaluations and a repair evaluation through the real workflow.
+- Move task state, ordered events, leases, and workspace identity into a durable SQLite catalog;
+  retain task folders as recoverable artifacts and migrate existing state.
+- Add rotating structured operation logs and authenticated persisted metrics, plus optional
+  restricted container execution for repository shell and lifecycle test commands.
+- Expose readiness and container execution policy in the configuration TUI.
+
 - Add a curlable uv tool installer, update/config commands, foreground `run`, and persistent
   per-user configuration and state while retaining incident-file submission.
 - Embed Grafana event logging, grouping and duplicate metadata, incident history, bounded

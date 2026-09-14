@@ -7,11 +7,12 @@ import hashlib
 import hmac
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .app import Application
 from .github import GitHubCLIAdapter, WebhookSignatureError
@@ -58,7 +59,7 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     @server.middleware("http")
     async def authenticate_control_api(request: Request, call_next):
         path = request.url.path
-        if path == "/mcp" or path.startswith("/mcp/") or path.startswith("/a2a/"):
+        if path in {"/mcp", "/metrics"} or path.startswith("/mcp/") or path.startswith("/a2a/"):
             token = os.getenv(application.config.server.api_token_env)
             if application.config.server.require_api_auth and not token:
                 return JSONResponse({"detail": "API authentication is not configured"}, 503)
@@ -74,6 +75,29 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
                         headers={"WWW-Authenticate": "Bearer"},
                     )
         return await call_next(request)
+
+    @server.middleware("http")
+    async def request_telemetry(request: Request, call_next):
+        started = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            application.storage.telemetry.record(
+                "http.request", success=False, seconds=time.monotonic() - started
+            )
+            raise
+        application.storage.telemetry.record(
+            "http.request", success=response.status_code < 400, seconds=time.monotonic() - started
+        )
+        return response
+
+    @server.get("/metrics", response_class=PlainTextResponse)
+    async def metrics() -> str:
+        return application.storage.telemetry.prometheus()
+
+    @server.get("/mcp/resources/metrics")
+    async def metric_snapshot() -> list[dict[str, Any]]:
+        return application.storage.telemetry.snapshot()
 
     @server.get("/health")
     async def health() -> JSONResponse:
@@ -247,7 +271,7 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     @server.get("/mcp/resources/tasks/{task_id}/summary")
     async def intelligence_summary(task_id: str) -> dict[str, Any]:
         try:
-            return application.workflow.intelligence_summary(task_id)
+            return await asyncio.to_thread(application.workflow.intelligence_summary, task_id)
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="task not found") from error
 
