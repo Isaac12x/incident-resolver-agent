@@ -63,7 +63,10 @@ class ConfigurationApp(App[None]):
 
     TITLE = "Incident Harness"
     SUB_TITLE = "Configuration"
-    BINDINGS = [Binding("ctrl+s", "save", "Save", priority=True)]
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+q", "quit", "Quit"),
+    ]
     HORIZONTAL_BREAKPOINTS = [(0, "narrow"), (70, "wide")]
 
     CSS = """
@@ -316,6 +319,13 @@ class ConfigurationApp(App[None]):
                 self._input(server.public_url, "public-url"),
                 Label("Agent webhook secret environment variable"),
                 self._input(server.webhook_secret_env, "server-webhook-secret-env"),
+                Label("API token environment variable (for external intake)"),
+                self._input(server.api_token_env, "server-api-token-env"),
+                Checkbox(
+                    "Require API authentication for intake endpoints",
+                    value=server.require_api_auth,
+                    id="server-require-api-auth",
+                ),
                 classes="section",
             ),
             Vertical(
@@ -646,6 +656,8 @@ class ConfigurationApp(App[None]):
                 "port": self._number("port", integer=True),
                 "public_url": self._value("public-url").strip() or None,
                 "webhook_secret_env": self._value("server-webhook-secret-env").strip(),
+                "api_token_env": self._value("server-api-token-env").strip(),
+                "require_api_auth": self._checked("server-require-api-auth"),
             }
         )
         github = self.config.github.model_copy(
@@ -1008,4 +1020,5 @@ class ConfigurationApp(App[None]):
 
 
 def run_tui(path: Path = Path(".agent/config.toml")) -> None:
+    """Launch the editor using the caller-selected config path."""
     ConfigurationApp(path).run()

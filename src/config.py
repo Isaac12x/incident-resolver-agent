@@ -240,6 +240,9 @@ class ServerConfig(BaseModel):
     port: int = Field(8765, ge=1, le=65535)
     public_url: str | None = None
     webhook_secret_env: str = "AGENT_WEBHOOK_SECRET"
+    api_token_env: str = "INCIDENT_AGENT_API_TOKEN"
+    # Existing private deployments retain their config; new user installs enable this.
+    require_api_auth: bool = False
 
 
 class PlaywrightConfig(BaseModel):

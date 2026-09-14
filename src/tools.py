@@ -45,8 +45,25 @@ class WorkspaceTools:
         self.logger = logger
         self.permissions = permissions or PermissionsConfig()
         self.conversation_searcher = conversation_searcher
+        try:
+            stat = self.workspace.stat()
+        except OSError as error:
+            raise ToolError(f"workspace is unavailable: {self.workspace}") from error
+        if not self.workspace.is_dir():
+            raise ToolError("workspace must be a directory")
+        self._workspace_identity = (stat.st_dev, stat.st_ino)
+
+    def _assert_workspace_identity(self) -> None:
+        """Prevent a long-running agent from following a replaced workspace mount."""
+        try:
+            current = self.workspace.stat()
+        except OSError as error:
+            raise ToolError("workspace disappeared") from error
+        if (current.st_dev, current.st_ino) != self._workspace_identity:
+            raise ToolError("workspace changed while the agent was running")
 
     def _path(self, relative_path: str) -> Path:
+        self._assert_workspace_identity()
         if not relative_path or Path(relative_path).is_absolute():
             raise ToolError("path must be relative to the workspace")
         path = (self.workspace / relative_path).resolve()
@@ -284,6 +301,7 @@ class WorkspaceTools:
             raise ToolError("database migrations are disabled")
 
     async def shell(self, command: str) -> CommandResult:
+        self._assert_workspace_identity()
         tokens = self._validate_command(command)
         try:
             process = await asyncio.create_subprocess_exec(

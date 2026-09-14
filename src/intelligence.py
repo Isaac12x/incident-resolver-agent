@@ -1,0 +1,191 @@
+"""Small, dependency-light incident intelligence services.
+
+Optional vector search dependencies are imported only when requested. Results always
+describe unavailable or untrained state instead of implying a model exists.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+from collections import Counter
+from dataclasses import dataclass
+from typing import Any
+
+MAX_QUERY_BYTES = 32 * 1024
+
+
+def summarize_incident(text: str, *, max_sentences: int = 3) -> dict[str, Any]:
+    """Produce a deterministic extractive summary suitable for intake/API use."""
+    if not text or not text.strip():
+        return {"available": True, "summary": "", "method": "extractive", "sentences": 0}
+    sentences = [
+        part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", text.strip()) if part.strip()
+    ]
+    if len(sentences) <= max_sentences:
+        chosen = sentences
+    else:
+        words = re.findall(r"[a-zA-Z0-9_/-]+", text.lower())
+        frequency = Counter(word for word in words if len(word) > 2)
+        ranked = sorted(
+            enumerate(sentences),
+            key=lambda item: (
+                sum(frequency[word] for word in re.findall(r"[a-zA-Z0-9_/-]+", item[1].lower())),
+                -item[0],
+            ),
+            reverse=True,
+        )
+        chosen = [sentence for _, sentence in sorted(ranked[:max_sentences])]
+    return {
+        "available": True,
+        "summary": " ".join(chosen),
+        "method": "extractive",
+        "sentences": len(chosen),
+    }
+
+
+@dataclass
+class LogisticRootCauseModel:
+    """A compact binary logistic regression trained from persisted labeled incidents."""
+
+    labels: list[str]
+    weights: list[list[float]]
+    vocabulary: dict[str, int]
+    trained_samples: int
+
+    @classmethod
+    def train(cls, records: list[dict[str, object]], *, epochs: int = 40) -> LogisticRootCauseModel:
+        labeled = [record for record in records if str(record.get("root_cause") or "").strip()][
+            -200:
+        ]
+        if not labeled:
+            return cls([], [], {}, 0)
+        vocabulary: dict[str, int] = {}
+        for record in labeled:
+            for token in _tokens(_text(record)):
+                if len(vocabulary) < 512:
+                    vocabulary.setdefault(token, len(vocabulary))
+        labels = sorted({str(record["root_cause"]).strip() for record in labeled})[:16]
+        labeled = [record for record in labeled if str(record["root_cause"]).strip() in labels]
+        if len(labels) < 2:
+            return cls(labels, [], vocabulary, len(labeled))
+        vectors = [_vector(_text(record), vocabulary) for record in labeled]
+        weights = [[0.0] * (len(vocabulary) + 1) for _ in labels]
+        for _ in range(max(1, epochs)):
+            for vector, record in zip(vectors, labeled, strict=True):
+                target = str(record["root_cause"]).strip()
+                for index, label in enumerate(labels):
+                    prediction = _sigmoid(
+                        sum(a * b for a, b in zip(weights[index], vector, strict=True))
+                    )
+                    error = (1.0 if label == target else 0.0) - prediction
+                    weights[index][0] += 0.08 * error * vector[0]
+                    for feature, value in enumerate(vector[1:], start=1):
+                        if value:
+                            weights[index][feature] += 0.08 * error * value
+        return cls(labels, weights, vocabulary, len(labeled))
+
+    def predict(self, text: str) -> dict[str, Any]:
+        if not self.labels or not self.weights or self.trained_samples < 2:
+            return {
+                "available": False,
+                "reason": "root cause model is untrained",
+                "predictions": [],
+            }
+        vector = _vector(text, self.vocabulary)
+        scores = [
+            (label, _sigmoid(sum(a * b for a, b in zip(weight, vector, strict=True))))
+            for label, weight in zip(self.labels, self.weights, strict=True)
+        ]
+        scores.sort(key=lambda item: item[1], reverse=True)
+        return {
+            "available": True,
+            "predictions": [
+                {"root_cause": label, "confidence": round(score, 4)} for label, score in scores
+            ],
+            "trained_samples": self.trained_samples,
+        }
+
+
+def _tokens(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9_/-]+", text.lower()) if len(token) > 2]
+
+
+def _text(record: dict[str, object]) -> str:
+    return " ".join(
+        str(record.get(key) or "") for key in ("summary", "description", "source", "environment")
+    )
+
+
+def _vector(text: str, vocabulary: dict[str, int]) -> list[float]:
+    vector = [0.0] * (len(vocabulary) + 1)
+    vector[0] = 1.0
+    for token in _tokens(text):
+        if token in vocabulary:
+            vector[vocabulary[token] + 1] += 1.0
+    norm = math.sqrt(sum(value * value for value in vector[1:])) or 1.0
+    return [vector[0], *(value / norm for value in vector[1:])]
+
+
+def _sigmoid(value: float) -> float:
+    return 1.0 / (1.0 + math.exp(-max(-40.0, min(40.0, value))))
+
+
+class SimilarIncidentSearch:
+    """FAISS/sentence-transformer search, loaded lazily and explicitly unavailable if absent."""
+
+    def __init__(self) -> None:
+        self._model: Any = None
+        self._index: Any = None
+        self._records: list[dict[str, object]] = []
+        self.reason: str | None = None
+
+    def build(self, records: list[dict[str, object]]) -> dict[str, Any]:
+        self._model = None
+        self._index = None
+        self._records = []
+        try:
+            import faiss  # type: ignore[import-not-found]
+            from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
+        except ImportError as error:
+            self.reason = f"optional vector search dependencies unavailable: {error.name}"
+            return {"available": False, "reason": self.reason, "count": 0}
+        if not records:
+            self.reason = "no incident history available"
+            return {"available": False, "reason": self.reason, "count": 0}
+        try:
+            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            vectors = self._model.encode(
+                [_text(record) for record in records], normalize_embeddings=True
+            )
+        except Exception as error:
+            self._model = None
+            self.reason = f"vector model unavailable: {error}"
+            return {"available": False, "reason": self.reason, "count": 0}
+        self._index = faiss.IndexFlatIP(vectors.shape[1])
+        self._index.add(vectors)
+        self._records = records
+        self.reason = None
+        return {"available": True, "count": len(records), "dimension": vectors.shape[1]}
+
+    def search(self, query: str, *, limit: int = 5) -> dict[str, Any]:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a nonempty string")
+        if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
+            raise ValueError("query is too large")
+        if isinstance(limit, bool) or not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        if self._index is None or self._model is None:
+            return {
+                "available": False,
+                "reason": self.reason or "similar incident index is untrained",
+                "results": [],
+            }
+        vector = self._model.encode([query], normalize_embeddings=True)
+        scores, indexes = self._index.search(vector, min(limit, len(self._records)))
+        results = [
+            {"score": round(float(score), 4), **self._records[int(index)]}
+            for score, index in zip(scores[0], indexes[0], strict=True)
+            if index >= 0
+        ]
+        return {"available": True, "results": results}

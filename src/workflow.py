@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from .agent import IncidentAgent
 from .config import Config, RepositoryConfig
 from .github import GitHubService
+from .intelligence import LogisticRootCauseModel, SimilarIncidentSearch, summarize_incident
 from .models import (
     DeploymentReference,
     Incident,
@@ -87,6 +89,9 @@ class _TaskLifecycle:
             self.task_id,
             f"## Investigation\n\nRoot cause: {root_cause.strip()}\n\n"
             f"Proposed fix: {proposed_fix.strip()}\n",
+        )
+        self.workflow.storage.record_incident_history(
+            self.task_id, self.workflow.storage.load_incident(self.task_id), root_cause=root_cause
         )
         if task.state == TaskState.COLLECTING_CONTEXT:
             task = self.workflow.storage.transition(self.task_id, TaskState.INVESTIGATING)
@@ -345,6 +350,11 @@ class WorkflowEngine:
         self._queued_task_ids: set[str] = set()
         self._running_task_ids: set[str] = set()
         self._deferred_wakeups: set[str] = set()
+        self.root_cause_model = LogisticRootCauseModel.train(
+            self.storage.incident_history(labeled_only=True)
+        )
+        self.similar_incidents = SimilarIncidentSearch()
+        self._intelligence_lock = threading.RLock()
 
     def _has_review_comments(self, task_id: str) -> bool:
         task = self.storage.load_task(task_id)
@@ -381,11 +391,41 @@ class WorkflowEngine:
             raise ValueError(
                 f"environment {incident.environment!r} is not enabled for {incident.repository}"
             )
-        existing = self.storage.find_by_incident(incident.source, incident.external_id)
+        existing = self.storage.find_by_incident(
+            incident.source, incident.external_id, incident.repository, incident.environment
+        )
         task = self.storage.create_task(incident)
+        self.storage.record_incident_history(task.task_id, incident)
         if existing is None:
             await self.wake(task.task_id)
         return task
+
+    def intelligence_summary(self, task_id: str) -> dict[str, Any]:
+        incident = self.storage.load_incident(task_id)
+        return summarize_incident(" ".join(filter(None, (incident.summary, incident.description))))
+
+    def predict_root_cause(self, text: str) -> dict[str, Any]:
+        with self._intelligence_lock:
+            return self.root_cause_model.predict(text)
+
+    def similar_incidents_search(self, text: str, limit: int = 5) -> dict[str, Any]:
+        with self._intelligence_lock:
+            if self.similar_incidents._index is None:
+                self.similar_incidents.build(self.storage.incident_history())
+            return self.similar_incidents.search(text, limit=limit)
+
+    def rebuild_intelligence(self) -> dict[str, Any]:
+        with self._intelligence_lock:
+            records = self.storage.incident_history(labeled_only=True)
+            self.root_cause_model = LogisticRootCauseModel.train(records)
+            vector = self.similar_incidents.build(self.storage.incident_history())
+            return {
+                "root_cause": {
+                    "available": bool(self.root_cause_model.weights),
+                    "trained_samples": self.root_cause_model.trained_samples,
+                },
+                "similar_incidents": vector,
+            }
 
     async def wake(self, task_id: str) -> None:
         if task_id in self._running_task_ids:
@@ -552,6 +592,11 @@ class WorkflowEngine:
                 return await self._process_agent_session(task, worktree)
             if task.state == TaskState.COLLECTING_CONTEXT:
                 investigation = await self.agent.investigate(task, worktree)
+                self.storage.record_incident_history(
+                    task_id,
+                    self.storage.load_incident(task_id),
+                    root_cause=investigation.root_cause,
+                )
                 markdown = (
                     "# Investigation\n\n## Root Cause\n\n"
                     + investigation.root_cause

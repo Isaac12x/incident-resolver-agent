@@ -154,6 +154,7 @@ def test_environment_template_contains_only_runtime_variables() -> None:
         "OPENAI_API_KEY",
         "AGENT_WEBHOOK_SECRET",
         "GITHUB_WEBHOOK_SECRET",
+        "INCIDENT_AGENT_API_TOKEN",
     }
 
 
@@ -1049,6 +1050,7 @@ def test_systemd_env_export_follows_tui_config(
             "CUSTOM_GITHUB_SECRET",
             "CUSTOM_GH_TOKEN",
             "CUSTOM_PREVIEW_URL",
+            "INCIDENT_AGENT_API_TOKEN",
         }
     )
     assert service_base_url(config) == "https://incidents.example.com"
