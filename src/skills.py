@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,11 @@ class Skill:
     path: Path
     content: str
 
+    @property
+    def version(self) -> str:
+        """Content address used to reproduce the instructions selected for a run."""
+        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+
 
 @dataclass(frozen=True)
 class SkillResolution:
@@ -58,6 +64,12 @@ class SkillResolution:
     discovered: tuple[Skill, ...]
     selected: tuple[Skill, ...]
     missing_required: tuple[str, ...]
+
+    def manifest(self) -> list[dict[str, str]]:
+        return [
+            {"name": skill.name, "path": str(skill.path), "sha256": skill.version}
+            for skill in self.selected
+        ]
 
 
 class SkillResolver:

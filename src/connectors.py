@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -155,6 +157,49 @@ class ConnectorManager:
                     session_tools = await session_tools()
                 tools.extend(session_tools)
         return tools
+
+    async def discover_tools(self, capabilities: set[str], *, retries: int = 2) -> list[Any]:
+        """Discover connector tools with a small bounded retry budget."""
+        attempts = max(0, min(int(retries), 3)) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                result = await self.tools_for(capabilities)
+                if result or attempt == attempts - 1:
+                    return result
+            except (OSError, RuntimeError, TimeoutError) as error:
+                last_error = error
+                if attempt == attempts - 1:
+                    break
+            await asyncio.sleep(0.05 * (attempt + 1))
+        if last_error:
+            raise RuntimeError(
+                f"connector tool discovery failed after {attempts} attempts"
+            ) from last_error
+        return []
+
+    def descriptors(self) -> list[dict[str, object]]:
+        """Return secret-free connector descriptors suitable for a run manifest.
+
+        Endpoint values and stdio arguments are intentionally represented only by hashes: command
+        lines and URLs can contain credentials even when configuration validation rejects them.
+        """
+        return [
+            {
+                "name": c.name,
+                "type": c.type,
+                "transport": c.transport,
+                "capabilities": sorted(c.capabilities),
+                "endpoint_sha256": hashlib.sha256(
+                    json.dumps(
+                        {"url": c.url, "command": list(c.command)},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            for c in self.configs.values()
+        ]
 
     async def test_connection(self, name: str) -> ConnectorTestResult:
         if name not in self.configs:

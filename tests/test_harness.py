@@ -154,6 +154,7 @@ def test_environment_template_contains_only_runtime_variables() -> None:
         "OPENAI_API_KEY",
         "AGENT_WEBHOOK_SECRET",
         "GITHUB_WEBHOOK_SECRET",
+        "INCIDENT_AGENT_API_TOKEN",
     }
 
 
@@ -1049,6 +1050,7 @@ def test_systemd_env_export_follows_tui_config(
             "CUSTOM_GITHUB_SECRET",
             "CUSTOM_GH_TOKEN",
             "CUSTOM_PREVIEW_URL",
+            "INCIDENT_AGENT_API_TOKEN",
         }
     )
     assert service_base_url(config) == "https://incidents.example.com"
@@ -1396,12 +1398,13 @@ async def test_agent_context_and_all_entry_points(
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
-    assert all("# Show me" not in call for call in calls[:3])
+    assert all("# Show me" in call for call in calls[:2])
+    assert "# Show me" not in calls[2]
     assert "# Coding" in calls[1]
     assert "# Testing" in calls[1] and "# GitHub" in calls[1]
     assert "# Show me" not in calls[2] and "# Review Comments" in calls[2]
-    assert "Pull Request Body Copy" not in "".join(calls[:3])
-    assert "# Show me" in calls[3] and "# Pull Request Body Copy" in calls[3]
+    assert "Incident Summaries" in calls[0] and "Incident Summaries" in calls[1]
+    assert "# Show me" in calls[3] and "# Incident Summaries" in calls[3]
     assert calls[3].index("# Testing") < calls[3].index("# Show me") < calls[3].index("# GitHub")
     assert output_types == [InvestigationResult, FixResult, ReviewResult, SessionResult]
     assert len(storage.messages(task.conversation_id)) == 8
@@ -1410,7 +1413,8 @@ async def test_agent_context_and_all_entry_points(
     ]
     assert len(skill_events) == 4
     assert "checkout-diagnostics" in skill_events[0].data["loaded"]
-    assert all("show-me" not in event.data["loaded"] for event in skill_events[:3])
+    assert all("show-me" in event.data["loaded"] for event in skill_events[:2])
+    assert "show-me" not in skill_events[2].data["loaded"]
     for event in skill_events[1:3]:
         assert event.data["loaded"].index("ponytail") < event.data["loaded"].index("coding")
     assert skill_events[3].data["loaded"].index("testing") < skill_events[3].data["loaded"].index(
@@ -2283,7 +2287,11 @@ async def test_tui_repository_and_github_failures_are_reported(tmp_path: Path) -
         assert "must be a number" in app.query_one("#status", Static).render().plain
 
 
-def test_application_build_and_cli_dispatch(config: Config, tmp_path: Path) -> None:
+def test_application_build_and_cli_dispatch(
+    config: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "dispatch-test-key")
+    monkeypatch.setenv("AGENT_WEBHOOK_SECRET", "dispatch-test-secret")
     path = tmp_path / "config.toml"
     save_config(config, path)
     built = Application.build(path)

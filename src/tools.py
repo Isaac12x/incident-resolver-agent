@@ -7,12 +7,13 @@ import json
 import os
 import shlex
 import signal
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import PermissionsConfig
+from .config import ExecutionConfig, PermissionsConfig
 
 
 class ToolError(RuntimeError):
@@ -37,6 +38,7 @@ class WorkspaceTools:
         max_output: int = 100_000,
         logger: Callable[[dict[str, object]], None] | None = None,
         permissions: PermissionsConfig | None = None,
+        execution: ExecutionConfig | None = None,
         conversation_searcher: Callable[[str, int], list[dict[str, object]]] | None = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
@@ -44,9 +46,27 @@ class WorkspaceTools:
         self.max_output = max_output
         self.logger = logger
         self.permissions = permissions or PermissionsConfig()
+        self.execution = execution or ExecutionConfig()
         self.conversation_searcher = conversation_searcher
+        try:
+            stat = self.workspace.stat()
+        except OSError as error:
+            raise ToolError(f"workspace is unavailable: {self.workspace}") from error
+        if not self.workspace.is_dir():
+            raise ToolError("workspace must be a directory")
+        self._workspace_identity = (stat.st_dev, stat.st_ino)
+
+    def _assert_workspace_identity(self) -> None:
+        """Prevent a long-running agent from following a replaced workspace mount."""
+        try:
+            current = self.workspace.stat()
+        except OSError as error:
+            raise ToolError("workspace disappeared") from error
+        if (current.st_dev, current.st_ino) != self._workspace_identity:
+            raise ToolError("workspace changed while the agent was running")
 
     def _path(self, relative_path: str) -> Path:
+        self._assert_workspace_identity()
         if not relative_path or Path(relative_path).is_absolute():
             raise ToolError("path must be relative to the workspace")
         path = (self.workspace / relative_path).resolve()
@@ -284,7 +304,34 @@ class WorkspaceTools:
             raise ToolError("database migrations are disabled")
 
     async def shell(self, command: str) -> CommandResult:
+        started = time.monotonic()
+        try:
+            result = await self._shell(command)
+        except (Exception, asyncio.CancelledError):
+            self._log(CommandResult(command, -1, "", ""), time.monotonic() - started)
+            raise
+        self._log(result, time.monotonic() - started)
+        return result
+
+    async def _shell(self, command: str) -> CommandResult:
+        self._assert_workspace_identity()
         tokens = self._validate_command(command)
+        if self.execution.mode == "container":
+            from .execution import execute_container
+
+            try:
+                code, stdout, stderr, truncated = await execute_container(
+                    tokens,
+                    self.workspace,
+                    self.execution,
+                    self.permissions,
+                    timeout=self.timeout,
+                    max_output=self.max_output,
+                )
+            except TimeoutError as error:
+                raise ToolError(f"container command timed out after {self.timeout}s") from error
+            result = CommandResult(command, code, stdout, stderr, truncated)
+            return result
         try:
             process = await asyncio.create_subprocess_exec(
                 *tokens,
@@ -296,7 +343,6 @@ class WorkspaceTools:
             )
         except OSError as error:
             result = CommandResult(command, 127, "", str(error))
-            self._log(result)
             return result
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -317,10 +363,9 @@ class WorkspaceTools:
             allowance = self.max_output // 2
             stdout, stderr = stdout[:allowance], stderr[:allowance]
         result = CommandResult(command, process.returncode or 0, stdout, stderr, truncated)
-        self._log(result)
         return result
 
-    def _log(self, result: CommandResult) -> None:
+    def _log(self, result: CommandResult, duration: float = 0) -> None:
         if self.logger:
             self.logger(
                 {
@@ -328,5 +373,6 @@ class WorkspaceTools:
                     "command": result.command,
                     "returncode": result.returncode,
                     "truncated": result.truncated,
+                    "duration_seconds": duration,
                 }
             )
