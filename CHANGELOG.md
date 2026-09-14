@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resolve duplicate case-insensitive repository path aliases during discovery, preserve genuine
+  ambiguity errors, and skip the disabled code-review gate for compatibility workflows.
 - Add optional Open Code Review setup in the TUI, saving model configuration before installation
   and connectivity testing. Review incident branches before publishing and Playwright, retain JSON
   reports in task artifacts, and return findings to the fix context with bounded retries.

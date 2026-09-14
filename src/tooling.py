@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -457,7 +458,7 @@ def install_configured_repositories(
 def repository_candidates(root: Path, name: str) -> list[Path]:
     """Match GitHub's case-insensitive names without recursively scanning unrelated paths."""
     slug = repository_slug(name)
-    candidates = [root / slug, root / f"{slug}.git", root / name]
+    candidates: list[Path] = []
     if root.is_dir():
         for child in sorted(root.iterdir()):
             if child.name.casefold() in {slug.casefold(), f"{slug}.git".casefold()}:
@@ -468,7 +469,14 @@ def repository_candidates(root: Path, name: str) -> list[Path]:
                     for p in sorted(child.iterdir())
                     if p.name.casefold() == name.split("/")[1].casefold()
                 )
-    matches = {p.resolve() for p in candidates if p.exists()}
+    candidates.extend([root / slug, root / f"{slug}.git", root / name])
+    matches: list[Path] = []
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        if any(os.path.samefile(candidate, match) for match in matches):
+            continue
+        matches.append(candidate)
     if len(matches) > 1:
         raise ValueError(f"ambiguous repository paths for {name}; configure a local_path")
     return list(dict.fromkeys(candidates))

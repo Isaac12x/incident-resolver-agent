@@ -252,7 +252,9 @@ class _TaskLifecycle:
         self.workflow.storage.write_artifact(
             self.task_id, "artifacts/local/fix.txt", summary.strip()
         )
-        if not await self.workflow._review_fix(task, self.worktree):
+        if self.workflow.config.code_review.enabled and not await self.workflow._review_fix(
+            task, self.worktree
+        ):
             return self.workflow._review_feedback(self.task_id)
         task = self._task()
         self.workflow.storage.append_task_memory(
