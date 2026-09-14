@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import subprocess
 import threading
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -12,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from .agent import IncidentAgent
+from .code_review import review
 from .config import Config, RepositoryConfig
 from .github import GitHubService
 from .intelligence import (
@@ -143,6 +146,11 @@ class _TaskLifecycle:
             TaskState.WAITING_FOR_REVIEW,
         }:
             raise RuntimeError(f"tests cannot run from {task.state.value}")
+        repository = self.workflow.config.repository(task.repository)
+        if (
+            "playwright" in command.casefold() or command == repository.playwright.command
+        ) and not await self.workflow._review_fix(task, self.worktree):
+            return self.workflow._review_feedback(self.task_id)
         if task.state != TaskState.IMPLEMENTING:
             task = self.workflow.storage.transition(self.task_id, TaskState.IMPLEMENTING)
         tools = WorkspaceTools(
@@ -256,6 +264,11 @@ class _TaskLifecycle:
         self.workflow.storage.write_artifact(
             self.task_id, "artifacts/local/fix.txt", summary.strip()
         )
+        if self.workflow.config.code_review.enabled and not await self.workflow._review_fix(
+            task, self.worktree
+        ):
+            return self.workflow._review_feedback(self.task_id)
+        task = self._task()
         self.workflow.storage.append_task_memory(
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
@@ -575,6 +588,111 @@ class WorkflowEngine:
             pr_head_sha=sha,
         )
 
+    def _review_feedback(self, task_id: str) -> dict[str, Any]:
+        task = self.storage.load_task(task_id)
+        report = self.storage.task_directory(task_id) / "artifacts/code-review/scan-result.json"
+        return {
+            "state": task.state.value,
+            "passed": False,
+            "error": task.error,
+            "review_report": report.read_text() if report.exists() else None,
+        }
+
+    async def _review_fix(self, task: TaskRecord, worktree: Path) -> bool:
+        if not self.config.code_review.enabled:
+            return True
+
+        def git(*args: str) -> str:
+            return subprocess.run(
+                ["git", *args],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            ).stdout.strip()
+
+        status_args = (
+            "status",
+            "--porcelain",
+            "--",
+            ".",
+            ":(exclude)harness-out",
+            ":(exclude).code-review-graph",
+            ":(exclude).code-review-graph.db",
+        )
+        try:
+            dirty = await asyncio.to_thread(git, *status_args)
+            if dirty:
+                if task.state == TaskState.TESTING_DEPLOYMENT:
+                    raise ValueError("worktree changed after deployment; publish the fix again")
+                if self.config.permissions.mode != "workspace":
+                    raise ValueError("OCR cannot commit changes with read-only permissions")
+                await asyncio.to_thread(
+                    self.storage.commit_worktree, task, f"Fix incident {task.external_id}"
+                )
+            head = await asyncio.to_thread(git, "rev-parse", "HEAD")
+            if task.state == TaskState.TESTING_DEPLOYMENT and head != task.pr_head_sha:
+                raise ValueError("OCR checkout does not match the current PR head")
+            if task.code_review_sha == head:
+                return True
+            branch = await asyncio.to_thread(git, "branch", "--show-current")
+            if not branch or (task.branch and branch != task.branch):
+                raise ValueError("OCR requires the incident feature branch checkout")
+            base = self.config.repository(task.repository).base_branch
+            # Managed clones may have only a remote-tracking base branch.
+            try:
+                await asyncio.to_thread(git, "rev-parse", "--verify", f"{base}^{{commit}}")
+            except subprocess.CalledProcessError:
+                base = f"origin/{base}"
+                await asyncio.to_thread(git, "rev-parse", "--verify", f"{base}^{{commit}}")
+            output = self.storage.task_directory(task.task_id) / "artifacts/code-review"
+            report = await asyncio.to_thread(
+                review, self.config, worktree, base, branch, output / "scan-result.json"
+            )
+            self.storage.write_artifact(
+                task.task_id, f"artifacts/code-review/{head}.json", json.dumps(report, indent=2)
+            )
+            if await asyncio.to_thread(git, "rev-parse", "HEAD") != head:
+                raise ValueError("checkout changed during OCR review")
+            if await asyncio.to_thread(git, *status_args):
+                raise ValueError("worktree changed during OCR review")
+            self.storage.append_event(
+                task.task_id,
+                TaskEvent(
+                    type="verification.code_review",
+                    data={"sha": head, "findings": len(report["comments"])},
+                ),
+            )
+            task = self.storage.load_task(task.task_id)
+            if report["comments"]:
+                attempts = task.attempts + 1
+                self.storage.transition(
+                    task.task_id,
+                    TaskState.BLOCKED
+                    if attempts >= self.config.model.max_task_iterations
+                    else TaskState.REPRODUCING,
+                    attempts=attempts,
+                    code_review_sha=None,
+                    playwright_status=None,
+                    error="Address OCR findings in artifacts/code-review/scan-result.json, "
+                    "then rerun local checks and publish before Playwright verification",
+                )
+                return False
+            task.code_review_sha = head
+            self.storage.save_task(task)
+            return True
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            # Do not persist subprocess stderr: provider errors may contain credentials.
+            detail = str(error) if isinstance(error, ValueError) else type(error).__name__
+            self.storage.transition(
+                task.task_id,
+                TaskState.BLOCKED,
+                code_review_sha=None,
+                error=f"Open Code Review could not complete: {detail}",
+            )
+            return False
+
     async def _process_agent_session(self, task: TaskRecord, worktree: Path) -> TaskRecord:
         lifecycle = _TaskLifecycle(self, task.task_id, worktree)
         prompt: str | None = None
@@ -763,6 +881,15 @@ class WorkflowEngine:
                 return self.storage.transition(task_id, TaskState.TESTING_LOCAL)
 
             if task.state == TaskState.TESTING_LOCAL:
+                if not await self._review_fix(task, worktree):
+                    return self.storage.load_task(task_id)
+                task = self.storage.load_task(task_id)
+                if task.pr_number and self.config.code_review.enabled:
+                    summary = self.storage.task_directory(task_id) / "artifacts/local/fix.txt"
+                    await _TaskLifecycle(self, task_id, worktree).open_pr(
+                        summary.read_text() if summary.exists() else task.summary
+                    )
+                    return self.storage.load_task(task_id)
                 if task.pr_number:
                     if not task.pr_head_sha:
                         return self.storage.transition(
@@ -774,6 +901,9 @@ class WorkflowEngine:
                 return self.storage.transition(task_id, TaskState.PUBLISHING_PR)
 
             if task.state == TaskState.PUBLISHING_PR:
+                if not await self._review_fix(task, worktree):
+                    return self.storage.load_task(task_id)
+                task = self.storage.load_task(task_id)
                 repository = self.config.repository(task.repository)
                 if repository.publish_mode == "local" or (
                     repository.publish_mode == "auto" and self.github.api is None
@@ -790,6 +920,9 @@ class WorkflowEngine:
                 )
 
             if task.state == TaskState.TESTING_DEPLOYMENT:
+                if not await self._review_fix(task, worktree):
+                    return self.storage.load_task(task_id)
+                task = self.storage.load_task(task_id)
                 deployment = DeploymentReference(
                     repository=task.repository,
                     environment=task.deployment_environment or "",

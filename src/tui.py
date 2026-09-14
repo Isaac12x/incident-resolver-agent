@@ -28,7 +28,9 @@ from textual.widgets import (
     TextArea,
 )
 
+from .code_review import provision
 from .config import (
+    CodeReviewConfig,
     Config,
     ConnectorConfig,
     ModelConfig,
@@ -144,6 +146,8 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._runtime_page(), classes="page")
             with TabPane("Repos", id="repositories-tab"):
                 yield VerticalScroll(*self._repositories_page(), classes="page")
+            with TabPane("Code review", id="code-review-tab"):
+                yield VerticalScroll(*self._code_review_page(), classes="page")
             with TabPane("Sources", id="connections-tab"):
                 yield VerticalScroll(*self._connections_page(), classes="page")
             with TabPane("Safety", id="safety-tab"):
@@ -191,6 +195,56 @@ class ConfigurationApp(App[None]):
         value: str, field_id: str, values: tuple[str, ...], *, prompt: str = "Select"
     ) -> Select:
         return Select(_options(*values), value=value, allow_blank=False, prompt=prompt, id=field_id)
+
+    def _code_review_page(self) -> list[Any]:
+        settings = self.config.code_review
+        return [
+            Static(
+                "Configure Open Code Review before installing it. Findings return to the "
+                "fix agent before Playwright verification. Enter an environment variable "
+                "name for the API key; provide its value in the worker environment."
+            ),
+            Checkbox("Enable Open Code Review", value=settings.enabled, id="ocr-enabled"),
+            Label("Model protocol"),
+            self._select(
+                settings.protocol, "ocr-protocol", ("openai", "openai-responses", "anthropic")
+            ),
+            Label("Model endpoint"),
+            self._input(settings.base_url, "ocr-base-url"),
+            Label("Model name"),
+            self._input(settings.model, "ocr-model"),
+            Label("API key environment variable"),
+            self._input(settings.api_key_env, "ocr-api-key-env"),
+            Label("Review timeout (seconds)"),
+            self._input(settings.timeout_seconds, "ocr-timeout"),
+            Button("Save configuration and install / test OCR", id="setup-ocr", variant="primary"),
+            Static("Not tested", id="ocr-status", markup=False),
+        ]
+
+    def _collect_code_review(self) -> CodeReviewConfig:
+        return CodeReviewConfig(
+            enabled=self._checked("ocr-enabled"),
+            protocol=self._selected("ocr-protocol"),
+            base_url=self._value("ocr-base-url").strip(),
+            model=self._value("ocr-model").strip(),
+            api_key_env=self._value("ocr-api-key-env").strip(),
+            timeout_seconds=self._number("ocr-timeout", integer=True),
+        )
+
+    async def _setup_code_review(self) -> None:
+        status = self.query_one("#ocr-status", Static)
+        try:
+            draft = self._collect()
+            save_config(draft, self.path)
+            self.config = draft
+            status.update("Configuration saved. Installing and testing Open Code Review…")
+            message = await asyncio.to_thread(provision, draft, self.command_runner)
+            status.update(message)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            status.update(
+                "Setup failed. Check OCR settings, the credential environment "
+                "variable, installation permission, npm and network access."
+            )
 
     def _model_page(self) -> list[Any]:
         model = self.config.model
@@ -745,6 +799,7 @@ class ConfigurationApp(App[None]):
             server=server,
             github=github,
             deployment=deployment,
+            code_review=self._collect_code_review(),
             permissions=permissions,
             execution=execution,
             repositories=repositories,
@@ -1003,6 +1058,9 @@ class ConfigurationApp(App[None]):
         button_id = event.button.id or ""
         if button_id == "quit":
             self.exit()
+            return
+        if button_id == "setup-ocr":
+            await self._setup_code_review()
             return
         if button_id == "model-defaults":
             defaults = ModelConfig()
