@@ -272,6 +272,34 @@ class RepositoryConfig(BaseModel):
         return paths
 
 
+class CodeReviewConfig(BaseModel):
+    enabled: bool = False
+    protocol: Literal["openai", "openai-responses", "anthropic"] = "openai"
+    base_url: str = "https://api.openai.com/v1"
+    model: str = ""
+    api_key_env: str = "OPENAI_API_KEY"
+    timeout_seconds: int = Field(600, ge=1)
+
+    @model_validator(mode="after")
+    def configured_when_enabled(self) -> CodeReviewConfig:
+        from urllib.parse import urlsplit
+
+        if self.enabled:
+            url = urlsplit(self.base_url)
+            if (
+                url.scheme not in {"http", "https"}
+                or not url.hostname
+                or url.username
+                or url.password
+                or url.query
+                or url.fragment
+                or not self.model.strip()
+                or not self.api_key_env.strip()
+            ):
+                raise ValueError("OCR requires a model, API key env name and credential-free URL")
+        return self
+
+
 class DeploymentConfig(BaseModel):
     reachability_timeout_seconds: int = Field(120, ge=1)
     poll_interval_seconds: float = Field(2, gt=0)
@@ -334,6 +362,7 @@ class Config(BaseModel):
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     deployment: DeploymentConfig = Field(default_factory=DeploymentConfig)
+    code_review: CodeReviewConfig = Field(default_factory=CodeReviewConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
     connectors: list[ConnectorConfig] = Field(default_factory=list)
@@ -429,6 +458,7 @@ def save_config(config: Config, path: Path = Path(".agent/config.toml")) -> None
         "github",
         "server",
         "deployment",
+        "code_review",
         "permissions",
     ):
         _write_table(lines, section, data[section])

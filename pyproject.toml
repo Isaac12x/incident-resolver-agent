@@ -3,7 +3,7 @@ name = "incident-harness"
 version = "0.1.0"
 description = "A durable agent harness that turns production incidents into verified fixes"
 readme = "README.md"
-license = { file = "LICENSE.md" }
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "openai-agents>=0.19,<0.20",
