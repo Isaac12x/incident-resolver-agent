@@ -125,6 +125,7 @@ class TaskRecord(BaseModel):
     deployment_sha: str | None = None
     deployment_url: str | None = None
     playwright_status: str | None = None
+    code_review_sha: str | None = None
     attempts: int = 0
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)

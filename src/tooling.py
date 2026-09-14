@@ -499,7 +499,7 @@ def install_configured_repositories(
 def repository_candidates(root: Path, name: str) -> list[Path]:
     """Match GitHub's case-insensitive names without recursively scanning unrelated paths."""
     slug = repository_slug(name)
-    candidates = [root / slug, root / f"{slug}.git", root / name]
+    candidates: list[Path] = []
     if root.is_dir():
         for child in sorted(root.iterdir()):
             if child.name.casefold() in {slug.casefold(), f"{slug}.git".casefold()}:
@@ -512,6 +512,7 @@ def repository_candidates(root: Path, name: str) -> list[Path]:
                 )
     # Path.resolve() preserves case aliases on case-insensitive filesystems. Compare
     # filesystem identity as well, otherwise one checkout can look like two matches.
+    candidates.extend([root / slug, root / f"{slug}.git", root / name])
     identities: dict[tuple[int, int], Path] = {}
     for candidate in candidates:
         if not candidate.exists():
@@ -521,8 +522,8 @@ def repository_candidates(root: Path, name: str) -> list[Path]:
         except OSError:
             continue
         identity = (stat.st_dev, stat.st_ino)
-        # Later directory-entry matches preserve the checkout's real casing.
-        identities[identity] = candidate
+        # Keep the first directory entry so aliases do not replace its real casing.
+        identities.setdefault(identity, candidate)
     if len(identities) > 1:
         raise ValueError(f"ambiguous repository paths for {name}; configure a local_path")
     representatives = set(identities.values())
