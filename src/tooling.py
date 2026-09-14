@@ -64,6 +64,31 @@ class RepositorySetupResult:
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[str]]
 
+
+def executable_status(names: Sequence[str]) -> dict[str, bool]:
+    """Return PATH availability for managed helper executables."""
+    import sys
+
+    return {
+        name: bool(shutil.which(name) or Path(sys.executable).resolve().with_name(name).is_file())
+        for name in names
+    }
+
+
+def install_uv_tools(
+    names: Sequence[str], *, runner: CommandRunner = subprocess.run
+) -> list[ToolResult]:
+    """Install optional helper CLIs into uv's isolated tool environments."""
+    uv = shutil.which("uv")
+    if not uv:
+        raise RuntimeError("uv is required to install helper tools")
+    return [
+        _run((uv, "tool", "install", name), Path.cwd(), runner)
+        for name in names
+        if shutil.which(name) is None
+    ]
+
+
 RUNTIME_SEED_SPEC = Path(__file__).with_name("runtime.tree")
 
 
@@ -395,8 +420,15 @@ def install_configured_repositories(
         return (
             candidate.is_dir()
             and subprocess.run(
-                ["git", "-c", f"safe.directory={candidate}", "-C", str(candidate),
-                 "rev-parse", "--git-dir"],
+                [
+                    "git",
+                    "-c",
+                    f"safe.directory={candidate}",
+                    "-C",
+                    str(candidate),
+                    "rev-parse",
+                    "--git-dir",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,

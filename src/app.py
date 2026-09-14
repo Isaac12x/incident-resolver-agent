@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend, SubscriptionCLIBackend
+from .bundles import load_active_bundle
 from .config import Config, load_config
 from .connectors import ConnectorManager
 from .github import GitHubCLIAdapter, GitHubService
@@ -36,8 +38,14 @@ class Application:
         *,
         agent_backend: AgentBackend | None = None,
     ) -> Application:
+        load_dotenv(Path(config_path).resolve().parent / ".env", override=False)
         load_dotenv(Path.cwd() / ".env", override=False)
         config = load_config(Path(config_path))
+        bundle = load_active_bundle(config)
+        if bundle is not None:
+            effective = Config.model_validate(json.loads(bundle.config_path.read_text()))
+            effective.runtime_root = config.runtime_root
+            config = effective
         storage = Storage(config.runtime_root)
         connectors = ConnectorManager(
             config.connectors,
@@ -60,7 +68,13 @@ class Application:
             if config.model.runtime == "subscription-cli"
             else OpenAIAgentsBackend(config)
         )
-        agent = IncidentAgent(config, storage, connectors, backend)
+        agent = IncidentAgent(
+            config,
+            storage,
+            connectors,
+            backend,
+            **({"skills_root": bundle.path / "skills"} if bundle else {}),
+        )
         verifier = DeploymentVerifier(config)
         workflow = WorkflowEngine(
             config,
@@ -77,7 +91,13 @@ class Application:
             path = Path(config_path)
             if not path.is_file() or not path.stat().st_size:
                 raise ValueError("model configuration is missing or empty")
-            updated = load_config(path).model
+            latest = load_config(path)
+            active = load_active_bundle(latest)
+            updated = (
+                Config.model_validate(json.loads(active.config_path.read_text())).model
+                if active
+                else latest.model
+            )
             if updated == config.model:
                 return
             config.model = updated

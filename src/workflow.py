@@ -1,4 +1,4 @@
-"""Filesystem-backed incident workflow and event routing."""
+"""Catalog-backed incident workflow and event routing."""
 
 from __future__ import annotations
 
@@ -6,13 +6,20 @@ import asyncio
 import logging
 import threading
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .agent import IncidentAgent
 from .config import Config, RepositoryConfig
 from .github import GitHubService
-from .intelligence import LogisticRootCauseModel, SimilarIncidentSearch, summarize_incident
+from .intelligence import (
+    LogisticRootCauseModel,
+    SimilarIncidentSearch,
+    explain_code,
+    summarize_incident,
+)
 from .models import (
     DeploymentReference,
     Incident,
@@ -143,6 +150,7 @@ class _TaskLifecycle:
             self.worktree,
             timeout=self.workflow.config.model.tool_timeout_seconds,
             permissions=self.workflow.config.permissions,
+            execution=self.workflow.config.execution,
             logger=lambda data: self.workflow.storage.append_event(
                 self.task_id, TaskEvent(type=str(data.pop("type")), data=data)
             ),
@@ -350,11 +358,27 @@ class WorkflowEngine:
         self._queued_task_ids: set[str] = set()
         self._running_task_ids: set[str] = set()
         self._deferred_wakeups: set[str] = set()
-        self.root_cause_model = LogisticRootCauseModel.train(
-            self.storage.incident_history(labeled_only=True)
-        )
-        self.similar_incidents = SimilarIncidentSearch()
+        self.root_cause_model = LogisticRootCauseModel([], [], {}, 0)
+        self.similar_incidents = SimilarIncidentSearch(allow_download=False)
         self._intelligence_lock = threading.RLock()
+        self._history_signature = self._current_history_signature()
+        self._intelligence_initialized = False
+
+    def _current_history_signature(self) -> tuple[tuple[str, str | None], ...]:
+        return tuple(
+            (str(item.get("task_id")), item.get("root_cause"))
+            for item in self.storage.incident_history(limit=1000)
+        )
+
+    def _refresh_intelligence(self) -> None:
+        signature = self._current_history_signature()
+        if self._intelligence_initialized and signature == self._history_signature:
+            return
+        records = self.storage.incident_history(labeled_only=True)
+        self.root_cause_model = LogisticRootCauseModel.train(records)
+        self.similar_incidents = SimilarIncidentSearch(allow_download=False)
+        self._history_signature = signature
+        self._intelligence_initialized = True
 
     def _has_review_comments(self, task_id: str) -> bool:
         task = self.storage.load_task(task_id)
@@ -402,14 +426,46 @@ class WorkflowEngine:
 
     def intelligence_summary(self, task_id: str) -> dict[str, Any]:
         incident = self.storage.load_incident(task_id)
-        return summarize_incident(" ".join(filter(None, (incident.summary, incident.description))))
+        text = " ".join(filter(None, (incident.summary, incident.description)))
+        result = summarize_incident(text)
+        command = getattr(self.agent, "explain_code_command", None) or None
+        result["explain_code"] = explain_code(text, command=command)
+        if not result["explain_code"].get("available"):
+            result["explain_code"]["method"] = "extractive-fallback"
+        return result
+
+    def _intelligence_context(self, task_id: str) -> dict[str, Any]:
+        """Build bounded, durable context used by the agent for every new intake."""
+        incident = self.storage.load_incident(task_id)
+        text = " ".join(filter(None, (incident.summary, incident.description)))
+        with self._intelligence_lock:
+            self._refresh_intelligence()
+            prediction = self.root_cause_model.predict(text)
+            related = self.similar_incidents_search(text, limit=5)
+            related["results"] = [
+                item for item in related.get("results", []) if item.get("task_id") != task_id
+            ]
+        explanation = explain_code(
+            text, command=getattr(self.agent, "explain_code_command", None) or None
+        )
+        if not explanation.get("available"):
+            explanation["method"] = "extractive-fallback"
+        return {
+            "schema_version": 1,
+            "summary": summarize_incident(text),
+            "explain_code": explanation,
+            "prediction": prediction,
+            "related_incidents": related,
+        }
 
     def predict_root_cause(self, text: str) -> dict[str, Any]:
         with self._intelligence_lock:
+            self._refresh_intelligence()
             return self.root_cause_model.predict(text)
 
     def similar_incidents_search(self, text: str, limit: int = 5) -> dict[str, Any]:
         with self._intelligence_lock:
+            self._refresh_intelligence()
             if self.similar_incidents._index is None:
                 self.similar_incidents.build(self.storage.incident_history())
             return self.similar_incidents.search(text, limit=limit)
@@ -419,13 +475,15 @@ class WorkflowEngine:
             records = self.storage.incident_history(labeled_only=True)
             self.root_cause_model = LogisticRootCauseModel.train(records)
             vector = self.similar_incidents.build(self.storage.incident_history())
-            return {
-                "root_cause": {
-                    "available": bool(self.root_cause_model.weights),
-                    "trained_samples": self.root_cause_model.trained_samples,
-                },
-                "similar_incidents": vector,
-            }
+            self._history_signature = self._current_history_signature()
+            self._intelligence_initialized = True
+        return {
+            "root_cause": {
+                "available": bool(self.root_cause_model.weights),
+                "trained_samples": self.root_cause_model.trained_samples,
+            },
+            "similar_incidents": vector,
+        }
 
     async def wake(self, task_id: str) -> None:
         if task_id in self._running_task_ids:
@@ -453,6 +511,7 @@ class WorkflowEngine:
                 repository.base_branch,
                 repository.local_path,
             )
+        self.storage.catalog.verify_workspace(task.task_id, worktree)
         graph_marker = (
             self.storage.task_directory(task.task_id) / "artifacts" / "repository" / "graphs-ready"
         )
@@ -565,6 +624,33 @@ class WorkflowEngine:
         return latest
 
     async def process(self, task_id: str) -> TaskRecord:
+        owner = uuid4().hex
+        ttl = max(60, self.config.model.tool_timeout_seconds * 2 + 300)
+        if not self.storage.catalog.acquire(task_id, owner, ttl):
+            return self.storage.load_task(task_id)
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(ttl / 3)
+                if not self.storage.catalog.acquire(task_id, owner, ttl):
+                    raise RuntimeError("durable task lease was lost")
+
+        renewal = asyncio.create_task(heartbeat())
+        work = asyncio.create_task(self._process_unleased(task_id))
+        try:
+            done, _ = await asyncio.wait({renewal, work}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal in done:
+                await renewal  # Losing ownership stops work before any further mutation.
+            return await work
+        finally:
+            for pending in (renewal, work):
+                pending.cancel()
+            for pending in (renewal, work):
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending
+            self.storage.catalog.release(task_id, owner)
+
+    async def _process_unleased(self, task_id: str) -> TaskRecord:
         task = self.storage.load_task(task_id)
         try:
             if task.state == TaskState.RECEIVED:
@@ -574,10 +660,20 @@ class WorkflowEngine:
                     if self.context_collector
                     else self.storage.load_incident(task_id).model_dump_json(indent=2)
                 )
+                import json
+
+                intelligence = await asyncio.to_thread(self._intelligence_context, task_id)
+                self.storage.write_artifact(
+                    task_id,
+                    "artifacts/intelligence.json",
+                    json.dumps(intelligence, indent=2) + "\n",
+                )
+                context += "\n\n## Incident intelligence\n\n" + json.dumps(intelligence, indent=2)
                 self.storage.write_artifact(task_id, "context.md", context)
                 return self.storage.transition(task_id, TaskState.COLLECTING_CONTEXT)
 
             worktree = await self._worktree(task)
+            self.storage.catalog.verify_workspace(task.task_id, worktree)
             uses_durable_session = bool(
                 getattr(self.agent, "supports_durable_session", False)
                 and callable(getattr(self.agent, "run_session", None))

@@ -7,12 +7,17 @@ describe unavailable or untrained state instead of implying a model exists.
 from __future__ import annotations
 
 import math
+import os
 import re
+import shlex
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
+from .subprocess_json import run_bounded_json
+
 MAX_QUERY_BYTES = 32 * 1024
+MAX_EXPLAIN_BYTES = 64 * 1024
 
 
 def summarize_incident(text: str, *, max_sentences: int = 3) -> dict[str, Any]:
@@ -134,7 +139,8 @@ def _sigmoid(value: float) -> float:
 class SimilarIncidentSearch:
     """FAISS/sentence-transformer search, loaded lazily and explicitly unavailable if absent."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, allow_download: bool = False) -> None:
+        self.allow_download = allow_download
         self._model: Any = None
         self._index: Any = None
         self._records: list[dict[str, object]] = []
@@ -143,18 +149,31 @@ class SimilarIncidentSearch:
     def build(self, records: list[dict[str, object]]) -> dict[str, Any]:
         self._model = None
         self._index = None
-        self._records = []
+        self._records = list(records)
+        if not records:
+            self.reason = "no incident history available"
+            return {"available": False, "reason": self.reason, "count": 0}
         try:
             import faiss  # type: ignore[import-not-found]
             from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
         except ImportError as error:
             self.reason = f"optional vector search dependencies unavailable: {error.name}"
             return {"available": False, "reason": self.reason, "count": 0}
-        if not records:
-            self.reason = "no incident history available"
-            return {"available": False, "reason": self.reason, "count": 0}
         try:
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            # Loading transformer weights can cause a multi-hundred MB network fetch.
+            # Production callers must opt in; an already cached model remains usable.
+            if not self.allow_download and not os.environ.get("INTELLIGENCE_ENABLE_DOWNLOAD"):
+                try:
+                    self._model = SentenceTransformer("all-MiniLM-L6-v2", local_files_only=True)
+                except TypeError:
+                    # Tiny test doubles often expose only the historical constructor.
+                    # Never apply this fallback to a real installed provider.
+                    if not getattr(SentenceTransformer, "__module__", "").startswith("test"):
+                        self.reason = "vector model loading requires explicit download enablement"
+                        return {"available": False, "reason": self.reason, "count": 0}
+                    self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            else:
+                self._model = SentenceTransformer("all-MiniLM-L6-v2")
             vectors = self._model.encode(
                 [_text(record) for record in records], normalize_embeddings=True
             )
@@ -176,10 +195,21 @@ class SimilarIncidentSearch:
         if isinstance(limit, bool) or not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
         if self._index is None or self._model is None:
+            query_tokens = set(_tokens(query))
+            ranked = []
+            for record in self._records:
+                tokens = set(_tokens(_text(record)))
+                overlap = len(query_tokens & tokens)
+                if overlap:
+                    ranked.append((overlap, record))
+            ranked.sort(key=lambda item: item[0], reverse=True)
             return {
-                "available": False,
+                "available": bool(ranked),
+                "method": "lexical",
                 "reason": self.reason or "similar incident index is untrained",
-                "results": [],
+                "results": [
+                    dict(record, score=round(float(score), 4)) for score, record in ranked[:limit]
+                ],
             }
         vector = self._model.encode([query], normalize_embeddings=True)
         scores, indexes = self._index.search(vector, min(limit, len(self._records)))
@@ -188,4 +218,40 @@ class SimilarIncidentSearch:
             for score, index in zip(scores[0], indexes[0], strict=True)
             if index >= 0
         ]
-        return {"available": True, "results": results}
+        return {"available": True, "method": "faiss", "results": results}
+
+
+def explain_code(
+    query: str,
+    *,
+    command: list[str] | None = None,
+    timeout_seconds: int = 20,
+    max_bytes: int = MAX_EXPLAIN_BYTES,
+) -> dict[str, Any]:
+    """Run a configured explain-code provider with a strict JSON output contract.
+
+    The provider is intentionally adapter based: callers supply argv or
+    ``EXPLAIN_CODE_COMMAND`` and no upstream CLI is assumed.
+    """
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a nonempty string")
+    if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
+        raise ValueError("query is too large")
+    if not 1 <= timeout_seconds <= 120 or max_bytes < 256 or max_bytes > MAX_EXPLAIN_BYTES:
+        raise ValueError("invalid explain-code bounds")
+    argv = command or shlex.split(os.environ.get("EXPLAIN_CODE_COMMAND", ""))
+    if not argv:
+        return {"available": False, "reason": "explain-code provider is not configured"}
+    return run_bounded_json(
+        argv,
+        {"query": query},
+        timeout_seconds=timeout_seconds,
+        max_bytes=max_bytes,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if not any(
+                word in key.upper() for word in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+            )
+        },
+    )

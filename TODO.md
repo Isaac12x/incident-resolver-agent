@@ -16,26 +16,26 @@ Event from grafana -> deduplicate and group -> Root Cause Prediction: Machine le
 * Versioning and construction. For the system prompt, skills and connections.
 * Extensibility other than by the use of skills.
 
-## Implementation status (2026-09-14)
+## Acceptance status (2026-09-14)
 
-Implemented in this change:
+| Requested work | Implementation and verification |
+| --- | --- |
+| Embedded event logger, grouping and root prediction | Durable Grafana intake, transactional deduplication, logistic regression from labeled history, automatic context enrichment; intake and holdout tests |
+| System installation and CLI lifecycle | Curl installer, installed executable, config TUI, readiness checks, managed tool install/update; installed CLI and lifecycle tests |
+| Improve TUI | Readiness overview, runtime/container controls, existing model/repository/connector and API-auth editors; Textual tests |
+| Intelligent summarization via explain-code | Configurable bounded JSON subprocess adapter wired into task context and summary API, tested with real processes; exact upstream provider still needs identification |
+| FAISS and sentence-transformer search | Optional vector index with cached model support, automatic history refresh, explicit lexical fallback; search tests and real optional-dependency smoke |
+| RL tool calling, research/install/retries | Persistent contextual UCB bandit, compatible tool selection, approved catalog discovery and digest-pinned wheel installation, bounded read-only retries; SDK/extension tests |
+| Evals | Contract suite, chronological holdout, retrieval relevance, and real WorkflowEngine repair fixture with independent gold tests; production model benchmarking requires representative data |
+| Logs and observability | Rotating structured operation logs, persistent counters/failures/durations, authenticated metrics; restart and authentication tests |
+| Workspaces and guardrails | SQLite task/event authority, durable worker leases and workspace registration, legacy migration; artifact-folder recovery and concurrency tests |
+| Security | API/HMAC authentication, bounded providers, secret filtering and optional restricted containers for shell/test execution; real container denial/timeout checks |
+| Versioning and construction | Immutable config/prompt/skills/connections bundles, validation, activation/rollback and runtime loading; integrity and application tests |
+| Extensibility beyond skills | MCP plus trusted callable wheel extensions, catalog discovery and restart restoration; real wheel install/invoke test |
 
-- Embedded durable Grafana event history, grouping/deduplication metadata, and incident labels.
-- Curlable isolated installation; `config`, `update`, and argument-free `run`; persistent user paths.
-- TUI configuration location, keyboard exit, and API authentication controls.
-- Bounded logistic root-cause prediction trained explicitly from labeled history.
-- Optional FAISS/sentence-transformer similarity search and offline extractive summaries.
-- Packaged offline contract evaluations and JSON reports.
-- Authenticated control APIs, workspace identity checks, and versioned execution manifests.
-- Bounded configured MCP discovery retries; MCP remains the extension mechanism beyond skills.
-
-Still open (not represented as completed by the features above):
-
-- Connect the requested explain-code summarization provider; no provider contract or executable
-  is configured in this repository. Current summaries are extractive.
-- Train/evaluate an RL policy for tool selection and define a trusted tool registry for autonomous
-  research/installation. Current discovery retries are deterministic and use configured MCP tools.
-- Evaluate root-cause prediction on a held-out, labeled incident dataset and model-driven repair
-  quality on real incident benchmarks. Offline contract evals do not measure either.
-- Strong process/container isolation and a wider security audit. Directory identity and existing
-  command/path guardrails do not confine arbitrary subprocess execution at the OS level.
+Scope limits: the tool learner is an online contextual bandit, not a pretrained general repair
+policy. Discovery/installation is confined to the operator-approved catalog. Container mode covers
+repository shell and lifecycle test execution, not native subscription CLI, MCP, or trusted plugin
+processes. Synthetic evaluation results do not establish production root-cause or model repair
+quality. The exact explain-code upstream is unspecified; its adapter contract is implemented, but
+upstream compatibility cannot be claimed until the intended tool is identified.
