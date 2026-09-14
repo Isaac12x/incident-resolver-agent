@@ -9,15 +9,11 @@ from __future__ import annotations
 import math
 import os
 import re
-import shlex
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from .subprocess_json import run_bounded_json
-
 MAX_QUERY_BYTES = 32 * 1024
-MAX_EXPLAIN_BYTES = 64 * 1024
 
 
 def summarize_incident(text: str, *, max_sentences: int = 3) -> dict[str, Any]:
@@ -219,39 +215,3 @@ class SimilarIncidentSearch:
             if index >= 0
         ]
         return {"available": True, "method": "faiss", "results": results}
-
-
-def explain_code(
-    query: str,
-    *,
-    command: list[str] | None = None,
-    timeout_seconds: int = 20,
-    max_bytes: int = MAX_EXPLAIN_BYTES,
-) -> dict[str, Any]:
-    """Run a configured explain-code provider with a strict JSON output contract.
-
-    The provider is intentionally adapter based: callers supply argv or
-    ``EXPLAIN_CODE_COMMAND`` and no upstream CLI is assumed.
-    """
-    if not isinstance(query, str) or not query.strip():
-        raise ValueError("query must be a nonempty string")
-    if len(query.encode("utf-8")) > MAX_QUERY_BYTES:
-        raise ValueError("query is too large")
-    if not 1 <= timeout_seconds <= 120 or max_bytes < 256 or max_bytes > MAX_EXPLAIN_BYTES:
-        raise ValueError("invalid explain-code bounds")
-    argv = command or shlex.split(os.environ.get("EXPLAIN_CODE_COMMAND", ""))
-    if not argv:
-        return {"available": False, "reason": "explain-code provider is not configured"}
-    return run_bounded_json(
-        argv,
-        {"query": query},
-        timeout_seconds=timeout_seconds,
-        max_bytes=max_bytes,
-        env={
-            key: value
-            for key, value in os.environ.items()
-            if not any(
-                word in key.upper() for word in ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
-            )
-        },
-    )

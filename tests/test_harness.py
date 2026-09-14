@@ -1398,12 +1398,13 @@ async def test_agent_context_and_all_entry_points(
     assert "# Incident Investigation" in calls[0]
     assert "Preflight Skill Resolution" in calls[0]
     assert "# Checkout Diagnostics" in calls[0]
-    assert all("# Show me" not in call for call in calls[:3])
+    assert all("# Show me" in call for call in calls[:2])
+    assert "# Show me" not in calls[2]
     assert "# Coding" in calls[1]
     assert "# Testing" in calls[1] and "# GitHub" in calls[1]
     assert "# Show me" not in calls[2] and "# Review Comments" in calls[2]
-    assert "Pull Request Body Copy" not in "".join(calls[:3])
-    assert "# Show me" in calls[3] and "# Pull Request Body Copy" in calls[3]
+    assert "Incident Summaries" in calls[0] and "Incident Summaries" in calls[1]
+    assert "# Show me" in calls[3] and "# Incident Summaries" in calls[3]
     assert calls[3].index("# Testing") < calls[3].index("# Show me") < calls[3].index("# GitHub")
     assert output_types == [InvestigationResult, FixResult, ReviewResult, SessionResult]
     assert len(storage.messages(task.conversation_id)) == 8
@@ -1412,7 +1413,8 @@ async def test_agent_context_and_all_entry_points(
     ]
     assert len(skill_events) == 4
     assert "checkout-diagnostics" in skill_events[0].data["loaded"]
-    assert all("show-me" not in event.data["loaded"] for event in skill_events[:3])
+    assert all("show-me" in event.data["loaded"] for event in skill_events[:2])
+    assert "show-me" not in skill_events[2].data["loaded"]
     for event in skill_events[1:3]:
         assert event.data["loaded"].index("ponytail") < event.data["loaded"].index("coding")
     assert skill_events[3].data["loaded"].index("testing") < skill_events[3].data["loaded"].index(

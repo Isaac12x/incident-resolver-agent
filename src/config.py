@@ -196,7 +196,6 @@ class TriggerConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    explain_code_command: list[str] = Field(default_factory=list)
     tool_registry: str | None = None
     max_tool_retries: int = Field(2, ge=0, le=5)
     system_prompt: str = DEFAULT_SYSTEM_PROMPT

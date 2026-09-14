@@ -73,7 +73,7 @@ The authenticated APIs include:
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /mcp/resources/intelligence/events` | Filter recent intake by `source`, `group_key`, and bounded `limit` |
-| `GET /mcp/resources/tasks/{task_id}/summary` | Configured explain-code summary, with explicit extractive fallback |
+| `GET /mcp/resources/tasks/{task_id}/summary` | Investigation/fix artifact summary, with explicit extractive fallback before artifacts exist |
 | `POST /mcp/tools/rebuild_intelligence` | Train from labeled history and rebuild optional vector search |
 | `POST /mcp/tools/predict_root_cause` | Rank learned causes for a JSON `text` field |
 | `POST /mcp/tools/search_similar_incidents` | Search using JSON `query` and optional `limit` |
@@ -83,11 +83,13 @@ Scores are experimental outputs, not calibrated confidence. FAISS search uses se
 and the optional `intelligence` extra. Automatic enrichment uses cached model weights; explicit
 rebuild can download weights. Dependency/model absence is reported with a lexical fallback.
 
-Configure `agent.explain_code_command` as an argv list for a local provider. The adapter sends
-`{"query": "..."}` as JSON on stdin and expects a JSON object on stdout, with bounded output and
-a deadline. Missing or failed providers produce an explicit extractive fallback. The upstream
-project intended by “explain-code” has not been identified; the adapter contract is tested, but
-compatibility with a particular upstream tool needs its command or URL.
+Task summaries reuse the model-generated investigation and fix artifacts produced by the durable
+workflow and the evidence recorded by verification. The API prefers existing `artifacts/local/fix.txt`
+and `investigation.md` artifacts, preserving their Markdown and reporting method `agent-artifact`
+with the source path. Before those artifacts exist, it returns an explicitly labelled
+`extractive-fallback` assembled from the incident summary and description. HumanLayer’s
+[`show-me`](https://github.com/humanlayer/skills/blob/main/plugins/show-me/skills/show-me/SKILL.md)
+skill guides the concise, evidence-based explanation format for summaries, investigation explanations, and pull-request bodies.
 
 ```bash
 incident-agent eval
@@ -608,9 +610,8 @@ to investigate, delegate, edit, test, remember, and publish by calling the workf
 
 See [TODO.md](TODO.md) for the request-by-request acceptance matrix and remaining external
 validation needs. The online tool policy learns execution success, not end-to-end repair quality.
-A production benchmark needs representative labeled incidents and a selected model. The exact
-explain-code provider remains unspecified. Host executors, trusted extensions, and native
-subscription CLI tools require their own isolation configuration.
+A production benchmark needs representative labeled incidents and a selected model. Host executors,
+trusted extensions, and native subscription CLI tools require their own isolation configuration.
 
 Repository knowledge graphs reduce unnecessary source loading. Built-in and third-party skills
 continue to provide the incident lifecycle instructions.

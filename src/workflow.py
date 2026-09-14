@@ -17,7 +17,6 @@ from .github import GitHubService
 from .intelligence import (
     LogisticRootCauseModel,
     SimilarIncidentSearch,
-    explain_code,
     summarize_incident,
 )
 from .models import (
@@ -427,12 +426,23 @@ class WorkflowEngine:
     def intelligence_summary(self, task_id: str) -> dict[str, Any]:
         incident = self.storage.load_incident(task_id)
         text = " ".join(filter(None, (incident.summary, incident.description)))
-        result = summarize_incident(text)
-        command = getattr(self.agent, "explain_code_command", None) or None
-        result["explain_code"] = explain_code(text, command=command)
-        if not result["explain_code"].get("available"):
-            result["explain_code"]["method"] = "extractive-fallback"
-        return result
+        directory = self.storage.task_directory(task_id)
+        for source in ("artifacts/local/fix.txt", "investigation.md"):
+            artifact = directory / source
+            if artifact.is_file():
+                summary = artifact.read_text(encoding="utf-8").strip()
+                if summary:
+                    return {
+                        "summary": summary,
+                        "method": "agent-artifact",
+                        "source": source,
+                        "format": "markdown",
+                    }
+        return {
+            **summarize_incident(text),
+            "method": "extractive-fallback",
+            "reason": "agent investigation summary is not available yet",
+        }
 
     def _intelligence_context(self, task_id: str) -> dict[str, Any]:
         """Build bounded, durable context used by the agent for every new intake."""
@@ -445,15 +455,9 @@ class WorkflowEngine:
             related["results"] = [
                 item for item in related.get("results", []) if item.get("task_id") != task_id
             ]
-        explanation = explain_code(
-            text, command=getattr(self.agent, "explain_code_command", None) or None
-        )
-        if not explanation.get("available"):
-            explanation["method"] = "extractive-fallback"
         return {
             "schema_version": 1,
-            "summary": summarize_incident(text),
-            "explain_code": explanation,
+            "summary": self.intelligence_summary(task_id),
             "prediction": prediction,
             "related_incidents": related,
         }

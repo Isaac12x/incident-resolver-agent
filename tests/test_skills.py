@@ -128,4 +128,8 @@ async def test_agent_fails_closed_when_a_required_skill_is_missing(tmp_path: Pat
         await agent.investigate(task, worktree)
     event = storage.events(task.task_id)[-1]
     assert event.type == "agent.skills_resolved"
-    assert event.data["missing_required"] == ["code-review-graph", "incident-investigation"]
+    assert event.data["missing_required"] == [
+        "code-review-graph",
+        "incident-investigation",
+        "show-me",
+    ]

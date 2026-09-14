@@ -17,7 +17,6 @@ from src.github import GitHubService
 from src.intelligence import (
     LogisticRootCauseModel,
     SimilarIncidentSearch,
-    explain_code,
     summarize_incident,
 )
 from src.models import Incident
@@ -226,47 +225,6 @@ def test_lexical_retrieval_is_explicit_when_vector_model_unavailable() -> None:
         assert result["reason"]
 
 
-def test_explain_code_is_configurable_and_strict(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert explain_code("why")["available"] is False
-    monkeypatch.setenv(
-        "EXPLAIN_CODE_COMMAND",
-        'python -c \'import sys; print("{\\"answer\\":1}")\'',
-    )
-    result = explain_code("why")
-    assert result["available"] is True
-    assert result["result"] == {"answer": 1}
-
-
-@pytest.mark.parametrize("output", ["not-json", "[]"])
-def test_explain_code_rejects_invalid_provider_output(output: str) -> None:
-    result = explain_code("why", command=[sys.executable, "-c", f"print({output!r})"])
-    assert result["available"] is False
-
-
-def test_explain_code_bounds_provider_runtime_and_output() -> None:
-    noisy = explain_code(
-        "why",
-        command=[sys.executable, "-c", "print('x' * 400)"],
-        max_bytes=256,
-    )
-    assert noisy["reason"] == "provider output exceeded limit"
-    timed_out = explain_code(
-        "why",
-        command=[sys.executable, "-c", "import time; time.sleep(1)"],
-        timeout_seconds=1,
-    )
-    assert timed_out["available"] is False
-
-
-def test_explain_code_validates_query_and_bounds() -> None:
-    with pytest.raises(ValueError):
-        explain_code("")
-    with pytest.raises(ValueError):
-        explain_code("x" * 40_000)
-    with pytest.raises(ValueError):
-        explain_code("x", timeout_seconds=0)
-
-
 def test_different_incident_scopes_have_isolated_sessions(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state")
     incident = Incident(
@@ -349,3 +307,55 @@ def test_search_waits_for_rebuild_to_finish(tmp_path: Path, monkeypatch) -> None
             release.set()
         assert rebuilding_future.result(timeout=3)["similar_incidents"]["available"]
         assert searching_future.result(timeout=3)["available"]
+
+
+@pytest.mark.asyncio
+async def test_show_me_summary_uses_persisted_lifecycle_artifacts(tmp_path, monkeypatch):
+    from src.models import TaskState
+    from src.workflow import _TaskLifecycle
+
+    config = Config(runtime_root=tmp_path / "state")
+    storage = Storage(config.runtime_root)
+    connectors = ConnectorManager([])
+    github = GitHubService(config.github)
+    agent = IncidentAgent(config, storage, connectors)
+    verifier = DeploymentVerifier(config)
+    workflow = WorkflowEngine(config, storage, agent, github, verifier)
+    task = storage.create_task(
+        Incident(
+            external_id="summary",
+            source="test",
+            repository="r",
+            environment="production",
+            summary="Checkout fails.",
+        )
+    )
+    assert workflow.intelligence_summary(task.task_id)["method"] == "extractive-fallback"
+    storage.transition(task.task_id, TaskState.INVESTIGATING)
+    explanation = (
+        "Missing session causes checkout failure.\n\n```mermaid\n"
+        "flowchart LR\n  Request --> MissingSession\n```"
+    )
+    await _TaskLifecycle(workflow, task.task_id, tmp_path).mark_investigation_complete(
+        explanation, ["Stack trace points to checkout"], "Validate session before checkout"
+    )
+    summary = workflow.intelligence_summary(task.task_id)
+    assert summary["method"] == "agent-artifact"
+    assert summary["source"] == "investigation.md"
+    assert explanation in summary["summary"]
+    assert "Stack trace points to checkout" in summary["summary"]
+
+    # Summary reads persisted evidence, without a new model call or external executable.
+    monkeypatch.setenv("EXPLAIN_CODE_COMMAND", "must-not-run")
+    workflow.storage = Storage(config.runtime_root)
+    application = Application(
+        config, workflow.storage, connectors, github, agent, verifier, workflow
+    )
+    with TestClient(create_server(application, run_worker=False)) as client:
+        assert client.get(f"/mcp/resources/tasks/{task.task_id}/summary").json() == summary
+    storage.write_artifact(
+        task.task_id, "artifacts/local/fix.txt", "Validated session; regression passed."
+    )
+    assert workflow.intelligence_summary(task.task_id)["source"] == "artifacts/local/fix.txt"
+    storage.write_artifact(task.task_id, "artifacts/local/fix.txt", "  ")
+    assert workflow.intelligence_summary(task.task_id)["source"] == "investigation.md"
