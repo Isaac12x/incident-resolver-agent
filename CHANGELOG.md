@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Clarify CLI installation with working pre-merge curl/uv commands, PATH setup, credentials,
+  configuration locations, and the distinction between foreground operation and systemd deployment.
+
+- Resolve bundled helper executables inside their Python environment, use the correct seed-cli
+  package for managed installation/update, and reject unexpected nested bundle manifests.
+
+- Complete runtime integrations for contextual tool selection, digest-pinned callable extensions,
+  versioned configuration/skill bundles, and installed readiness/update commands.
+- Enrich new incidents with history-based predictions, related incidents, and summaries derived from
+  model-generated investigation/fix artifacts, with an explicit extractive fallback before artifacts
+  exist. Extend the show-me guidance to incident summaries and investigation explanations.
+- Add chronological holdout/retrieval evaluations and a repair evaluation through the real workflow.
+- Move task state, ordered events, leases, and workspace identity into a durable SQLite catalog;
+  retain task folders as recoverable artifacts and migrate existing state.
+- Add rotating structured operation logs and authenticated persisted metrics, plus optional
+  restricted container execution for repository shell and lifecycle test commands.
+- Expose readiness and container execution policy in the configuration TUI.
+
+- Add a curlable uv tool installer, update/config commands, foreground `run`, and persistent
+  per-user configuration and state while retaining incident-file submission.
+- Embed Grafana event logging, grouping and duplicate metadata, incident history, bounded
+  logistic root-cause prediction, extractive summaries, and optional FAISS similarity search.
+- Add offline contract evaluations with reproducible JSON reports and packaged datasets.
+- Add control-API bearer authentication and fail-closed webhook configuration for new user
+  installations; export API credentials to systemd through environment references.
+- Record prompt, skill and connection content hashes; retry MCP discovery within a fixed budget
+  and reject workspace directory replacement.
+- Fix repository discovery on case-insensitive filesystems and the package license resource.
+
 - Keep deployment verification outside the durable-agent routing path, persist authorized review
   comments across worker restarts, and explicitly push/update existing pull-request heads.
 - Bridge runtime MCP adapters into the subscription CLI alongside static connector configuration;

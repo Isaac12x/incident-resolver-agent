@@ -38,6 +38,7 @@ from .config import (
     save_config,
 )
 from .connectors import ConnectorManager
+from .lifecycle import doctor
 from .tooling import (
     CommandRunner,
     GitHubRepository,
@@ -63,7 +64,10 @@ class ConfigurationApp(App[None]):
 
     TITLE = "Incident Harness"
     SUB_TITLE = "Configuration"
-    BINDINGS = [Binding("ctrl+s", "save", "Save", priority=True)]
+    BINDINGS = [
+        Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+q", "quit", "Quit"),
+    ]
     HORIZONTAL_BREAKPOINTS = [(0, "narrow"), (70, "wide")]
 
     CSS = """
@@ -131,7 +135,9 @@ class ConfigurationApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        with TabbedContent(id="content", initial="model-tab"):
+        with TabbedContent(id="content", initial="overview-tab"):
+            with TabPane("Overview", id="overview-tab"):
+                yield VerticalScroll(*self._overview_page(), classes="page")
             with TabPane("Model", id="model-tab"):
                 yield VerticalScroll(*self._model_page(), classes="page")
             with TabPane("Runtime", id="runtime-tab"):
@@ -152,6 +158,24 @@ class ConfigurationApp(App[None]):
         )
         yield Footer()
 
+    def _overview_page(self) -> list[Any]:
+        checks = doctor(self.path, runner=self.command_runner)
+        failed = [check for check in checks if not check.ok]
+        message = (
+            "Ready for incident intake"
+            if not failed
+            else "\n".join(f"{check.name}: {check.message}" for check in failed)
+        )
+        return [
+            Static("Readiness", classes="section-title"),
+            Static(message, id="readiness", markup=False),
+            Static(
+                "Use Runtime, Repos, and Sources tabs to resolve failed checks. "
+                "Save validates the complete configuration.",
+                markup=False,
+            ),
+        ]
+
     @staticmethod
     def _field(label: str, widget: Any) -> Vertical:
         return Vertical(Label(label), widget, classes="section")
@@ -171,9 +195,7 @@ class ConfigurationApp(App[None]):
     def _model_page(self) -> list[Any]:
         model = self.config.model
         return [
-            Static(
-                "Choose the model for incident investigation, repair, and review."
-            ),
+            Static("Choose the model for incident investigation, repair, and review."),
             Vertical(
                 Label("Agent runtime"),
                 self._select(
@@ -281,6 +303,7 @@ class ConfigurationApp(App[None]):
         github = self.config.github
         deployment = self.config.deployment
         permissions = self.config.permissions
+        execution = self.config.execution
         return [
             Vertical(
                 Label("How incidents trigger the harness"),
@@ -316,6 +339,13 @@ class ConfigurationApp(App[None]):
                 self._input(server.public_url, "public-url"),
                 Label("Agent webhook secret environment variable"),
                 self._input(server.webhook_secret_env, "server-webhook-secret-env"),
+                Label("API token environment variable (for external intake)"),
+                self._input(server.api_token_env, "server-api-token-env"),
+                Checkbox(
+                    "Require API authentication for intake endpoints",
+                    value=server.require_api_auth,
+                    id="server-require-api-auth",
+                ),
                 classes="section",
             ),
             Vertical(
@@ -346,6 +376,22 @@ class ConfigurationApp(App[None]):
                 self._input(deployment.reachability_timeout_seconds, "deployment-timeout"),
                 Label("Deployment poll interval in seconds"),
                 self._input(deployment.poll_interval_seconds, "deployment-poll-interval"),
+                classes="section",
+            ),
+            Vertical(
+                Label("Execution mode"),
+                self._select(execution.mode, "execution-mode", ("host", "container")),
+                Label("Container image"),
+                self._input(execution.image, "execution-image"),
+                Checkbox(
+                    "Allow network access in container",
+                    value=execution.network,
+                    id="execution-network",
+                ),
+                Label("Container memory (MB)"),
+                self._input(execution.memory_mb, "execution-memory"),
+                Label("Container process limit"),
+                self._input(execution.pids_limit, "execution-pids"),
                 classes="section",
             ),
             Vertical(
@@ -646,6 +692,8 @@ class ConfigurationApp(App[None]):
                 "port": self._number("port", integer=True),
                 "public_url": self._value("public-url").strip() or None,
                 "webhook_secret_env": self._value("server-webhook-secret-env").strip(),
+                "api_token_env": self._value("server-api-token-env").strip(),
+                "require_api_auth": self._checked("server-require-api-auth"),
             }
         )
         github = self.config.github.model_copy(
@@ -675,6 +723,15 @@ class ConfigurationApp(App[None]):
                 "allow_review_resolution": self._checked("allow-review-resolution"),
             }
         )
+        execution = self.config.execution.model_copy(
+            update={
+                "mode": self._selected("execution-mode"),
+                "image": self._value("execution-image").strip(),
+                "network": self._checked("execution-network"),
+                "memory_mb": self._number("execution-memory", integer=True),
+                "pids_limit": self._number("execution-pids", integer=True),
+            }
+        )
         repositories = [self._collect_repository(key) for key in self._repository_keys]
         connectors = [self._collect_connector(key) for key in self._connector_keys]
         draft = Config(
@@ -689,6 +746,7 @@ class ConfigurationApp(App[None]):
             github=github,
             deployment=deployment,
             permissions=permissions,
+            execution=execution,
             repositories=repositories,
             connectors=connectors,
         )
@@ -1008,4 +1066,5 @@ class ConfigurationApp(App[None]):
 
 
 def run_tui(path: Path = Path(".agent/config.toml")) -> None:
+    """Launch the editor using the caller-selected config path."""
     ConfigurationApp(path).run()
