@@ -1,19 +1,19 @@
 # Incident Harness
 
 A durable, long-horizon agent harness that turns production incidents into locally tested,
-deployment-verified pull requests. Every intake protocol uses one filesystem-backed workflow, so
+deployment-verified pull requests. Every intake protocol uses one SQLite-backed workflow, so
 tasks remain inspectable and recoverable while the process is running or after a restart.
 
 ## What is implemented
 
 - Incident intake over signed HTTP webhooks, MCP-compatible endpoints, A2A endpoints, and JSON files.
-- Atomic task queues under `.agent/tasks` with append-only events and SQLite conversation history.
+- Transactional task state and event history in SQLite, readable `.agent/tasks` artifacts, and conversation history.
 - Incident deduplication and restart recovery without an external queue.
 - Per-task Git worktrees backed by one bare mirror per configured repository.
 - One durable lead-agent session per task, with stable research and implementation sub-agent
   sessions, automatic context compaction, and global, repository, and task memory.
 - Agent-driven lifecycle tools for investigation checkpoints, local verification, durable memory,
-  and pull-request publication; the filesystem workflow validates transitions and external waits
+  and pull-request publication; the durable workflow validates transitions and external waits
   instead of invoking a new model operation for every phase.
 - Selectable OpenAI Agents SDK or host-authenticated subscription CLI runtimes, with repository
   instructions, preflight skills, workspace tools, repository graphs, and MCP connector mapping.
@@ -27,6 +27,160 @@ tasks remain inspectable and recoverable while the process is running or after a
 - A Textual configuration editor that persists environment-variable references, never secrets.
 
 ## Install and run
+
+### Install the CLI (no checkout required)
+
+Requires Git and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+The package requires Python 3.12 or newer; uv can provision a compatible Python.
+This implementation is currently on `feat/todo-platform` in
+[PR #15](https://github.com/Isaac12x/incident-resolver-agent/pull/15), so the `master`
+README and installer do not include it until that PR is merged. Install the branch now:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/feat/todo-platform/install.sh | \
+  INCIDENT_HARNESS_SOURCE='git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' sh
+uv tool update-shell
+```
+
+Restart your shell after `uv tool update-shell` if `incident-agent` is not on `PATH`.
+Alternatively, install directly with uv:
+
+```bash
+uv tool install --from 'git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' incident-harness
+```
+
+After PR #15 is merged, the default-branch installer can be used:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
+```
+
+### Configure and start
+
+Run these from outside a repository containing `.agent` to use the per-user configuration:
+
+```bash
+incident-agent --help
+incident-agent init
+incident-agent config
+```
+
+Configure your model, repositories, and connectors in the TUI. Export the credentials named
+by that configuration (`OPENAI_API_KEY` for the default hosted model,
+`INCIDENT_AGENT_API_TOKEN` for control APIs, and `AGENT_WEBHOOK_SECRET` for alert intake), then:
+
+```bash
+incident-agent doctor
+incident-agent run
+```
+
+`incident-agent update` upgrades the isolated uv tool installation, its dependencies, and managed
+repository tools when repositories are configured. It retains the source selected at installation;
+rerun the default-branch installer after merge to switch from the feature branch.
+`incident-agent doctor` reports executable, credential, repository, and container
+readiness. `run` installs missing managed tools when dependency installation is enabled, then
+checks readiness before starting. The TUI Overview shows those checks.
+The installer accepts `INCIDENT_HARNESS_SOURCE` to select a Git revision or fork.
+`config` and `tui` open the same
+editor; `run FILE.json` continues to submit a single incident. `run` without a file starts the
+HTTP server and worker in the foreground.
+Use the systemd deployment below for a background service that starts on boot.
+
+Outside a checkout, configuration lives in `$XDG_CONFIG_HOME/incident-harness/config.toml`
+(default `~/.config/incident-harness/config.toml`) and state in
+`$XDG_STATE_HOME/incident-harness` (default `~/.local/state/incident-harness`). An existing
+`.agent` directory, `INCIDENT_AGENT_CONFIG`, or `--config PATH` selects an explicit workspace.
+Git worktrees remain isolated per incident; the state directory name is configurable.
+
+New user configurations enable `server.require_api_auth`. Export `INCIDENT_AGENT_API_TOKEN`
+for control API clients and `AGENT_WEBHOOK_SECRET` for signed alert intake before running.
+API requests under `/mcp/*` and `/a2a/*` use `Authorization: Bearer TOKEN`; alert webhooks
+use their existing HMAC signatures. Missing required credentials return HTTP 503 and incorrect
+credentials return HTTP 401. Existing configs retain their previous authentication setting:
+enable `server.require_api_auth = true` to migrate. Setting the API token also enforces bearer
+authentication when the compatibility flag is false. Health and agent discovery stay public.
+Credentials are environment values; configuration stores their variable names.
+
+### Incident history and evaluations
+
+Grafana intake stores events, grouping keys, fingerprints, duplicate references, and task links
+in the runtime SQLite database. Resolved alerts are logged without starting a repair. Incident
+history retains investigation root causes. New tasks refresh intelligence from changed history
+and attach summary, predicted causes, and related incidents to the agent context.
+
+The authenticated APIs include:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /mcp/resources/intelligence/events` | Filter recent intake by `source`, `group_key`, and bounded `limit` |
+| `GET /mcp/resources/tasks/{task_id}/summary` | Investigation/fix artifact summary, with explicit extractive fallback before artifacts exist |
+| `POST /mcp/tools/rebuild_intelligence` | Train from labeled history and rebuild optional vector search |
+| `POST /mcp/tools/predict_root_cause` | Rank learned causes for a JSON `text` field |
+| `POST /mcp/tools/search_similar_incidents` | Search using JSON `query` and optional `limit` |
+
+Root-cause prediction uses bounded logistic regression and needs at least two distinct labels.
+Scores are experimental outputs, not calibrated confidence. FAISS search uses sentence-transformers
+and the optional `intelligence` extra. Automatic enrichment uses cached model weights; explicit
+rebuild can download weights. Dependency/model absence is reported with a lexical fallback.
+
+Task summaries reuse the model-generated investigation and fix artifacts produced by the durable
+workflow and the evidence recorded by verification. The API prefers existing `artifacts/local/fix.txt`
+and `investigation.md` artifacts, preserving their Markdown and reporting method `agent-artifact`
+with the source path. Before those artifacts exist, it returns an explicitly labelled
+`extractive-fallback` assembled from the incident summary and description. HumanLayer’s
+[`show-me`](https://github.com/humanlayer/skills/blob/main/plugins/show-me/skills/show-me/SKILL.md)
+skill guides the concise, evidence-based explanation format for summaries, investigation explanations, and pull-request bodies.
+
+```bash
+incident-agent eval
+incident-agent eval --suite repair --output repair-report.json
+incident-agent eval labeled-history.jsonl --suite root-cause --output root-cause-report.json
+incident-agent eval retrieval-cases.jsonl --suite retrieval --output retrieval-report.json
+```
+
+Contract evaluations cover intake and authorization. The repair evaluation exercises the actual
+workflow in a temporary Git repository: an independent regression must fail before the fix and
+pass through the lifecycle test gate and after local publication. Its bundled repair backend is
+scripted, so this verifies the harness rather than model repair quality. Root-cause evaluation uses
+a chronological holdout; retrieval reports recall against explicit query/relevance pairs and the
+actual search method. Production quality and cost require representative data and a real model.
+
+### Runtime policies and versions
+
+Task state, event order, worker leases, and workspace identity are stored in `tasks.sqlite3`.
+Task folders contain readable artifacts and can be reconstructed from the catalog; their location
+is no longer the scheduling authority. Existing task folders migrate on startup.
+`logs/runtime.jsonl` contains rotating structured operation records. Authenticated `/metrics`
+exports persisted counts, failures, and elapsed time; `/mcp/resources/metrics` returns JSON.
+
+Each invocation records prompt, skill, and connection hashes. Build and activate immutable bundles:
+
+```bash
+incident-agent bundle build
+incident-agent bundle list
+incident-agent bundle activate VERSION
+incident-agent bundle rollback
+```
+
+A bundle captures config, prompt, connections, skill contents, and environment-variable references.
+Restart the service after activation or rollback to apply all inputs. Keep credentials in the
+environment. Bundle hashes detect content changes; they are not signatures from a trusted publisher.
+
+The contextual UCB bandit learns tool success/failure rewards across runs. Use explicit tools or
+compatible candidate sets. Retries are bounded and only enabled for designated read-only tools.
+`agent.tool_registry` can point to an operator-managed JSON catalog of wheel artifacts pinned by
+SHA-256. Agents can inspect the catalog and install approved entries when dependency installation
+is enabled; installed callable extensions survive restart. MCP remains supported. See
+[the extension contract](docs/tool-registry.md) for the schema and trust boundary.
+
+Set `execution.mode = "container"` and a pre-pulled `execution.image` to confine repository shell
+and lifecycle test commands. Containers mount only the worktree, drop capabilities, restrict
+resources, and disable networking by default. Missing Docker/image prerequisites fail readiness.
+The TUI Runtime tab exposes these controls. The default `host` mode retains existing behavior.
+This boundary does not sandbox native subscription CLI tools, operator-trusted plugins, or MCP
+servers; choose and configure those executors according to their own trust model.
+
+### Development checkout
 
 The harness requires Python 3.12 or newer. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 then run these commands from the repository checkout:
@@ -488,29 +642,21 @@ source file as well as at least 90% aggregate coverage.
 
 ## Architecture
 
-The implementation uses one asyncio event loop, small responsibility-based modules, filesystem task
-queues, SQLite session history, and no additional workflow framework. The workflow owns transition
+The implementation uses one asyncio event loop, small responsibility-based modules, SQLite task
+state and session history, and no additional workflow framework. The workflow owns transition
 validation, retries, deployment events, and recovery. Each task's durable lead session decides when
 to investigate, delegate, edit, test, remember, and publish by calling the workflow's lifecycle tools.
 
 
 ## Known limitations, pitfalls and non-goals
 
-This was built as a time-boxed prototype (over a 3hr window). And so I left pieces out that would make the agent-harness work better. I list them below in order of importance:
+See [TODO.md](TODO.md) for the request-by-request acceptance matrix and remaining external
+validation needs. The online tool policy learns execution success, not end-to-end repair quality.
+A production benchmark needs representative labeled incidents and a selected model. Host executors,
+trusted extensions, and native subscription CLI tools require their own isolation configuration.
 
-- Stronger tool calling with RL into the main loop, find-research-install tools as needed and retries.
-- Evals.
-- Logs and observability as primitives.
-- Workspaces, guardrails and other safety protocols. Instead relying on the using the .agent folder as the worflow.
-- Security.
-- Versioning and construction. For the system prompt, skills and connections.
-- Extensibility other than by the use of skills.
-
-
-I have solved some of these pitfalls using code-review-graph so the agent queries the graph instead of loading the whole codebase into context. This keeps the context window smaller.
-
-I have used skills written by others alongside those that I created for this exercise.
-
+Repository knowledge graphs reduce unnecessary source loading. Built-in and third-party skills
+continue to provide the incident lifecycle instructions.
 
 ## LICENSE
 

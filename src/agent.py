@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -16,7 +17,9 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from .adaptive import AdaptiveToolRouter, ToolPolicy
 from .config import Config
+from .extensions import TrustedToolRegistry
 from .models import (
     FixResult,
     InvestigationResult,
@@ -28,7 +31,7 @@ from .models import (
 )
 from .skills import Skill, SkillResolver
 from .storage import Storage
-from .tooling import subscription_cli_command
+from .tooling import stable_hash, subscription_cli_command
 from .tools import WorkspaceTools
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
@@ -71,6 +74,8 @@ class AgentRunContext:
     memory_writer: Callable[[str], None]
     capabilities: frozenset[str] = frozenset()
     connector_tools: tuple[Any, ...] = ()
+    adaptive_router: AdaptiveToolRouter | None = None
+    tool_registry: Any | None = None
 
 
 class _CompactingSession:
@@ -500,6 +505,101 @@ class OpenAIAgentsBackend:
             code_graph_query,
             code_graph_impact,
         ]
+        adaptive_router = run_context.adaptive_router if run_context is not None else None
+        if adaptive_router is None and run_context is not None:
+            adaptive_router = AdaptiveToolRouter(
+                ToolPolicy(run_context.session_db.parent / "adaptive-tools.json"),
+                {},
+                retries=self.config.agent.max_tool_retries,
+                retryable_tools={"read_file"},
+            )
+        if adaptive_router is not None:
+
+            async def adaptive_shell(payload: dict[str, Any]) -> Any:
+                result = await workspace.shell(str(payload["command"]))
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr or f"command failed ({result.returncode})")
+                return {
+                    "returncode": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                }
+
+            def adaptive_read(payload: dict[str, Any]) -> str:
+                return workspace.read_file(str(payload["path"]))
+
+            adaptive_router.tools = {"shell": adaptive_shell, "read_file": adaptive_read}
+            for index, server in enumerate(connector_tools):
+                if all(
+                    callable(getattr(server, field, None)) for field in ("list_tools", "call_tool")
+                ):
+
+                    async def connector_call(
+                        arguments: dict[str, Any], _server: Any = server
+                    ) -> Any:
+                        name = str(arguments.get("tool", ""))
+                        return await _server.call_tool(name, arguments.get("arguments", {}))
+
+                    adaptive_router.tools[f"connector-{index}"] = connector_call
+            if run_context is not None and run_context.tool_registry is not None:
+                adaptive_router.tools.update(run_context.tool_registry.loaded)
+
+        @function_tool
+        async def adaptive_tool(
+            context: str,
+            arguments: dict[str, Any] | None = None,
+            tool: str | None = None,
+            candidates: list[str] | None = None,
+        ) -> str:
+            """Choose and invoke one trusted repository or connector tool, recording its outcome.
+
+            Supply ``tool`` when the task requires a specific tool; omit it to use the
+            persistent contextual bandit. Only tools in the current trusted catalog can run.
+            """
+            if adaptive_router is None:
+                return json.dumps(
+                    {"success": False, "error": "adaptive tool selection unavailable"}
+                )
+            outcome = await adaptive_router.invoke(
+                context, arguments, tool=tool, candidates=candidates
+            )
+            return json.dumps(
+                {
+                    "tool": outcome.tool,
+                    "success": outcome.success,
+                    "reward": outcome.reward,
+                    "attempts": outcome.attempts,
+                    "value": outcome.value,
+                    "error": outcome.error,
+                },
+                default=str,
+            )
+
+        @function_tool
+        def tool_catalog() -> str:
+            """List the operator-approved extension catalog."""
+            if run_context is None or run_context.tool_registry is None:
+                return json.dumps({"error": "trusted tool registry is not configured"})
+            return json.dumps(run_context.tool_registry.catalog())
+
+        @function_tool
+        def tool_install(name: str) -> str:
+            """Install one explicitly catalogued extension when permissions allow it."""
+            if run_context is None or run_context.tool_registry is None:
+                return json.dumps({"error": "trusted tool registry is not configured"})
+            if not self.config.permissions.allow_dependency_installation:
+                return json.dumps({"error": "dependency installation is disabled"})
+            path = run_context.tool_registry.install(
+                name, run_context.session_db.parent / "tools", allow_install=True
+            )
+            if adaptive_router is not None:
+                adaptive_router.tools[name] = run_context.tool_registry.loaded[name]
+            return json.dumps({"installed": str(path)})
+
+        if adaptive_router is not None:
+            local_tools.append(adaptive_tool)
+            if run_context is not None and run_context.tool_registry is not None:
+                local_tools.extend((tool_catalog, tool_install))
         mcp_servers = [
             item
             for item in connector_tools
@@ -691,6 +791,9 @@ JSON object as the final argument and use the returned JSON as authoritative:
 - `harness-out/incident-session-tool code_graph_query JSON` (`pattern`, `target`)
 - `harness-out/incident-session-tool code_graph_impact JSON` (`changed_files`, optional `max_depth`)
 - `harness-out/incident-session-tool connector_call JSON` (`connector`, `tool`, `arguments`)
+- `harness-out/incident-session-tool adaptive_tool JSON` (`context`, optional `tool`, `arguments`)
+- `harness-out/incident-session-tool tool_catalog JSON`
+- `harness-out/incident-session-tool tool_install JSON` (`name`)
 
 The CLI runs in a read-only sandbox. Use these mapped commands for mutations and verification so
 the harness applies its workspace and permission policy. Native read-only inspection remains
@@ -785,12 +888,75 @@ its lifecycle command succeeds.
                     "code_graph_query",
                     "code_graph_impact",
                     "connector_call",
+                    "adaptive_tool",
+                    "tool_catalog",
+                    "tool_install",
                 }:
                     raise ValueError(f"unknown lifecycle tool: {name}")
                 arguments = request.get("arguments", {})
                 if not isinstance(arguments, dict):
                     raise ValueError("tool arguments must be an object")
-                if name in {
+                if name == "tool_catalog":
+                    if context.tool_registry is None:
+                        raise ValueError("trusted tool registry is not configured")
+                    result = context.tool_registry.catalog()
+                elif name == "tool_install":
+                    if context.tool_registry is None:
+                        raise ValueError("trusted tool registry is not configured")
+                    if not self.config.permissions.allow_dependency_installation:
+                        raise PermissionError("dependency installation is disabled")
+                    installed = context.tool_registry.install(
+                        str(arguments.get("name", "")),
+                        context.session_db.parent / "tools",
+                        allow_install=True,
+                    )
+                    result = {"installed": str(installed)}
+                elif name == "adaptive_tool":
+                    router = context.adaptive_router
+                    if router is None:
+                        router = AdaptiveToolRouter(
+                            ToolPolicy(context.session_db.parent / "adaptive-tools.json"),
+                            {},
+                            retries=self.config.agent.max_tool_retries,
+                            retryable_tools={"read_file"},
+                        )
+
+                    async def run_shell(payload: dict[str, Any]) -> dict[str, Any]:
+                        command_result = await workspace.shell(str(payload["command"]))
+                        return {
+                            "returncode": command_result.returncode,
+                            "stdout": command_result.stdout,
+                            "stderr": command_result.stderr,
+                            "truncated": command_result.truncated,
+                        }
+
+                    router.tools.update(
+                        {
+                            "shell": run_shell,
+                            "read_file": lambda payload: {
+                                "content": workspace.read_file(str(payload["path"]))
+                            },
+                        }
+                    )
+                    if context.tool_registry is not None:
+                        router.tools.update(context.tool_registry.loaded)
+                    outcome = await router.invoke(
+                        str(arguments.get("context", "default")),
+                        arguments.get("arguments")
+                        if isinstance(arguments.get("arguments"), dict)
+                        else {},
+                        tool=str(arguments["tool"]) if arguments.get("tool") else None,
+                        candidates=arguments.get("candidates"),
+                    )
+                    result = {
+                        "tool": outcome.tool,
+                        "success": outcome.success,
+                        "reward": outcome.reward,
+                        "attempts": outcome.attempts,
+                        "value": outcome.value,
+                        "error": outcome.error,
+                    }
+                elif name in {
                     "mark_investigation_complete",
                     "run_tests",
                     "verification_plan",
@@ -1124,14 +1290,25 @@ class IncidentAgent:
             "external deployment or review event, and resume the same session when the harness "
             "supplies it."
         )
+        parts.append(
+            "# Adaptive Trusted Tools\n\n"
+            "Use `adaptive_tool` when selecting among equivalent repository or connector tools. "
+            "It chooses from the current trusted catalog, retries only retry-safe failures, and "
+            "persists outcome rewards for future incidents. Pass an explicit `tool` for actions "
+            "with a required target. Never treat a missing catalog entry as permission to install "
+            "or execute an unregistered package."
+        )
         if any(skill.name == "show-me" for skill in skills):
             parts.append(
-                "# Pull Request Body Copy\n\n"
-                "Apply the loaded `show-me` skill only while drafting the summary passed to "
-                "`open_pr` for a new pull request. Make that summary the final PR body copy. "
-                "Ground every file, state, relationship, and verification claim in repository "
-                "evidence. Cover root cause, changed behavior, executed checks, and deployment "
-                "verification. Do not apply `show-me` to any other lifecycle work."
+                "# Incident Summaries and Pull Request Body Copy\n\n"
+                "Apply the loaded HumanLayer `show-me` skill when explaining the incident "
+                "root cause, proposed fix, and implementation summary. Keep the explanation "
+                "concise and include a small diagram or code-shape sketch only when it helps. "
+                "Persist it in the investigation fields and fix summary through the existing "
+                "lifecycle tools; these artifacts also supply the incident summary API. "
+                "For `open_pr`, make the summary final PR body copy covering root cause, "
+                "changed behavior, executed checks, and deployment verification. Ground all "
+                "claims and visuals in observed evidence and preserve the required output schema."
             )
         parts.append(
             "# Fix First, Then Expand in Circles\n\n"
@@ -1225,6 +1402,7 @@ class IncidentAgent:
             worktree,
             timeout=self.config.model.tool_timeout_seconds,
             permissions=self.config.permissions,
+            execution=self.config.execution,
             logger=lambda data: self.storage.append_event(
                 task.task_id,
                 TaskEvent(type=str(data.pop("type")), data=data),
@@ -1233,8 +1411,41 @@ class IncidentAgent:
                 task.conversation_id, pattern, limit
             ),
         )
-        connector_tools = await self.connectors.tools_for(capabilities)
+        discover = getattr(self.connectors, "discover_tools", None)
+        connector_tools = await (
+            discover(capabilities, retries=2)
+            if callable(discover)
+            else self.connectors.tools_for(capabilities)
+        )
+        registry: TrustedToolRegistry | None = None
+        registry_path = getattr(self.config.agent, "tool_registry", None)
+        if registry_path:
+            registry = TrustedToolRegistry.from_file(registry_path)
+            registry.restore(self.storage.root / "tools")
         prompt = await self._graph_context(task, worktree, tools) + prompt
+        connector_descriptors = (
+            self.connectors.descriptors()
+            if callable(getattr(self.connectors, "descriptors", None))
+            else [{"name": getattr(item, "name", type(item).__name__)} for item in connector_tools]
+        )
+        manifest = {
+            "manifest_version": 1,
+            "operation": operation,
+            "model": self.config.model.name,
+            "model_config_sha256": stable_hash(self.config.model.model_dump(mode="json")),
+            "prompt_sha256": stable_hash(prompt),
+            "system_prompt_sha256": stable_hash(self.config.agent.system_prompt),
+            "instructions_sha256": stable_hash(instructions),
+            "permissions_sha256": stable_hash(self.config.permissions.model_dump(mode="json")),
+            "execution_sha256": stable_hash(self.config.execution.model_dump(mode="json")),
+            "skills": resolution.manifest(),
+            "connectors": connector_descriptors,
+            "connectors_sha256": stable_hash(connector_descriptors),
+        }
+        self.storage.append_event(
+            task.task_id,
+            TaskEvent(type="agent.run_manifest", data=manifest),
+        )
         self.storage.add_message(task.conversation_id, "user", f"{operation}: {prompt}")
         if isinstance(self.backend, (OpenAIAgentsBackend, SubscriptionCLIBackend)):
             output_types: dict[str, type[BaseModel]] = {
@@ -1263,18 +1474,33 @@ class IncidentAgent:
                     ),
                     capabilities=frozenset(capabilities),
                     connector_tools=tuple(connector_tools),
+                    adaptive_router=AdaptiveToolRouter(
+                        ToolPolicy(self.storage.root / "adaptive-tools.json"),
+                        {},
+                        retries=self.config.agent.max_tool_retries,
+                        retryable_tools={"read_file"},
+                    ),
+                    tool_registry=registry,
                 )
             backend_kwargs: dict[str, Any] = {"output_type": output_types[operation]}
             if run_context is not None:
                 backend_kwargs["run_context"] = run_context
-            return await self.backend(
-                instructions,
-                prompt,
-                tools,
-                connector_tools,
-                **backend_kwargs,
+            pending = self.backend(instructions, prompt, tools, connector_tools, **backend_kwargs)
+        else:
+            pending = self.backend(instructions, prompt, tools, connector_tools)
+        started = time.monotonic()
+        success = False
+        try:
+            response = await pending
+            success = True
+            return response
+        finally:
+            self.storage.telemetry.record(
+                "agent.run",
+                success=success,
+                seconds=time.monotonic() - started,
+                task_id=task.task_id,
             )
-        return await self.backend(instructions, prompt, tools, connector_tools)
 
     def _cache_response(self, task: TaskRecord, response: dict[str, Any]) -> None:
         """Persist only a model response that passed the operation schema."""
@@ -1327,7 +1553,7 @@ class IncidentAgent:
             worktree,
             "investigate",
             incident.model_dump_json(indent=2),
-            ["code-review-graph", "incident-investigation"],
+            ["code-review-graph", "incident-investigation", "show-me"],
             {"incidents", "errors", "logs", "traces", "metrics"},
         )
         validated = InvestigationResult.model_validate(result)
@@ -1341,7 +1567,7 @@ class IncidentAgent:
             worktree,
             "implement_fix",
             investigation.read_text() if investigation.exists() else task.summary,
-            ["code-review-graph", "ponytail", "coding", "testing", "github"],
+            ["code-review-graph", "ponytail", "coding", "testing", "show-me", "github"],
             {"logs", "runtime"},
         )
         validated = FixResult.model_validate(result)

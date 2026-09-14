@@ -31,6 +31,7 @@ def referenced_env_vars(config: Config) -> frozenset[str]:
     if config.model.organization_env:
         names.add(config.model.organization_env)
     names.add(config.server.webhook_secret_env)
+    names.add(config.server.api_token_env)
     names.add(config.github.webhook_secret_env)
     for connector in config.connectors:
         if connector.auth_token_env:

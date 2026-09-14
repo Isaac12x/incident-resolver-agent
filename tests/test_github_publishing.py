@@ -230,7 +230,7 @@ def test_credentials_export_and_case_insensitive_discovery(tmp_path):
     nested = tmp_path / "nested/Company/Application"
     nested.mkdir(parents=True)
     assert nested in repository_candidates(tmp_path / "nested", "company/application")
-    (source.parent / "company--application").mkdir()
+    (source.parent / "company" / "application").mkdir(parents=True)
     with pytest.raises(ValueError, match="ambiguous"):
         repository_candidates(source.parent, "company/application")
 

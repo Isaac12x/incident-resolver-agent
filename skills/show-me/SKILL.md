@@ -1,16 +1,26 @@
 ---
 name: show-me
-description: Draft concise, evidence-based visual details for an incident pull-request body.
+description: Explain incidents and draft concise, evidence-based summaries and pull-request details.
 triggers:
+  - "explain incident"
+  - "draft incident summary"
   - "draft incident pull request body"
   - "create incident pull request"
 ---
 
 # Show me
 
-Apply this skill only while drafting the body passed to `open_pr` for a new incident pull request.
-Do not apply it during investigation, implementation, local or deployment verification, review
-feedback, pull-request updates, or general explanations.
+Use this skill for an incident summary, an investigation explanation, or the body passed to
+`open_pr`. It can be applied while investigation and implementation artifacts are being assembled,
+and when a later session needs to explain their evidence. The runtime loads it for
+`investigate`, `implement_fix`, and `run_session` operations so those artifacts can be summarized
+consistently.
+
+Prefer the model-generated investigation and fix artifacts as the source for an explanation. State
+the root cause, affected behavior, repair, and verification evidence in terms supported by those
+artifacts. When no generated artifact exists yet, use an explicit extractive fallback: quote or
+closely summarize only the available incident, repository, and test evidence, and label the result
+as an extractive fallback. Never imply that a model-generated explanation exists when it does not.
 
 Include one concise visual section when it clarifies the incident fix. Choose the smallest form that
 fits the evidence:
@@ -23,3 +33,6 @@ Prefer a Mermaid flow or code-shape sketch naming the affected boundary and veri
 Never invent relationships, files, states, or evidence; omit the visual when the evidence cannot
 support it. Keep the body easy to scan alongside root cause, changed behavior, tests, and deployment
 verification. Do not overwhelm the reader with multiple visuals when one is sufficient.
+
+This is an adaptation of HumanLayer's upstream `show-me` skill:
+<https://github.com/humanlayer/skills/blob/main/plugins/show-me/skills/show-me/SKILL.md>.
