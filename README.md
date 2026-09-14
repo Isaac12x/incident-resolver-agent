@@ -28,23 +28,63 @@ tasks remain inspectable and recoverable while the process is running or after a
 
 ## Install and run
 
-For a per-user installation without a checkout, install `uv` and run:
+### Install the CLI (no checkout required)
+
+Requires Git and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+The package requires Python 3.12 or newer; uv can provision a compatible Python.
+This implementation is currently on `feat/todo-platform` in
+[PR #15](https://github.com/Isaac12x/incident-resolver-agent/pull/15), so the `master`
+README and installer do not include it until that PR is merged. Install the branch now:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/feat/todo-platform/install.sh | \
+  INCIDENT_HARNESS_SOURCE='git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' sh
+uv tool update-shell
+```
+
+Restart your shell after `uv tool update-shell` if `incident-agent` is not on `PATH`.
+Alternatively, install directly with uv:
+
+```bash
+uv tool install --from 'git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' incident-harness
+```
+
+After PR #15 is merged, the default-branch installer can be used:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
+```
+
+### Configure and start
+
+Run these from outside a repository containing `.agent` to use the per-user configuration:
+
+```bash
+incident-agent --help
 incident-agent init
 incident-agent config
+```
+
+Configure your model, repositories, and connectors in the TUI. Export the credentials named
+by that configuration (`OPENAI_API_KEY` for the default hosted model,
+`INCIDENT_AGENT_API_TOKEN` for control APIs, and `AGENT_WEBHOOK_SECRET` for alert intake), then:
+
+```bash
+incident-agent doctor
 incident-agent run
 ```
 
 `incident-agent update` upgrades the isolated uv tool installation, its dependencies, and managed
-repository tools. `incident-agent doctor` reports executable, credential, repository, and container
+repository tools when repositories are configured. It retains the source selected at installation;
+rerun the default-branch installer after merge to switch from the feature branch.
+`incident-agent doctor` reports executable, credential, repository, and container
 readiness. `run` installs missing managed tools when dependency installation is enabled, then
 checks readiness before starting. The TUI Overview shows those checks.
-The installer accepts `INCIDENT_HARNESS_SOURCE` to select a Git revision or fork. The script
-becomes available at the URL above when this change is merged. `config` and `tui` open the same
+The installer accepts `INCIDENT_HARNESS_SOURCE` to select a Git revision or fork.
+`config` and `tui` open the same
 editor; `run FILE.json` continues to submit a single incident. `run` without a file starts the
 HTTP server and worker in the foreground.
+Use the systemd deployment below for a background service that starts on boot.
 
 Outside a checkout, configuration lives in `$XDG_CONFIG_HOME/incident-harness/config.toml`
 (default `~/.config/incident-harness/config.toml`) and state in
@@ -139,6 +179,8 @@ resources, and disable networking by default. Missing Docker/image prerequisites
 The TUI Runtime tab exposes these controls. The default `host` mode retains existing behavior.
 This boundary does not sandbox native subscription CLI tools, operator-trusted plugins, or MCP
 servers; choose and configure those executors according to their own trust model.
+
+### Development checkout
 
 The harness requires Python 3.12 or newer. Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/),
 then run these commands from the repository checkout:
