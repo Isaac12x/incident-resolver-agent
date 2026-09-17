@@ -127,7 +127,7 @@ def test_review_contract(configured, tmp_path, monkeypatch, report, exitcode, er
 
 
 @pytest.fixture
-def workflow(configured):
+def workflow(restore_task_state, configured):
     storage = Storage(configured.runtime_root)
     task = storage.create_task(
         Incident(
@@ -157,7 +157,7 @@ def workflow(configured):
         subprocess.run(["git", *args], cwd=worktree, check=True, capture_output=True)
     task.branch = "feature-branch"
     storage.save_task(task)
-    task = storage.transition(task.task_id, TaskState.TESTING_LOCAL)
+    task = restore_task_state(storage, task.task_id, TaskState.TESTING_LOCAL)
     engine = WorkflowEngine(
         configured, storage, Mock(supports_durable_session=False), Mock(), Mock(verify=AsyncMock())
     )
@@ -213,9 +213,11 @@ async def test_clean_review_cache_and_new_commit(workflow, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deployment_never_runs_with_stale_review(workflow, monkeypatch):
+async def test_deployment_never_runs_with_stale_review(restore_task_state, workflow, monkeypatch):
     engine, task, worktree = workflow
-    engine.storage.transition(task.task_id, TaskState.TESTING_DEPLOYMENT, pr_head_sha="stale")
+    restore_task_state(
+        engine.storage, task.task_id, TaskState.TESTING_DEPLOYMENT, pr_head_sha="stale"
+    )
     result = await engine.process(task.task_id)
     assert result.state == TaskState.BLOCKED
     engine.verifier.verify.assert_not_called()
@@ -249,10 +251,10 @@ async def test_tui_saves_before_provisioning(configured, tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "state", [TaskState.TESTING_LOCAL, TaskState.PUBLISHING_PR, TaskState.TESTING_DEPLOYMENT]
 )
-async def test_workflow_gate_findings(workflow, monkeypatch, state):
+async def test_workflow_gate_findings(restore_task_state, workflow, monkeypatch, state):
     engine, task, worktree = workflow
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
-    engine.storage.transition(task.task_id, state, pr_head_sha=head)
+    restore_task_state(engine.storage, task.task_id, state, pr_head_sha=head)
     monkeypatch.setattr(
         "src.workflow.review",
         Mock(
@@ -301,13 +303,13 @@ async def test_review_ref_validation(workflow, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deployment_dirty_and_review_changed_head(workflow, monkeypatch):
+async def test_deployment_dirty_and_review_changed_head(restore_task_state, workflow, monkeypatch):
     engine, task, worktree = workflow
     (worktree / "dirty.py").write_text("dirty = True")
     task.state = TaskState.TESTING_DEPLOYMENT
     assert not await engine._review_fix(task, worktree)
     assert "worktree changed" in engine.storage.load_task(task.task_id).error
-    task.state = TaskState.TESTING_LOCAL
+    task = restore_task_state(engine.storage, task.task_id, TaskState.TESTING_LOCAL)
 
     def scan(*args):
         engine.storage.commit_worktree(task, "concurrent edit")
@@ -319,9 +321,9 @@ async def test_deployment_dirty_and_review_changed_head(workflow, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_review_repairs_republish_then_verify(workflow, monkeypatch):
+async def test_review_repairs_republish_then_verify(restore_task_state, workflow, monkeypatch):
     engine, task, worktree = workflow
-    engine.storage.transition(task.task_id, TaskState.TESTING_LOCAL, pr_number=7)
+    restore_task_state(engine.storage, task.task_id, TaskState.TESTING_LOCAL, pr_number=7)
     monkeypatch.setattr(
         "src.workflow.review",
         Mock(
@@ -345,7 +347,8 @@ async def test_review_repairs_republish_then_verify(workflow, monkeypatch):
     assert result.state == TaskState.WAITING_FOR_DEPLOYMENT
     engine.github.update_pull_request.assert_awaited_once()
     assert result.pr_head_sha == result.code_review_sha == head
-    engine.storage.transition(
+    restore_task_state(
+        engine.storage,
         task.task_id,
         TaskState.TESTING_DEPLOYMENT,
         deployment_sha=head,
@@ -365,13 +368,14 @@ async def test_review_repairs_republish_then_verify(workflow, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_readonly_and_uncommitted_review_mutations(workflow, monkeypatch):
+async def test_readonly_and_uncommitted_review_mutations(restore_task_state, workflow, monkeypatch):
     engine, task, worktree = workflow
     (worktree / "fix.py").write_text("fixed = True")
     engine.config.permissions.mode = "read-only"
     assert not await engine._review_fix(task, worktree)
     assert "read-only" in engine.storage.load_task(task.task_id).error
     engine.config.permissions.mode = "workspace"
+    task = restore_task_state(engine.storage, task.task_id, TaskState.TESTING_LOCAL)
 
     def scan(*args):
         (worktree / "fix.py").write_text("fixed = False")

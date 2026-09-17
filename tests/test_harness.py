@@ -883,7 +883,9 @@ async def test_workflow_lifecycle_event_routing_and_restart_recovery(
 
 
 @pytest.mark.asyncio
-async def test_workflow_merge_cancel_and_rejections(config: Config, incident: Incident) -> None:
+async def test_workflow_merge_cancel_and_rejections(
+    restore_task_state, config: Config, incident: Incident
+) -> None:
     storage = Storage(config.runtime_root)
     github = FakeGitHub(config.github, webhook_secret="secret")
     workflow = WorkflowEngine(
@@ -899,7 +901,7 @@ async def test_workflow_merge_cancel_and_rejections(config: Config, incident: In
         await workflow.submit(incident.model_copy(update={"environment": "development"}))
     task = storage.create_task(incident)
     task.pr_number = 42
-    storage.save_task(task)
+    restore_task_state(storage, task.task_id, TaskState.WAITING_FOR_REVIEW, pr_number=42)
     merged = await workflow.handle_github_event(
         "pull_request",
         {
@@ -2391,7 +2393,9 @@ def test_tui_helpers_and_runner(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workflow_retry_block_and_error_paths(config: Config, incident: Incident) -> None:
+async def test_workflow_retry_block_and_error_paths(
+    restore_task_state, config: Config, incident: Incident
+) -> None:
     config.model.max_task_iterations = 1
     storage = Storage(config.runtime_root)
     github = FakeGitHub(config.github)
@@ -2410,13 +2414,13 @@ async def test_workflow_retry_block_and_error_paths(config: Config, incident: In
     )
     task = storage.create_task(incident)
     (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
-    storage.transition(task.task_id, TaskState.REPRODUCING)
+    restore_task_state(storage, task.task_id, TaskState.REPRODUCING)
     assert (await workflow.process(task.task_id)).state == TaskState.BLOCKED
 
     failing_incident = incident.model_copy(update={"external_id": "INC-failing"})
     failing = storage.create_task(failing_incident)
     (storage.root / "worktrees" / failing.task_id).mkdir(parents=True)
-    storage.transition(failing.task_id, TaskState.IMPLEMENTING)
+    restore_task_state(storage, failing.task_id, TaskState.IMPLEMENTING)
 
     async def fail_test(_task, _worktree):  # noqa: ANN001, ANN202
         return False
@@ -2435,7 +2439,7 @@ async def test_workflow_retry_block_and_error_paths(config: Config, incident: In
 
 @pytest.mark.asyncio
 async def test_workflow_requires_agent_reported_tests_to_pass(
-    config: Config, incident: Incident
+    restore_task_state, config: Config, incident: Incident
 ) -> None:
     config.model.max_task_iterations = 2
     storage = Storage(config.runtime_root)
@@ -2461,7 +2465,7 @@ async def test_workflow_requires_agent_reported_tests_to_pass(
     )
     task = storage.create_task(incident)
     (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
-    storage.transition(task.task_id, TaskState.REPRODUCING)
+    restore_task_state(storage, task.task_id, TaskState.REPRODUCING)
     retry = await workflow.process(task.task_id)
     assert retry.state == TaskState.REPRODUCING and retry.attempts == 1
     blocked = await workflow.process(task.task_id)
@@ -2471,7 +2475,8 @@ async def test_workflow_requires_agent_reported_tests_to_pass(
     review_incident = incident.model_copy(update={"external_id": "INC-review-tests"})
     review_task = storage.create_task(review_incident)
     (storage.root / "worktrees" / review_task.task_id).mkdir(parents=True)
-    review_task = storage.transition(
+    review_task = restore_task_state(
+        storage,
         review_task.task_id,
         TaskState.WAITING_FOR_REVIEW,
         pr_number=42,
@@ -2493,7 +2498,7 @@ async def test_workflow_requires_agent_reported_tests_to_pass(
 
 @pytest.mark.asyncio
 async def test_failed_model_response_is_not_recalled_or_published(
-    config: Config, incident: Incident
+    restore_task_state, config: Config, incident: Incident
 ) -> None:
     config.model.max_task_iterations = 3
     config.repositories[0].publish_mode = "github"
@@ -2528,7 +2533,7 @@ async def test_failed_model_response_is_not_recalled_or_published(
     )
     task = storage.create_task(incident)
     (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
-    storage.transition(task.task_id, TaskState.REPRODUCING)
+    restore_task_state(storage, task.task_id, TaskState.REPRODUCING)
 
     retry = await workflow.process(task.task_id)
 
@@ -2551,12 +2556,15 @@ async def test_failed_model_response_is_not_recalled_or_published(
 
 
 @pytest.mark.asyncio
-async def test_failed_deployment_blocks_at_budget(config: Config, incident: Incident) -> None:
+async def test_failed_deployment_blocks_at_budget(
+    restore_task_state, config: Config, incident: Incident
+) -> None:
     config.model.max_task_iterations = 1
     storage = Storage(config.runtime_root)
     task = storage.create_task(incident)
     (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
-    task = storage.transition(
+    task = restore_task_state(
+        storage,
         task.task_id,
         TaskState.TESTING_DEPLOYMENT,
         pr_number=1,
@@ -2590,7 +2598,7 @@ async def test_failed_deployment_blocks_at_budget(config: Config, incident: Inci
 
 @pytest.mark.asyncio
 async def test_cli_async_helpers(
-    config: Config, incident: Incident, tmp_path: Path, capsys
+    restore_task_state, config: Config, incident: Incident, tmp_path: Path, capsys
 ) -> None:
     class Workflow:
         def __init__(self) -> None:
@@ -2601,8 +2609,8 @@ async def test_cli_async_helpers(
             return self.task
 
         async def process(self, task_id):  # noqa: ANN001, ANN202
-            self.task = Storage(config.runtime_root).transition(
-                task_id, TaskState.WAITING_FOR_DEPLOYMENT
+            self.task = restore_task_state(
+                Storage(config.runtime_root), task_id, TaskState.WAITING_FOR_DEPLOYMENT
             )
             return self.task
 
@@ -2650,7 +2658,7 @@ async def test_verifier_unreachable_and_unknown_repository(
 
 @pytest.mark.asyncio
 async def test_remaining_workflow_retry_and_routing_paths(
-    config: Config, incident: Incident
+    restore_task_state, config: Config, incident: Incident
 ) -> None:
     config.model.max_task_iterations = 2
     storage = Storage(config.runtime_root)
@@ -2669,12 +2677,13 @@ async def test_remaining_workflow_retry_and_routing_paths(
     workflow.local_tester = fail_test
     task = storage.create_task(incident)
     (storage.root / "worktrees" / task.task_id).mkdir(parents=True)
-    storage.transition(task.task_id, TaskState.IMPLEMENTING)
+    restore_task_state(storage, task.task_id, TaskState.IMPLEMENTING)
     assert (await workflow.process(task.task_id)).state == TaskState.REPRODUCING
 
     deployment_task = storage.create_task(incident.model_copy(update={"external_id": "INC-deploy"}))
     (storage.root / "worktrees" / deployment_task.task_id).mkdir(parents=True)
-    storage.transition(
+    restore_task_state(
+        storage,
         deployment_task.task_id,
         TaskState.TESTING_DEPLOYMENT,
         pr_number=2,
@@ -2695,7 +2704,7 @@ async def test_remaining_workflow_retry_and_routing_paths(
 
     waiting = storage.create_task(incident.model_copy(update={"external_id": "INC-wait"}))
     (storage.root / "worktrees" / waiting.task_id).mkdir(parents=True)
-    storage.transition(waiting.task_id, TaskState.WAITING_FOR_REVIEW)
+    restore_task_state(storage, waiting.task_id, TaskState.WAITING_FOR_REVIEW)
     assert (await workflow.process(waiting.task_id)).state == TaskState.WAITING_FOR_REVIEW
     assert (
         await workflow.handle_github_event(
@@ -2726,7 +2735,7 @@ async def test_remaining_workflow_retry_and_routing_paths(
 
     unchanged = storage.create_task(incident.model_copy(update={"external_id": "INC-unchanged"}))
     (storage.root / "worktrees" / unchanged.task_id).mkdir(parents=True)
-    storage.transition(unchanged.task_id, TaskState.REPRODUCING)
+    restore_task_state(storage, unchanged.task_id, TaskState.REPRODUCING)
     workflow.agent = NoChangeAgent()  # type: ignore[assignment]
     assert (await workflow.process(unchanged.task_id)).state == TaskState.BLOCKED
 
@@ -2853,7 +2862,7 @@ async def test_worker_runs_queued_task_and_waits_for_shutdown(
 
 @pytest.mark.asyncio
 async def test_local_repository_branch_commit_and_local_pr(
-    tmp_path: Path, incident: Incident
+    restore_task_state, tmp_path: Path, incident: Incident
 ) -> None:
     incident = incident.model_copy(
         update={"external_id": "INC bad@{ref..lock", "summary": "INC bad@{ref..lock"}
@@ -2897,7 +2906,7 @@ async def test_local_repository_branch_commit_and_local_pr(
     (worktree / "FIX.md").write_text("local fix\n")
     (worktree / ".code-review-graph").mkdir()
     (worktree / ".code-review-graph" / "graph.db").write_bytes(b"graph")
-    storage.transition(task.task_id, TaskState.PUBLISHING_PR)
+    restore_task_state(storage, task.task_id, TaskState.PUBLISHING_PR)
     completed = await workflow.process(task.task_id)
     assert completed.state == TaskState.COMPLETED
     assert completed.pr_url and completed.pr_url.startswith("local://")
