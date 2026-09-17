@@ -6,22 +6,53 @@ import fcntl
 import json
 import re
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 
+from .file_store import JsonFile
 from .models import utc_now
 
 
 class Telemetry:
     def __init__(self, root: Path) -> None:
-        self.database = root / "telemetry.sqlite3"
+        self.database = root / "telemetry.json"
+        self._metrics = JsonFile(
+            self.database, lambda: {"schema_version": 1, "migrated": False, "metrics": {}}
+        )
         self.log = root / "logs" / "runtime.jsonl"
         self.log.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.database)) as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS metrics (name TEXT PRIMARY KEY, "
-                "calls INTEGER NOT NULL, failures INTEGER NOT NULL, seconds REAL NOT NULL)"
-            )
+        self._migrate_legacy(root / "telemetry.sqlite3")
+
+    def _migrate_legacy(self, database: Path) -> None:
+        if self.database.exists() or not database.is_file():
+            return
+        try:
+            connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                rows = connection.execute(
+                    "SELECT name,calls,failures,seconds FROM metrics ORDER BY name"
+                ).fetchall()
+            finally:
+                connection.close()
+            with self._metrics.transaction() as document:
+                if document.get("migrated"):
+                    return
+                document["schema_version"] = 1
+                document["migrated"] = True
+                document["metrics"] = {
+                    str(name): {
+                        "calls": int(calls),
+                        "failures": int(failures),
+                        "seconds": float(seconds),
+                    }
+                    for name, calls, failures, seconds in rows
+                }
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error).lower():
+                raise ValueError(f"cannot read legacy telemetry database: {database}") from error
+        except sqlite3.DatabaseError as error:
+            raise ValueError(f"cannot read legacy telemetry database: {database}") from error
+        except OSError as error:
+            raise ValueError(f"cannot read legacy telemetry database: {database}") from error
 
     def record(
         self, name: str, *, success: bool = True, seconds: float = 0, task_id: str | None = None
@@ -34,13 +65,13 @@ class Telemetry:
             raise ValueError("metric duration cannot be negative")
         if task_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", task_id):
             raise ValueError("invalid telemetry task id")
-        with closing(sqlite3.connect(self.database, timeout=30)) as connection, connection:
-            connection.execute(
-                "INSERT INTO metrics VALUES (?,1,?,?) ON CONFLICT(name) DO UPDATE SET "
-                "calls=calls+1, failures=failures+excluded.failures, "
-                "seconds=seconds+excluded.seconds",
-                (name, int(not success), seconds),
-            )
+        with self._metrics.transaction() as document:
+            document["migrated"] = True
+            metrics = document.setdefault("metrics", {})
+            metric = metrics.setdefault(name, {"calls": 0, "failures": 0, "seconds": 0.0})
+            metric["calls"] += 1
+            metric["failures"] += int(not success)
+            metric["seconds"] += seconds
         entry = {
             "time": utc_now().isoformat(),
             "name": name,
@@ -59,12 +90,18 @@ class Telemetry:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def snapshot(self) -> list[dict[str, str | int | float]]:
-        with closing(sqlite3.connect(self.database)) as connection:
-            rows = connection.execute(
-                "SELECT name,calls,failures,seconds FROM metrics ORDER BY name"
-            ).fetchall()
+        document = self._metrics.read()
+        metrics = document.get("metrics")
+        if document.get("schema_version") != 1 or not isinstance(metrics, dict):
+            raise ValueError(f"invalid telemetry document: {self.database}")
         return [
-            dict(zip(("name", "calls", "failures", "seconds"), row, strict=True)) for row in rows
+            {
+                "name": name,
+                "calls": value["calls"],
+                "failures": value["failures"],
+                "seconds": value["seconds"],
+            }
+            for name, value in sorted(metrics.items())
         ]
 
     def prometheus(self) -> str:

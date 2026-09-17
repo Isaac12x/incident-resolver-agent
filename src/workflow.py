@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import subprocess
 import threading
+import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -22,6 +24,7 @@ from .intelligence import (
     SimilarIncidentSearch,
     summarize_incident,
 )
+from .lifecycle_graph import ACTIVE_STATES, TERMINAL_STATES
 from .models import (
     DeploymentReference,
     Incident,
@@ -30,7 +33,9 @@ from .models import (
     TaskEvent,
     TaskRecord,
     TaskState,
+    VerificationResult,
 )
+from .operations import OperationBudgetExceeded, OperationLedger
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
@@ -38,23 +43,6 @@ from .verification_graph import VerificationGraph
 from .verify import DeploymentVerifier
 
 GraphIndexer = Callable[[Path], ToolResult]
-
-ACTIVE_STATES = {
-    TaskState.RECEIVED,
-    TaskState.COLLECTING_CONTEXT,
-    TaskState.INVESTIGATING,
-    TaskState.REPRODUCING,
-    TaskState.IMPLEMENTING,
-    TaskState.TESTING_LOCAL,
-    TaskState.PUBLISHING_PR,
-    TaskState.TESTING_DEPLOYMENT,
-}
-TERMINAL_STATES = {
-    TaskState.COMPLETED,
-    TaskState.BLOCKED,
-    TaskState.FAILED,
-    TaskState.CANCELLED,
-}
 
 
 class _TaskLifecycle:
@@ -274,7 +262,7 @@ class _TaskLifecycle:
         )
         repository = self.workflow.config.repository(task.repository)
         if task.pr_number and self.workflow.github.api is not None:
-            reference = await self.workflow.github.update_pull_request(task)
+            reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
                 raise RuntimeError("GitHub did not confirm the updated pull request")
             task = self.workflow.storage.transition(
@@ -284,32 +272,23 @@ class _TaskLifecycle:
                 pr_url=reference.url,
             )
         elif task.pr_number:
-            result = await WorkspaceTools(self.worktree).shell("git rev-parse HEAD")
-            if result.returncode:
-                raise RuntimeError(result.stderr or "could not determine updated PR head")
-            if not task.branch:
-                raise RuntimeError("cannot update a pull request without its branch")
-            push = await WorkspaceTools(self.worktree).shell(
-                f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
-            )
-            if push.returncode:
-                raise RuntimeError(push.stderr or "could not push the updated pull-request head")
-            updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
-            reference = await self.workflow.github.update_pull_request(updated)
+            reference = await self.workflow._publish(task, self.worktree, update=True)
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
-                pr_head_sha=result.stdout.strip(),
-                pr_url=reference.url if reference else task.pr_url,
+                pr_head_sha=reference.head_sha,
+                pr_url=reference.url,
             )
         elif repository.publish_mode == "local" or (
             repository.publish_mode == "auto" and self.workflow.github.api is None
         ):
+            if task.state != TaskState.PUBLISHING_PR:
+                task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
             task = self.workflow._local_publish(task, self.worktree)
         else:
             if task.state != TaskState.PUBLISHING_PR:
                 task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
-            pull_request = await self.workflow.github.create_pull_request(task)
+            pull_request = await self.workflow._publish(task, self.worktree)
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
@@ -375,6 +354,91 @@ class WorkflowEngine:
         self._intelligence_lock = threading.RLock()
         self._history_signature = self._current_history_signature()
         self._intelligence_initialized = False
+
+    def _operations(self, task_id: str) -> OperationLedger:
+        return OperationLedger(
+            self.storage.root / "operations" / f"{task_id}.json",
+            max_attempts=self.config.model.max_task_iterations,
+            overall_cap=self.config.model.max_task_iterations * 2,
+        )
+
+    @contextmanager
+    def _operation(self, task: TaskRecord, name: str, revision: str):
+        """Persist intent before an effect; charge every replay, even after a crash."""
+        ledger = self._operations(task.task_id)
+        try:
+            ledger.begin(name, revision, reuse_success=False)
+        except OperationBudgetExceeded as error:
+            self.storage.transition(task.task_id, TaskState.BLOCKED, error=str(error))
+            raise
+        started = time.monotonic()
+        outcome: dict[str, Any] = {}
+        try:
+            yield outcome
+        except Exception as error:
+            ledger.finish(
+                name,
+                revision,
+                succeeded=False,
+                outcome={"error": str(error), "duration_seconds": time.monotonic() - started},
+            )
+            raise
+        else:
+            outcome["duration_seconds"] = time.monotonic() - started
+            ledger.finish(name, revision, succeeded=outcome.get("passed", True), outcome=outcome)
+
+    def _publication_revision(self, task: TaskRecord, worktree: Path) -> str:
+        # Real Git workspaces include dirty/untracked inputs, not the previous PR SHA.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True
+        )
+        if head.returncode:
+            # Custom publication adapters can operate without a Git checkout. They
+            # still share the task cap and never reuse a cached publication result.
+            return task.pr_head_sha or task.branch or task.task_id
+        inputs = VerificationGraph(worktree, self.storage.root / "unused-verification.json").files()
+        return hashlib.sha256(
+            json.dumps([head.stdout.strip(), inputs], sort_keys=True).encode()
+        ).hexdigest()
+
+    async def _publish(
+        self, task: TaskRecord, worktree: Path, *, update: bool = False
+    ) -> PullRequestReference:
+        revision = self._publication_revision(task, worktree)
+        with self._operation(task, "publish", revision) as outcome:
+            if update and self.github.api is None:
+                tools = WorkspaceTools(worktree)
+                result = await tools.shell("git rev-parse HEAD")
+                if result.returncode:
+                    raise RuntimeError(result.stderr or "could not determine updated PR head")
+                if not task.branch:
+                    raise RuntimeError("cannot update a pull request without its branch")
+                push = await tools.shell(
+                    f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
+                )
+                if push.returncode:
+                    raise RuntimeError(
+                        push.stderr or "could not push the updated pull-request head"
+                    )
+                updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
+                reference = await self.github.update_pull_request(updated)
+                reference = reference or PullRequestReference(
+                    repository=task.repository,
+                    number=task.pr_number,
+                    branch=task.branch,
+                    head_sha=result.stdout.strip(),
+                    url=task.pr_url or "",
+                )
+            else:
+                reference = (
+                    await self.github.update_pull_request(task)
+                    if update
+                    else await self.github.create_pull_request(task)
+                )
+                if reference is None:
+                    raise RuntimeError("GitHub did not confirm the updated pull request")
+            outcome.update(reference.model_dump(mode="json"))
+            return reference
 
     def _current_history_signature(self) -> tuple[tuple[str, str | None], ...]:
         return tuple(
@@ -557,6 +621,14 @@ class WorkflowEngine:
         return worktree
 
     def _local_publish(self, task: TaskRecord, worktree: Path) -> TaskRecord:
+        with self._operation(
+            task, "publish", self._publication_revision(task, worktree)
+        ) as outcome:
+            result = self._local_publish_effect(task, worktree)
+            outcome.update(head_sha=result.pr_head_sha, url=result.pr_url)
+            return result
+
+    def _local_publish_effect(self, task: TaskRecord, worktree: Path) -> TaskRecord:
         sha = self.storage.commit_worktree(task, f"Fix incident {task.external_id}")
         reference = PullRequestReference(
             repository=task.repository,
@@ -599,6 +671,8 @@ class WorkflowEngine:
         }
 
     async def _review_fix(self, task: TaskRecord, worktree: Path) -> bool:
+        if self.storage.load_task(task.task_id).state in TERMINAL_STATES:
+            return False
         if not self.config.code_review.enabled:
             return True
 
@@ -784,8 +858,6 @@ class WorkflowEngine:
                     if self.context_collector
                     else self.storage.load_incident(task_id).model_dump_json(indent=2)
                 )
-                import json
-
                 intelligence = await asyncio.to_thread(self._intelligence_context, task_id)
                 self.storage.write_artifact(
                     task_id,
@@ -911,7 +983,7 @@ class WorkflowEngine:
                     repository.publish_mode == "auto" and self.github.api is None
                 ):
                     return self._local_publish(task, worktree)
-                pull_request = await self.github.create_pull_request(task)
+                pull_request = await self._publish(task, worktree)
                 return self.storage.transition(
                     task_id,
                     TaskState.WAITING_FOR_DEPLOYMENT,
@@ -931,7 +1003,27 @@ class WorkflowEngine:
                     sha=task.deployment_sha or "",
                     url=task.deployment_url or "",
                 )
-                result = await self.verifier.verify(task, deployment, worktree)
+                revision = json.dumps(
+                    [
+                        task.repository,
+                        task.pr_number,
+                        deployment.environment,
+                        deployment.sha,
+                        deployment.url,
+                    ],
+                    separators=(",", ":"),
+                )
+                prior = self._operations(task_id).get("deployment_verification", revision)
+                if (
+                    self.verifier.accepts(task, deployment)
+                    and prior
+                    and prior["status"] == "succeeded"
+                ):
+                    result = VerificationResult.model_validate(prior["outcome"])
+                else:
+                    with self._operation(task, "deployment_verification", revision) as outcome:
+                        result = await self.verifier.verify(task, deployment, worktree)
+                        outcome.update(result.model_dump(mode="json"))
                 self.storage.write_artifact(
                     task_id, "artifacts/playwright/output.txt", result.output or result.reason or ""
                 )
@@ -992,6 +1084,8 @@ class WorkflowEngine:
             return self.storage.load_task(task_id)
         except Exception as error:
             latest = self.storage.load_task(task_id)
+            if latest.state in TERMINAL_STATES:
+                return latest
             attempts = latest.attempts + 1
             self.storage.append_event(
                 task_id,
@@ -1013,6 +1107,8 @@ class WorkflowEngine:
         task = self.storage.find_by_pr(*target)
         if not task:
             return None
+        if task.state in TERMINAL_STATES:
+            return task
         action = payload.get("action")
         if event == "pull_request" and action == "closed" and payload["pull_request"].get("merged"):
             completed = self.storage.transition(task.task_id, TaskState.COMPLETED)
@@ -1025,6 +1121,8 @@ class WorkflowEngine:
                 await self.wake(task.task_id)
             return task
         if event in {"deployment_status", "deployment"}:
+            if task.state != TaskState.WAITING_FOR_DEPLOYMENT:
+                return task
             deployment_data = payload.get("deployment", payload)
             status = payload.get("deployment_status", {})
             deployment = DeploymentReference(

@@ -117,11 +117,14 @@ async def test_cli_identity_persisted_before_interruption_and_reused(
 
 
 @pytest.mark.asyncio
-async def test_worker_rediscovers_review_after_dead_owner_lease_expires(tmp_path):
+async def test_worker_rediscovers_review_after_dead_owner_lease_expires(
+    restore_task_state, tmp_path
+):
     config = Config(runtime_root=tmp_path, poll_interval_seconds=0.01)
     storage = Storage(tmp_path)
     task = create_task(storage)
-    storage.transition(
+    restore_task_state(
+        storage,
         task.task_id,
         TaskState.WAITING_FOR_REVIEW,
         pending_review_comments=[ReviewComment(id=1, author="owner", body="fix")],
@@ -207,6 +210,8 @@ worktree.mkdir()
 (worktree / 'fix.py').write_text('preserved edit')
 storage.catalog.register_workspace(task_id, worktree)
 storage.append_task_memory(task_id, 'Investigation complete; continue implementation.')
+for state in (TaskState.COLLECTING_CONTEXT, TaskState.INVESTIGATING, TaskState.REPRODUCING):
+    storage.transition(task_id, state)
 storage.transition(task_id, TaskState.IMPLEMENTING, backend_session_id='saved-thread')
 storage.catalog.acquire(task_id, 'crashed-process', 0.1)
 os._exit(9)

@@ -59,7 +59,8 @@ incident-harness/
 ├── uv.lock
 └── .agent/
     ├── config.toml
-    ├── sessions.sqlite3
+    ├── sessions/
+    │   └── ...
     ├── memory/
     │   ├── global.md
     │   └── repositories/

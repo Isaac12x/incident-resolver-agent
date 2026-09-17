@@ -55,3 +55,26 @@ artifacts exist. The unused external command adapter/configuration and its five 
 tests were removed; a lifecycle/restart/API regression was added. Generic bounded subprocess tests
 remain for trusted extensions. The new wheel includes the expanded skill. Full checks above were
 rerun after this correction; model-generated prose quality was not evaluated with a live model.
+
+
+## File-backed lifecycle graph — 2026-09-18
+
+Implemented declarative lifecycle transitions, atomically committed with their events, while
+retaining the durable agent loop. Harness state, SDK sessions, intake/history, telemetry and
+operation journals now use JSON files with process locks and atomic replacement. Existing
+SQLite data is migrated read-only; the third-party repository graph remains a derived index.
+
+The file-only runtime regression initially failed because Storage created sessions.sqlite3;
+it now passes and verifies state/messages/events from a separate process. Additional checks
+exercise real legacy SQLite imports, concurrent processes, interrupted writes, corruption,
+empty-session migration, operation restart budgets, and stale deployment-cache rejection.
+Test fixtures that previously skipped lifecycle stages now restore explicit checkpoints;
+production transition validation is not disabled for tests.
+
+Validation: 311 tests passed; 95.39% overall coverage and every source module >90%. Ruff,
+compileall, uv lock --check, wheel/sdist builds, all 12 offline contracts, and the scripted repair
+lifecycle evaluation passed (completed; no unsafe attempts). An extracted-wheel smoke test
+confirmed task and SDK session persistence without creating SQLite files.
+No static type checker is configured. No live model, production deployment, or remote
+preview verification was performed. Performance/token improvements are not benchmarked.
+Stop old workers before migration; preserve the full runtime directory and legacy databases.

@@ -193,7 +193,9 @@ def test_boundaries_unscoped_checks_new_and_deleted_files(repository):
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_executes_reuses_and_blocks_premature_expansion(repository, tmp_path):
+async def test_lifecycle_executes_reuses_and_blocks_premature_expansion(
+    restore_task_state, repository, tmp_path
+):
     config = Config(
         runtime_root=tmp_path / "runtime",
         repositories=[
@@ -213,7 +215,7 @@ async def test_lifecycle_executes_reuses_and_blocks_premature_expansion(reposito
             summary="bad value",
         )
     )
-    app.storage.transition(task.task_id, TaskState.REPRODUCING)
+    restore_task_state(app.storage, task.task_id, TaskState.REPRODUCING)
     lifecycle = _TaskLifecycle(app.workflow, task.task_id, repository)
     await lifecycle.verification_plan(["area/seed.py"])
     with pytest.raises(RuntimeError, match="current ring"):
