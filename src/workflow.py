@@ -749,6 +749,8 @@ class WorkflowEngine:
         owner = uuid4().hex
         ttl = max(60, self.config.model.tool_timeout_seconds * 2 + 300)
         if not self.storage.catalog.acquire(task_id, owner, ttl):
+            # A crashed owner's lease may still be live. Avoid a tight requeue loop.
+            await asyncio.sleep(self.config.poll_interval_seconds)
             return self.storage.load_task(task_id)
 
         async def heartbeat() -> None:
@@ -1047,7 +1049,11 @@ class WorkflowEngine:
 
     async def recover(self) -> None:
         for task in self.storage.list_tasks("pending", "active", "waiting"):
-            if task.state in ACTIVE_STATES or task.pending_review_comments:
+            if task.task_id in self._running_task_ids:
+                continue
+            if task.state in ACTIVE_STATES or (
+                task.state == TaskState.WAITING_FOR_REVIEW and task.pending_review_comments
+            ):
                 await self.wake(task.task_id)
 
     async def run_worker(self) -> None:
@@ -1059,6 +1065,8 @@ class WorkflowEngine:
             try:
                 async with semaphore:
                     task = await self.process(task_id)
+            except Exception:
+                logging.getLogger(__name__).exception("Task worker interrupted: %s", task_id)
             finally:
                 self._running_task_ids.discard(task_id)
                 replay = task_id in self._deferred_wakeups
@@ -1069,27 +1077,40 @@ class WorkflowEngine:
                     await self.wake(task_id)
 
         running: set[asyncio.Task[None]] = set()
-        while not self._stopping.is_set():
-            if self.reload_model:
-                try:
-                    self.reload_model()
-                except (OSError, ValueError, KeyError):
-                    logging.getLogger(__name__).warning(
-                        "Model configuration reload failed; retaining the last valid settings"
+        next_recovery = asyncio.get_running_loop().time() + self.config.poll_interval_seconds
+        try:
+            while not self._stopping.is_set():
+                if asyncio.get_running_loop().time() >= next_recovery:
+                    await self.recover()
+                    next_recovery = (
+                        asyncio.get_running_loop().time() + self.config.poll_interval_seconds
                     )
-            try:
-                task_id = await asyncio.wait_for(
-                    self._wakeups.get(), timeout=self.config.poll_interval_seconds
-                )
-            except TimeoutError:
-                continue
-            self._queued_task_ids.discard(task_id)
-            if self._stopping.is_set():
-                break
-            self._running_task_ids.add(task_id)
-            job = asyncio.create_task(run_one(task_id))
-            running.add(job)
-            job.add_done_callback(running.discard)
+                if self.reload_model:
+                    try:
+                        self.reload_model()
+                    except (OSError, ValueError, KeyError):
+                        logging.getLogger(__name__).warning(
+                            "Model configuration reload failed; retaining the last valid settings"
+                        )
+                try:
+                    task_id = await asyncio.wait_for(
+                        self._wakeups.get(),
+                        timeout=max(0.001, next_recovery - asyncio.get_running_loop().time()),
+                    )
+                except TimeoutError:
+                    continue
+                self._queued_task_ids.discard(task_id)
+                if self._stopping.is_set():
+                    break
+                self._running_task_ids.add(task_id)
+                job = asyncio.create_task(run_one(task_id))
+                running.add(job)
+                job.add_done_callback(running.discard)
+        except BaseException:
+            for job in running:
+                job.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+            raise
         if running:
             await asyncio.gather(*running, return_exceptions=True)
 

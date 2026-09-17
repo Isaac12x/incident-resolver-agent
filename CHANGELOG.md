@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Persist subscription CLI session identities before completion so interrupted first runs resume
+  the same conversation. Periodically recover committed work and review requests, back off on
+  occupied leases, and stop owned tasks and CLI processes on cancellation.
+
 - Resolve duplicate case-insensitive repository path aliases during discovery, preserve genuine
   ambiguity errors, and skip the disabled code-review gate for compatibility workflows.
 - Add optional Open Code Review setup in the TUI, saving model configuration before installation

@@ -509,6 +509,22 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
 
         def __init__(self, command: list[str]) -> None:
             self.command = command
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.prompt = b""
+            self.stdin = SimpleNamespace(
+                write=lambda value: setattr(self, "prompt", value),
+                drain=AsyncMock(),
+                close=lambda: None,
+            )
+
+        async def wait(self):
+            stdout, stderr = await self.communicate(self.prompt)
+            self.stdout.feed_data(stdout)
+            self.stdout.feed_eof()
+            self.stderr.feed_data(stderr)
+            self.stderr.feed_eof()
+            return self.returncode
 
         async def communicate(self, prompt: bytes):
             assert b"incident-session-tool" in prompt
