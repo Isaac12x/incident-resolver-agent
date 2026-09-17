@@ -555,6 +555,23 @@ Review comments are stored in the task state before the worker wakes, so a proce
 drop an authorized request. `open_pr` pushes an updated review branch and calls the configured
 GitHub adapter before waiting for a fresh deployment.
 
+### Crash recovery
+
+Run the worker again with the same `runtime_root` after a crash (systemd restarts the
+service automatically). SQLite stores the latest lifecycle state, review requests, and
+session identity; worktrees and task memory remain on disk. The worker scans unfinished
+work at startup and every `poll_interval_seconds`, including intake committed before its
+in-memory wakeup was delivered. Subscription CLI thread IDs are saved when the CLI emits
+`thread.started`, so an interrupted first run can resume the same conversation.
+
+A crashed worker's lease must expire before another worker takes over. Its lifetime is
+`max(60, 2 * tool_timeout_seconds + 300)` seconds and a live worker renews it every third
+of that interval. Cancellation stops owned jobs and their CLI processes and releases leases.
+Recovery continues from the last persisted checkpoint; an interrupted operation may be
+retried. This does not provide exactly-once execution for arbitrary shell commands or
+external side effects, or recovery after the runtime directory is lost. Terminal tasks
+remain terminal, and deployment/review waits still require their corresponding events.
+
 ### Adding skills
 
 The harness searches for nested `SKILL.md` files before every agent operation. Bundled lifecycle

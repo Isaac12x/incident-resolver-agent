@@ -1073,6 +1073,53 @@ its lifecycle command succeeds.
         return subscription_cli_command(list(self.config.model.subscription_command))
 
     @staticmethod
+    async def _communicate(
+        process: asyncio.subprocess.Process, prompt: bytes, context: AgentRunContext
+    ) -> tuple[bytes, bytes]:
+        """Persist the CLI identity as soon as it is emitted, before awaiting completion."""
+        stdin, stdout_stream, stderr_stream = process.stdin, process.stdout, process.stderr
+        assert stdin is not None
+        assert stdout_stream is not None
+        assert stderr_stream is not None
+
+        async def send() -> None:
+            try:
+                stdin.write(prompt)
+                await stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                stdin.close()
+
+        async def receive() -> bytes:
+            chunks = []
+            while line := await stdout_stream.readline():
+                chunks.append(line)
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(event, dict) and event.get("type") == "thread.started":
+                    thread = event.get("thread")
+                    identity = event.get("thread_id") or (
+                        thread.get("id") if isinstance(thread, dict) else None
+                    )
+                    if isinstance(identity, str) and identity:
+                        context.save_backend_session(identity)
+            return b"".join(chunks)
+
+        output = asyncio.create_task(receive())
+        errors = asyncio.create_task(stderr_stream.read())
+        jobs = [asyncio.create_task(send()), output, errors, asyncio.create_task(process.wait())]
+        try:
+            await asyncio.gather(*jobs)
+            return output.result(), errors.result()
+        finally:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+    @staticmethod
     def _decode_output(stdout: str, output_path: Path) -> tuple[str | None, dict[str, Any]]:
         backend_session: str | None = None
         messages: list[str] = []
@@ -1172,28 +1219,29 @@ its lifecycle command succeeds.
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=16 * 1024 * 1024,
                 )
                 try:
                     stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                        process.communicate(full_prompt.encode()),
+                        self._communicate(process, full_prompt.encode(), run_context),
                         timeout=self.config.model.tool_timeout_seconds,
                     )
                 except TimeoutError as error:
-                    process.kill()
-                    await process.wait()
                     raise RuntimeError(
                         "subscription CLI timed out after "
                         f"{self.config.model.tool_timeout_seconds}s"
                     ) from error
+                finally:
+                    if process.returncode is None:
+                        process.kill()
+                        await process.wait()
             stdout = stdout_bytes.decode(errors="replace")
             stderr = stderr_bytes.decode(errors="replace")
             if process.returncode:
                 raise RuntimeError(
                     f"subscription CLI exited {process.returncode}: " + (stderr or stdout)[-4000:]
                 )
-            discovered_session, decoded = self._decode_output(stdout, output_path)
-            if discovered_session and discovered_session != "None":
-                run_context.save_backend_session(discovered_session)
+            _, decoded = self._decode_output(stdout, output_path)
             validated = output_type.model_validate(decoded)
             progress.complete()
             return validated.model_dump(mode="json")
