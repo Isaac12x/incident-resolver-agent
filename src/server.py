@@ -257,6 +257,15 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
         except FileNotFoundError as error:
             raise HTTPException(status_code=404, detail="task not found") from error
 
+    @server.post("/mcp/tools/release_triage/{task_id}")
+    async def release_triage(task_id: str) -> dict[str, Any]:
+        try:
+            return (await application.workflow.release_triage(task_id)).model_dump(mode="json")
+        except FileNotFoundError as error:
+            raise HTTPException(status_code=404, detail="task not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @server.get("/mcp/resources/intelligence/events")
     async def intelligence_events(
         source: str | None = None, group_key: str | None = None, limit: int = 100

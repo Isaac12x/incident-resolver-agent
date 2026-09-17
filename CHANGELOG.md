@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add optional TypeSafe triage before worktree creation, with shadow evaluation, explicit non-code
+  review holds, operator release, bounded provider fallback, and durable versioned assessments.
+  Expose configuration in the TUI and include the credential reference in systemd exports.
+
 - Persist subscription CLI session identities before completion so interrupted first runs resume
   the same conversation. Periodically recover committed work and review requests, back off on
   occupied leases, and stop owned tasks and CLI processes on cancellation.
