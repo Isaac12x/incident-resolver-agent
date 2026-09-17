@@ -145,6 +145,67 @@ scripted, so this verifies the harness rather than model repair quality. Root-ca
 a chronological holdout; retrieval reports recall against explicit query/relevance pairs and the
 actual search method. Production quality and cost require representative data and a real model.
 
+### TypeSafe triage before the fix agent
+
+SQLite remains the source of truth for event history, task state, leases and recovery. TypeSafe
+provides optional judgments before the harness creates a worktree or invokes the agent. No new
+database or SDK dependency is required. Enable it in the TUI **Triage** tab or configuration:
+
+```toml
+[triage]
+enabled = true
+mode = "shadow"
+model = "jev-1.13.0"
+api_key_env = "TYPESAFE_API_KEY"
+timeout_seconds = 10
+review_threshold = 0.95
+```
+
+Export the named API key in the worker environment and restart the service. The systemd environment
+exporter includes this reference when enabled. Existing installations default to disabled; enabling
+triage defaults to shadow mode. No key is stored in configuration. Enabling sends bounded incident
+summary, description, evidence text, and up to five related same-repository/environment history
+records to `https://api.typesafe.ai/v1/systemone`; arbitrary metadata and evidence URLs are omitted.
+Text fields are not automatically redacted: use incident sources approved for this provider.
+
+The durable `triaging` stage evaluates category, customer impact, evidence sufficiency, likelihood
+of a code remedy, and correlation with retrieved candidates. It retains the original local
+root-cause predictor and history retrieval. Questions are independent; harness policy composes
+answers. Correlation is advisory and never merges, closes, or suppresses tasks. Grafana batch
+normalization continues to select the first firing alert; this feature does not fan out batches.
+
+- **Shadow:** persist the recommendation and continue existing agent dispatch.
+- **Enforce:** hold a task as `blocked` for operator review only when infrastructure, configuration,
+  or dependency classification has both probability and confidence at or above the threshold,
+  evidence sufficiency is at or above it, and code-remedy probability is at or below its complement.
+  Unknown, conflicting or insufficient evidence continues to the investigation agent. A
+  `gather_evidence` recommendation tells that agent to investigate before editing.
+- **Unavailable provider:** missing credentials, timeout, invalid answers and HTTP failures record
+  a sanitized fallback and continue normal dispatch. Rate-limit/overload retries are bounded by
+  three attempts and the total timeout. Cancellation propagates without dispatching the agent.
+
+Assessments commit atomically with a `triage.assessed` event in the SQLite task record (`triage`)
+and event journal. They also appear in readable `artifacts/triage.json`, and
+are attached to agent context. They include the requested/returned model, question version, request
+hash, policy threshold/mode, typed answers, recommendation, effective route and elapsed time.
+Persisted assessments are reused after restart or repository contention; changing settings affects
+unassessed tasks, not already committed decisions. A crash before persistence can repeat a provider
+call, but cannot dispatch work before the decision is stored.
+
+Inspect `GET /mcp/resources/tasks/{task_id}`. To explicitly release a triage-held task into agent
+investigation, use `POST /mcp/tools/release_triage/{task_id}` with the configured control API bearer
+token. The override and `triage.released` event commit together; the original recommendation remains
+inspectable. The endpoint
+rejects other blocked tasks and busy tasks. To abandon a held incident use the existing cancel API.
+
+Start in shadow mode and compare recommendations with independently reviewed incident outcomes.
+Before enabling enforcement, measure actionable incidents incorrectly held, correlation accuracy,
+provider failures, latency and actual agent cost saved. Confidence is a model statistic, not a
+verified incident diagnosis. The shipped threshold is a conservative starting policy, not a
+production-calibrated guarantee. Pin and re-evaluate model versions when changing them.
+See [TypeSafe primitives](https://docs.typesafe.ai/primitives) and
+[confidence](https://docs.typesafe.ai/confidence).
+
 ### Runtime policies and versions
 
 Task state, event order, worker leases, and workspace identity are stored in `tasks.sqlite3`.
