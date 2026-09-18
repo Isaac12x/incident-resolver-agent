@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Integrate SQLite/application repair with TypeSafe triage: preserve both configuration tabs,
+  recover triaging tasks before workspace creation, and atomically persist assessments and
+  audited operator releases without reopening unrelated terminal tasks.
+
 - Add application-scoped incident repair for explicitly configured services and repositories: one
   durable session, repository-aware tools, changed-only publication with linked sibling PRs,
   per-repository exact-SHA verification, and optional parent-workspace integration checks, while
@@ -13,6 +17,12 @@
   agent reasoning loop and existing verification gates.
 - Persist publication and deployment-verification attempts and outcomes across restarts, with
   bounded retries and input-specific recovery.
+- Add GitHub Pages-ready documentation with a complete configuration reference, validated
+  example TOML, configuration discovery and credential guidance, and publishing instructions.
+
+- Add optional TypeSafe triage before worktree creation, with shadow evaluation, explicit non-code
+  review holds, operator release, bounded provider fallback, and durable versioned assessments.
+  Expose configuration in the TUI and include the credential reference in systemd exports.
 
 - Persist subscription CLI session identities before completion so interrupted first runs resume
   the same conversation. Periodically recover committed work and review requests, back off on

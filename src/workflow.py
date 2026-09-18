@@ -42,6 +42,7 @@ from .operations import OperationBudgetExceeded, OperationLedger
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
+from .triage import assess_incident
 from .verification_graph import VerificationGraph
 from .verify import DeploymentVerifier
 
@@ -1137,7 +1138,7 @@ class WorkflowEngine:
         """
         if not self._is_application(task):
             return None
-        if task.state != TaskState.RECEIVED:
+        if task.state not in {TaskState.RECEIVED, TaskState.TRIAGING}:
             self.application.verify_workspaces(task)
         if task.state == TaskState.PUBLISHING_PR:
             await self.application.publish(task)
@@ -1231,13 +1232,69 @@ class WorkflowEngine:
             return await self.application.maybe_complete(task)
         return None
 
+    async def release_triage(self, task_id: str) -> TaskRecord:
+        """Explicit operator release; preserve the assessment and audit the override."""
+        owner = uuid4().hex
+        if not self.storage.catalog.acquire(task_id, owner, 60):
+            raise ValueError("task is busy")
+        try:
+            task = self.storage.load_task(task_id)
+            if task.state != TaskState.BLOCKED or not task.triage or (
+                task.triage.get("route") != "operator_review"
+            ):
+                raise ValueError("task is not awaiting triage review")
+            triage = {**task.triage, "route": "agent", "operator_released": True}
+            task = self.storage.transition(
+                task_id, TaskState.RECEIVED, triage=triage, error=None,
+                event=TaskEvent(type="triage.released"),
+            )
+        finally:
+            self.storage.catalog.release(task_id, owner)
+        await self.wake(task_id)
+        return task
+
     async def _process_unleased(self, task_id: str) -> TaskRecord:
         task = self.storage.load_task(task_id)
         try:
+            if task.state in TERMINAL_STATES:
+                return task
             application_result = await self._process_application(task)
             if application_result is not None:
                 return application_result
-            if task.state == TaskState.RECEIVED:
+            if task.state == TaskState.RECEIVED and self.config.triage.enabled and not task.triage:
+                return self.storage.transition(task_id, TaskState.TRIAGING)
+            if task.state in {TaskState.RECEIVED, TaskState.TRIAGING}:
+                if task.state == TaskState.TRIAGING and not task.triage:
+                    incident = self.storage.load_incident(task_id)
+                    related = await asyncio.to_thread(
+                        self.similar_incidents_search,
+                        (incident.summary + " " + incident.description)[:8000], 20,
+                    )
+                    candidates = [
+                        item for item in related.get("results", [])
+                        if item.get("task_id") != task_id
+                        and str(item.get("repository", "")).casefold()
+                        == incident.repository.casefold()
+                        and item.get("environment") == incident.environment
+                    ][:5]
+                    assessment = await assess_incident(self.config.triage, incident, candidates)
+                    # Cancellation may arrive while the provider is running.
+                    task = self.storage.load_task(task_id)
+                    if task.state in TERMINAL_STATES:
+                        return task
+                    task = self.storage.transition(
+                        task_id, task.state, triage=assessment,
+                        event=TaskEvent(type="triage.assessed", data=assessment),
+                    )
+                if task.triage:
+                    self.storage.write_artifact(
+                        task_id, "artifacts/triage.json", json.dumps(task.triage, indent=2) + "\n"
+                    )
+                    if task.triage["route"] == "operator_review":
+                        return self.storage.transition(
+                            task_id, TaskState.BLOCKED,
+                            error="Triage requires review; use release_triage to investigate",
+                        )
                 worktree = await self._worktree(task)
                 context = (
                     await self.context_collector(task, worktree)
@@ -1245,6 +1302,12 @@ class WorkflowEngine:
                     else self.storage.load_incident(task_id).model_dump_json(indent=2)
                 )
                 intelligence = await asyncio.to_thread(self._intelligence_context, task_id)
+                if task.triage:
+                    intelligence["triage"] = task.triage
+                    context += (
+                        "\n\nTriage is advisory, not verified root cause. Gather missing evidence "
+                        "before fixing; correlation never authorizes merging or closing tasks."
+                    )
                 self.storage.write_artifact(
                     task_id,
                     "artifacts/intelligence.json",
