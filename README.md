@@ -80,6 +80,21 @@ incident-agent doctor
 incident-agent run
 ```
 
+Source connections can also be configured from the CLI:
+
+```bash
+incident-agent plugins
+incident-agent connect
+incident-agent connect local-logs --name api-logs --log-path /var/log/myapp/api.log
+incident-agent connect local-logs --name worker-logs --log-path /var/log/myapp/worker.log
+incident-agent connect --list
+```
+
+Each connection has a unique name, so multiple sources can use the same plugin. See
+[source plugins and connections](docs/plugins.md) for scripted setup, MCP servers, and
+credential configuration. Restart the service after changing connections; if a runtime bundle
+is active, build and activate a new bundle first.
+
 `incident-agent update` upgrades the isolated uv tool installation, its dependencies, and managed
 repository tools when repositories are configured. It retains the source selected at installation;
 rerun the default-branch installer after merge to switch from the feature branch.
