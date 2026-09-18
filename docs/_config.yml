@@ -1,0 +1,10 @@
+title: Incident Harness
+description: Configuration and operator documentation for Incident Harness.
+theme: jekyll-theme-primer
+plugins:
+  - jekyll-relative-links
+relative_links:
+  enabled: true
+  collections: false
+exclude:
+  - README.md

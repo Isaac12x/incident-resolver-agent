@@ -292,3 +292,43 @@ def test_prepare_retries_locked_wal(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(sqlite_store.sqlite3, "connect", lambda *_args, **_kwargs: flaky)
     assert sqlite_store._prepare(tmp_path / "runtime.sqlite3") is flaky
     assert flaky.calls == 2
+
+
+@pytest.mark.parametrize("missing", ["hold", "event", "route", "release"])
+def test_triage_release_requires_persisted_hold_and_audited_override(tmp_path, missing):
+    catalog = TaskCatalog(tmp_path / "runtime.sqlite3")
+    task, _ = catalog.create(_task(), _incident())
+    catalog.transition(
+        task.task_id, TaskState.BLOCKED,
+        triage={"route": "agent" if missing == "hold" else "operator_review"},
+    )
+    triage = {
+        "route": "operator_review" if missing == "route" else "agent",
+        "operator_released": missing != "release",
+    }
+    event = None if missing == "event" else TaskEvent(type="triage.released")
+    before = catalog.load(task.task_id)
+    events = catalog.events(task.task_id)
+    with pytest.raises(ValueError, match="illegal lifecycle transition"):
+        catalog.transition(task.task_id, TaskState.RECEIVED, triage=triage, event=event)
+    assert catalog.load(task.task_id) == before
+    assert catalog.events(task.task_id) == events
+
+
+def test_assessment_and_timestamp_roll_back_when_audit_insert_fails(tmp_path):
+    catalog = TaskCatalog(tmp_path / "runtime.sqlite3")
+    task, _ = catalog.create(_task(), _incident())
+    before = catalog.transition(task.task_id, TaskState.TRIAGING)
+    events = catalog.events(task.task_id)
+    with connect(catalog.path) as db:
+        db.execute(
+            "CREATE TRIGGER reject_event BEFORE INSERT ON catalog_events "
+            "BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="audit unavailable"):
+        catalog.transition(
+            task.task_id, TaskState.TRIAGING, triage={"route": "agent"},
+            event=TaskEvent(type="triage.assessed"),
+        )
+    assert catalog.load(task.task_id) == before
+    assert catalog.events(task.task_id) == events

@@ -37,6 +37,7 @@ from .config import (
     ModelConfig,
     PlaywrightConfig,
     RepositoryConfig,
+    TriageConfig,
     load_config,
     save_config,
 )
@@ -150,6 +151,8 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._repositories_page(), classes="page")
             with TabPane("Applications", id="applications-tab"):
                 yield VerticalScroll(*self._applications_page(), classes="page")
+            with TabPane("Triage", id="triage-tab"):
+                yield VerticalScroll(*self._triage_page(), classes="page")
             with TabPane("Code review", id="code-review-tab"):
                 yield VerticalScroll(*self._code_review_page(), classes="page")
             with TabPane("Sources", id="connections-tab"):
@@ -199,6 +202,34 @@ class ConfigurationApp(App[None]):
         value: str, field_id: str, values: tuple[str, ...], *, prompt: str = "Select"
     ) -> Select:
         return Select(_options(*values), value=value, allow_blank=False, prompt=prompt, id=field_id)
+
+    def _triage_page(self) -> list[Any]:
+        settings = self.config.triage
+        return [
+            Static("TypeSafe assesses incident evidence before worktree creation. Shadow mode "
+                   "records recommendations; enforce mode can hold non-code incidents for review."),
+            Checkbox("Enable TypeSafe triage", value=settings.enabled, id="triage-enabled"),
+            Label("Mode"),
+            self._select(settings.mode, "triage-mode", ("shadow", "enforce")),
+            Label("Model version"),
+            self._input(settings.model, "triage-model"),
+            Label("API key environment variable"),
+            self._input(settings.api_key_env, "triage-key-env"),
+            Label("Total timeout (seconds)"),
+            self._input(settings.timeout_seconds, "triage-timeout"),
+            Label("Operator review confidence threshold"),
+            self._input(settings.review_threshold, "triage-threshold"),
+        ]
+
+    def _collect_triage(self) -> TriageConfig:
+        return TriageConfig(
+            enabled=self._checked("triage-enabled"),
+            mode=self._selected("triage-mode"),
+            model=self._value("triage-model").strip(),
+            api_key_env=self._value("triage-key-env").strip(),
+            timeout_seconds=self._number("triage-timeout"),
+            review_threshold=self._number("triage-threshold"),
+        )
 
     def _code_review_page(self) -> list[Any]:
         settings = self.config.code_review
@@ -848,6 +879,7 @@ class ConfigurationApp(App[None]):
             github=github,
             deployment=deployment,
             code_review=self._collect_code_review(),
+            triage=self._collect_triage(),
             permissions=permissions,
             execution=execution,
             repositories=repositories,

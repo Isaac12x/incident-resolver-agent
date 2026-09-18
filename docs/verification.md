@@ -105,3 +105,18 @@ deployment, or remote preview was exercised. Performance improvements were not b
 
 Stop old workers before upgrading, keep the complete runtime backup, and use SQLite's backup
 API for live database backups rather than copying only the main file while WAL is active.
+
+## PR #23 integration with master — 2026-09-18
+
+Merged TypeSafe triage and configuration documentation from master into the SQLite/application
+branch. A marker-only resolution failed import-time graph validation because TRIAGING was
+undeclared. Added triage graph/recovery support, deferred application workspace validation
+until after triage, and retained atomic assessment/audit persistence and guarded operator release.
+Regression coverage includes application-scoped hold/restart/release, rejected unaudited
+release and rollback on audit-insert failure.
+
+Validation: 420 tests passed, 94.56% overall coverage, all per-file gates passed; 56 focused
+triage/catalog/lifecycle tests passed. Ruff, compileall, lock validation, wheel/sdist builds,
+12/12 offline contracts and scripted repair lifecycle passed. Extracted-wheel SQLite triage,
+hold, release and restart smoke passed. No static type checker or hosted preview is configured;
+no live TypeSafe request or deployment was performed.
