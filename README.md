@@ -101,6 +101,13 @@ enable `server.require_api_auth = true` to migrate. Setting the API token also e
 authentication when the compatibility flag is false. Health and agent discovery stay public.
 Credentials are environment values; configuration stores their variable names.
 
+For incidents that span a backend and frontend (or another set of related repositories), define
+an explicit application scope. Applications give one durable agent session repository-aware tools,
+per-repository verification and publication, and optional integration verification in the parent
+workspace. Configure them in the TUI's **Applications** tab or in `[[applications]]` TOML tables;
+see the [application-scoped repair guide](docs/application-scopes.md) for routing, worktrees,
+review/restart behavior, and the two-repository configuration example.
+
 ### Incident history and evaluations
 
 Grafana intake stores events, grouping keys, fingerprints, duplicate references, and task links
