@@ -30,6 +30,7 @@ from textual.widgets import (
 
 from .code_review import provision
 from .config import (
+    ApplicationConfig,
     CodeReviewConfig,
     Config,
     ConnectorConfig,
@@ -91,7 +92,7 @@ class ConfigurationApp(App[None]):
     Checkbox { margin-bottom: 1; }
     Label { color: $text; width: 1fr; height: auto; }
     Button { margin-right: 1; margin-bottom: 1; }
-    #repositories-list, #connectors-list { height: auto; }
+    #repositories-list, #connectors-list, #applications-list { height: auto; }
     .inline-status { height: auto; min-height: 1; color: $text-muted; margin-bottom: 1; }
     #status { height: auto; max-height: 5; overflow-y: auto; padding: 0 2; }
     #status.error { color: $error; }
@@ -133,6 +134,7 @@ class ConfigurationApp(App[None]):
         self._next_collection_id = 0
         self._repository_keys: list[str] = []
         self._connector_keys: list[str] = []
+        self._application_keys: list[str] = []
         self._github_repositories: dict[str, dict[str, GitHubRepository]] = {}
 
     def compose(self) -> ComposeResult:
@@ -146,6 +148,8 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._runtime_page(), classes="page")
             with TabPane("Repos", id="repositories-tab"):
                 yield VerticalScroll(*self._repositories_page(), classes="page")
+            with TabPane("Applications", id="applications-tab"):
+                yield VerticalScroll(*self._applications_page(), classes="page")
             with TabPane("Code review", id="code-review-tab"):
                 yield VerticalScroll(*self._code_review_page(), classes="page")
             with TabPane("Sources", id="connections-tab"):
@@ -496,6 +500,45 @@ class ConfigurationApp(App[None]):
             Button("Add repository", id="add-repository"),
         ]
 
+    def _applications_page(self) -> list[Any]:
+        applications = self.config.applications
+        forms: list[Any] = []
+        for application in applications:
+            key = self._new_key("application")
+            self._application_keys.append(key)
+            forms.append(self._application_form(key, application))
+        return [
+            Static(
+                "Applications group explicitly configured services and repositories into one "
+                "durable incident session. Membership is an authorization boundary; leave it "
+                "empty when using repository-only incidents."
+            ),
+            Vertical(*forms, id="applications-list"),
+            Button("Add application", id="add-application"),
+        ]
+
+    def _application_form(
+        self, key: str, application: ApplicationConfig | None = None
+    ) -> Vertical:
+        if application is None:
+            application = ApplicationConfig.model_construct(
+                name="", services=[], repositories=[], integration_command=""
+            )
+        prefix = f"application-{key}"
+        return Vertical(
+            Label("Application name"),
+            self._input(application.name, f"{prefix}-name", placeholder="checkout"),
+            Label("Services (comma-separated)"),
+            self._input(", ".join(application.services), f"{prefix}-services"),
+            Label("Member repositories (comma-separated)"),
+            self._input(", ".join(application.repositories), f"{prefix}-repositories"),
+            Label("Integration command (optional; runs in application session workspace)"),
+            self._input(application.integration_command, f"{prefix}-integration-command"),
+            Button("Remove application", id=f"remove-{key}"),
+            id=key,
+            classes="card",
+        )
+
     def _connections_page(self) -> list[Any]:
         forms: list[Any] = []
         for connector in self.config.connectors:
@@ -788,7 +831,7 @@ class ConfigurationApp(App[None]):
         )
         repositories = [self._collect_repository(key) for key in self._repository_keys]
         connectors = [self._collect_connector(key) for key in self._connector_keys]
-        draft = Config(
+        values: dict[str, Any] = dict(
             runtime_root=self._value("runtime-root").strip(),
             max_concurrent_tasks=self._number("max-concurrent-tasks", integer=True),
             poll_interval_seconds=self._number("worker-poll-interval"),
@@ -805,8 +848,19 @@ class ConfigurationApp(App[None]):
             repositories=repositories,
             connectors=connectors,
         )
+        values["applications"] = [self._collect_application(key) for key in self._application_keys]
+        draft = Config(**values)
         # model_copy deliberately permits incomplete drafts; validate all nested fields on save.
         return Config.model_validate(draft.model_dump())
+
+    def _collect_application(self, key: str) -> Any:
+        prefix = f"application-{key}"
+        return ApplicationConfig(
+            name=self._value(f"{prefix}-name").strip(),
+            services=self._split(self._value(f"{prefix}-services")),
+            repositories=self._split(self._value(f"{prefix}-repositories")),
+            integration_command=self._value(f"{prefix}-integration-command").strip(),
+        )
 
     def _collect_repository(self, key: str) -> RepositoryConfig:
         prefix = f"repo-{key}"
@@ -1078,6 +1132,11 @@ class ConfigurationApp(App[None]):
             self._connector_keys.append(key)
             await self.query_one("#connectors-list", Vertical).mount(self._connector_form(key))
             return
+        if button_id == "add-application":
+            key = self._new_key("application")
+            self._application_keys.append(key)
+            await self.query_one("#applications-list", Vertical).mount(self._application_form(key))
+            return
         if button_id.startswith("github-login-repository-"):
             await self._load_github_repositories(button_id.removeprefix("github-login-"))
             return
@@ -1090,12 +1149,18 @@ class ConfigurationApp(App[None]):
         if button_id == "test-subscription-cli":
             await self._test_subscription_cli()
             return
-        if button_id.startswith("remove-repository-") or button_id.startswith("remove-connector-"):
+        if (
+            button_id.startswith("remove-repository-")
+            or button_id.startswith("remove-connector-")
+            or button_id.startswith("remove-application-")
+        ):
             key = button_id.removeprefix("remove-")
             if key.startswith("repository-"):
                 self._repository_keys.remove(key)
-            else:
+            elif key.startswith("connector-"):
                 self._connector_keys.remove(key)
+            else:
+                self._application_keys.remove(key)
             await self.query_one(f"#{key}").remove()
             return
         if button_id != "save":
