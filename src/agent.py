@@ -80,7 +80,7 @@ class AgentRunContext:
 
 
 class _CompactingSession:
-    """Bound a file-backed SDK session while retaining a task-memory checkpoint."""
+    """Bound a SQLite-backed SDK session while retaining a task-memory checkpoint."""
 
     def __init__(
         self,
@@ -630,6 +630,7 @@ class OpenAIAgentsBackend:
         model = self._model(agents_module) if agents_module else self.config.model.name
         session: Any | None = None
         if run_context is not None:
+
             def durable_session(session_id: str) -> Any:
                 file_session = FileSession(session_id, db_path=run_context.session_db)
                 return (
@@ -1526,7 +1527,7 @@ class IncidentAgent:
                 run_context = AgentRunContext(
                     task=task,
                     session_id=session_id,
-                    session_db=self.storage.root / "sessions",
+                    session_db=self.storage.root / "runtime.sqlite3",
                     lifecycle=lifecycle,
                     save_backend_session=save_backend_session,
                     memory_writer=lambda value: self.storage.append_task_memory(

@@ -12,7 +12,7 @@ from src.models import Incident, TaskState
 from src.storage import Storage
 
 
-def test_fresh_runtime_uses_files_and_can_resume_in_another_process(tmp_path):
+def test_fresh_runtime_uses_sqlite_and_can_resume_in_another_process(tmp_path):
     storage = Storage(tmp_path)
     task = storage.create_task(
         Incident(
@@ -20,7 +20,7 @@ def test_fresh_runtime_uses_files_and_can_resume_in_another_process(tmp_path):
             source="test",
             repository="example/service",
             environment="production",
-            summary="Persist the incident without a database",
+            summary="Persist the incident in SQLite",
         )
     )
     storage.transition(task.task_id, TaskState.COLLECTING_CONTEXT)
@@ -45,15 +45,16 @@ print(json.dumps({"state": task.state.value,
     assert recovered["state"] == "collecting_context"
     assert recovered["messages"] == [["user", "preserve this evidence"]]
     assert recovered["events"] == ["task.received", "task.collecting_context"]
-    assert not list(tmp_path.rglob("*.sqlite*"))
-    assert not list(tmp_path.rglob("*.db"))
+    assert (tmp_path / "runtime.sqlite3").is_file()
+    assert not (tmp_path / "tasks.json").exists()
+    assert not (tmp_path / "sessions" / "messages.json").exists()
 
 
-def test_runtime_scaffolds_do_not_create_sqlite_files():
+def test_runtime_scaffolds_declare_sqlite_database():
     from pathlib import Path
 
     for name in ("src/runtime.tree", ".seed/specs/runtime.tree"):
-        assert ".sqlite" not in Path(name).read_text()
+        assert "runtime.sqlite3" in Path(name).read_text()
 
 
 def test_illegal_transition_preserves_state_and_event_journal(tmp_path):
