@@ -1,9 +1,8 @@
 # Execution graph assessment
 
-Implementation follow-up: the lifecycle now has declarative transitions and file-backed
-operation checkpoints. The user subsequently required runtime persistence in files; the
-SQLite recommendation below records the original assessment, not the final storage choice.
-See the README for the implemented file layout and migration procedure.
+Implementation follow-up: the lifecycle now has declarative transitions and durable operation
+checkpoints. Runtime persistence uses SQLite tables, with one-time imports of the intervening
+JSON stores. See the README for the current layout and migration procedure.
 
 Assessed 2026-09-17 against the current working tree on `fix/crash-resilient-execution`
 (HEAD `ef4bcf4`, with pre-existing local modifications). No VISION.md was present.

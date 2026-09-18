@@ -357,7 +357,8 @@ class WorkflowEngine:
 
     def _operations(self, task_id: str) -> OperationLedger:
         return OperationLedger(
-            self.storage.root / "operations" / f"{task_id}.json",
+            self.storage.root / "runtime.sqlite3",
+            namespace=task_id,
             max_attempts=self.config.model.max_task_iterations,
             overall_cap=self.config.model.max_task_iterations * 2,
         )

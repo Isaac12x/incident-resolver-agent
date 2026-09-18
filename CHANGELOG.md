@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Store harness task state, events, leases, sessions, incident history, metrics, and operation
-  checkpoints in atomic JSON files; import legacy SQLite state read-only and retain the originals.
+  checkpoints in indexed SQLite tables with transactional updates. Import current JSON state
+  once, prefer it over older SQLite sources, and retain readable artifacts and original sources.
 - Declare and validate lifecycle transitions at the shared persistence boundary, retaining the
   agent reasoning loop and existing verification gates.
 - Persist publication and deployment-verification attempts and outcomes across restarts, with

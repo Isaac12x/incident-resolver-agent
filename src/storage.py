@@ -10,11 +10,11 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
-from .file_store import JsonFile
 from .models import Incident, TaskEvent, TaskRecord, TaskState, new_task_id, utc_now
+from .sqlite_store import connect, transaction
 from .task_catalog import TaskCatalog
 from .telemetry import Telemetry
 from .tooling import repository_candidates
@@ -52,7 +52,7 @@ class Storage:
         global_memory = self.root / "memory" / "global.md"
         global_memory.touch(exist_ok=True)
         self._initialise_sessions()
-        self.catalog = TaskCatalog(self.root / "tasks.json")
+        self.catalog = TaskCatalog(self.runtime_db)
         self._migrate_catalog()
         self.telemetry = Telemetry(self.root)
 
@@ -80,65 +80,128 @@ class Storage:
                     continue
 
     def _initialise_sessions(self) -> None:
-        import sqlite3
-        from contextlib import closing
+        self.runtime_db = self.root / "runtime.sqlite3"
+        with transaction(self.runtime_db) as db:
+            db.executescript(
+                "CREATE TABLE IF NOT EXISTS messages ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, "
+                "role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);"
+                "CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);"
+                "CREATE TABLE IF NOT EXISTS observability_events ("
+                "event_id TEXT PRIMARY KEY, source TEXT NOT NULL, group_key TEXT NOT NULL, "
+                "fingerprint TEXT NOT NULL, payload TEXT NOT NULL, received_at TEXT NOT NULL, "
+                "duplicate_of TEXT, task_id TEXT);"
+                "CREATE INDEX IF NOT EXISTS observability_received "
+                "ON observability_events(received_at);"
+                "CREATE INDEX IF NOT EXISTS observability_group "
+                "ON observability_events(source, group_key, fingerprint, received_at);"
+                "CREATE TABLE IF NOT EXISTS incident_history ("
+                "task_id TEXT PRIMARY KEY, external_id TEXT NOT NULL, source TEXT NOT NULL, "
+                "repository TEXT NOT NULL, environment TEXT NOT NULL, summary TEXT NOT NULL, "
+                "description TEXT NOT NULL, root_cause TEXT, outcome TEXT, "
+                "created_at TEXT NOT NULL);"
+                "CREATE INDEX IF NOT EXISTS incident_history_created "
+                "ON incident_history(created_at);"
+            )
+        self._migrate_session_rows()
 
-        sessions = self.root / "sessions"
-        self.messages_store = JsonFile(
-            sessions / "messages.json", lambda: {"version": 1, "messages": []}
-        )
-        self.events_store = JsonFile(
-            sessions / "observability.json", lambda: {"version": 1, "events": []}
-        )
-        self.history_store = JsonFile(
-            sessions / "history.json", lambda: {"version": 1, "history": []}
-        )
-        specs = [
-            (
-                self.messages_store,
-                "messages",
-                "messages",
-                "conversation_id, role, content, created_at",
-            ),
-            (
-                self.events_store,
-                "events",
+    def _migrate_session_rows(self) -> None:
+        """Import current JSON snapshots, or the old session database, once."""
+        import sqlite3
+
+        specs = {
+            "messages": ("messages", "conversation_id, role, content, created_at"),
+            "observability": (
                 "observability_events",
                 "event_id, source, group_key, fingerprint, payload, received_at, "
                 "duplicate_of, task_id",
             ),
-            (
-                self.history_store,
-                "history",
+            "history": (
                 "incident_history",
-                "task_id, external_id, source, repository, environment, summary, description, "
-                "root_cause, outcome, created_at",
+                "task_id, external_id, source, repository, environment, summary, "
+                "description, root_cause, outcome, created_at",
             ),
-        ]
+        }
+        sessions = self.root / "sessions"
         legacy = self.root / "sessions.sqlite3"
-        if not legacy.exists() or all(store.path.exists() for store, *_ in specs):
-            return
-        with closing(sqlite3.connect(legacy.resolve().as_uri() + "?mode=ro", uri=True)) as db:
-            tables = {
-                row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
-            for store, key, table, columns in specs:
-                if store.path.exists():
+        with transaction(self.runtime_db) as db:
+            for name, (table, columns) in specs.items():
+                marker = f"session-v1:{name}"
+                if db.execute(
+                    "SELECT 1 FROM runtime_migrations WHERE name=?", (marker,)
+                ).fetchone():
                     continue
-                # Identifiers come only from the constant specifications above.
-                rows = (
-                    db.execute(f"SELECT {columns} FROM {table} ORDER BY rowid").fetchall()
-                    if table in tables
-                    else []
-                )
-                records = [dict(zip(columns.split(", "), row, strict=True)) for row in rows]
-                if key == "events":
+                json_path = sessions / f"{name}.json"
+                if json_path.exists():
+                    try:
+                        document = json.loads(json_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as error:
+                        raise ValueError(f"cannot read session snapshot: {json_path}") from error
+                    if not isinstance(document, dict) or document.get("version") != 1:
+                        raise ValueError(f"invalid session snapshot: {json_path}")
+                    records = (
+                        document.get(name if name != "observability" else "events")
+                        if isinstance(document, dict)
+                        else None
+                    )
+                    if not isinstance(records, list):
+                        raise ValueError(f"invalid session snapshot: {json_path}")
+                    required = columns.split(", ")
                     for record in records:
-                        record["payload"] = json.loads(record["payload"])
-                with store.transaction() as data:
-                    if store.path.exists():
-                        continue  # A concurrent importer or writer has already committed.
-                    data[key] = records
+                        if not isinstance(record, dict) or any(
+                            field not in record for field in required
+                        ):
+                            raise ValueError(f"invalid session snapshot: {json_path}")
+                        if name == "observability":
+                            record = dict(record)
+                            if not isinstance(record["payload"], dict):
+                                raise ValueError(f"invalid session snapshot: {json_path}")
+                            record["payload"] = json.dumps(
+                                record["payload"], ensure_ascii=False, sort_keys=True
+                            )
+                        values = tuple(record.get(column) for column in columns.split(", "))
+                        db.execute(
+                            f"INSERT INTO {table} ({columns}) VALUES "
+                            f"({','.join('?' for _ in values)})",
+                            values,
+                        )
+                    db.execute("INSERT INTO runtime_migrations(name) VALUES (?)", (marker,))
+                    continue
+                if legacy.exists():
+                    try:
+                        with closing(
+                            sqlite3.connect(legacy.resolve().as_uri() + "?mode=ro", uri=True)
+                        ) as source:
+                            table_exists = source.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                (table,),
+                            ).fetchone()
+                            rows = (
+                                source.execute(
+                                    f"SELECT {columns} FROM {table} ORDER BY rowid"
+                                ).fetchall()
+                                if table_exists
+                                else []
+                            )
+                    except (OSError, sqlite3.DatabaseError) as error:
+                        raise ValueError(
+                            f"cannot read legacy session database: {legacy}"
+                        ) from error
+                    for row in rows:
+                        values = list(row)
+                        if name == "observability":
+                            try:
+                                json.loads(values[4])
+                            except (TypeError, json.JSONDecodeError) as error:
+                                raise ValueError(
+                                    f"invalid legacy observability event: {legacy}"
+                                ) from error
+                        db.execute(
+                            f"INSERT INTO {table} ({columns}) VALUES "
+                            f"({','.join('?' for _ in values)})",
+                            values,
+                        )
+                db.execute("INSERT INTO runtime_migrations(name) VALUES (?)", (marker,))
 
     def record_observability_event(
         self, source: str, payload: dict[str, object], *, task_id: str | None = None
@@ -177,9 +240,10 @@ class Storage:
         fingerprint = ",".join(sorted(fingerprints)) or str(payload.get("external_id") or "")
         event_id = hashlib.sha256(f"{source}\0{encoded}".encode()).hexdigest()
         received = utc_now().isoformat()
-        with self.events_store.transaction() as data:
-            records = data.setdefault("events", [])
-            prior = next((r for r in records if r["event_id"] == event_id), None)
+        with transaction(self.runtime_db) as db:
+            prior = db.execute(
+                "SELECT * FROM observability_events WHERE event_id=?", (event_id,)
+            ).fetchone()
             if prior:
                 return {
                     "event_id": event_id,
@@ -187,30 +251,29 @@ class Storage:
                     "fingerprint": fingerprint,
                     "duplicate": True,
                     "duplicate_of": prior["event_id"],
-                    "task_id": prior.get("task_id"),
+                    "task_id": prior["task_id"],
                 }
-            grouped = next(
-                (
-                    r
-                    for r in sorted(records, key=lambda item: item["received_at"], reverse=True)
-                    if fingerprint
-                    and r["source"] == source
-                    and r["group_key"] == group_key
-                    and r.get("fingerprint") == fingerprint
-                ),
-                None,
+            grouped = (
+                db.execute(
+                    "SELECT event_id FROM observability_events WHERE source=? "
+                    "AND group_key=? AND fingerprint=? ORDER BY received_at DESC LIMIT 1",
+                    (source, group_key, fingerprint),
+                ).fetchone()
+                if fingerprint
+                else None
             )
-            records.append(
-                {
-                    "event_id": event_id,
-                    "source": source,
-                    "group_key": group_key,
-                    "fingerprint": fingerprint,
-                    "payload": payload,
-                    "received_at": received,
-                    "duplicate_of": grouped["event_id"] if grouped else None,
-                    "task_id": task_id,
-                }
+            db.execute(
+                "INSERT INTO observability_events VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    event_id,
+                    source,
+                    group_key,
+                    fingerprint,
+                    json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False),
+                    received,
+                    grouped["event_id"] if grouped else None,
+                    task_id,
+                ),
             )
         return {
             "event_id": event_id,
@@ -226,19 +289,30 @@ class Storage:
     ) -> list[dict[str, object]]:
         if not 1 <= limit <= 500:
             raise ValueError("event limit must be between 1 and 500")
-        rows = self.events_store.read().get("events", [])
-        return [
-            r
-            for r in sorted(rows, key=lambda item: item["received_at"], reverse=True)
-            if (not source or r["source"] == source)
-            and (not group_key or r["group_key"] == group_key)
-        ][:limit]
+        with connect(self.runtime_db) as db:
+            query = "SELECT * FROM observability_events WHERE 1=1"
+            params: list[object] = []
+            if source:
+                query += " AND source=?"
+                params.append(source)
+            if group_key:
+                query += " AND group_key=?"
+                params.append(group_key)
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    query + " ORDER BY received_at DESC LIMIT ?", (*params, limit)
+                )
+            ]
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
 
     def attach_event_task(self, event_id: str, task_id: str) -> None:
-        with self.events_store.transaction() as data:
-            for event in data.get("events", []):
-                if event["event_id"] == event_id:
-                    event["task_id"] = task_id
+        with transaction(self.runtime_db) as db:
+            db.execute(
+                "UPDATE observability_events SET task_id=? WHERE event_id=?", (task_id, event_id)
+            )
 
     def record_incident_history(
         self,
@@ -248,37 +322,37 @@ class Storage:
         root_cause: str | None = None,
         outcome: str | None = None,
     ) -> None:
-        with self.history_store.transaction() as data:
-            row = next((r for r in data.setdefault("history", []) if r["task_id"] == task_id), None)
-            if row is None:
-                row = {
-                    "task_id": task_id,
-                    "external_id": incident.external_id,
-                    "source": incident.source,
-                    "repository": incident.repository,
-                    "environment": incident.environment,
-                    "summary": incident.summary,
-                    "description": incident.description,
-                    "root_cause": root_cause,
-                    "outcome": outcome,
-                    "created_at": incident.received_at.isoformat(),
-                }
-                data["history"].append(row)
-            else:
-                if root_cause is not None:
-                    row["root_cause"] = root_cause
-                if outcome is not None:
-                    row["outcome"] = outcome
+        with transaction(self.runtime_db) as db:
+            db.execute(
+                "INSERT INTO incident_history VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(task_id) DO UPDATE SET "
+                "root_cause=COALESCE(excluded.root_cause, root_cause), "
+                "outcome=COALESCE(excluded.outcome, outcome)",
+                (
+                    task_id,
+                    incident.external_id,
+                    incident.source,
+                    incident.repository,
+                    incident.environment,
+                    incident.summary,
+                    incident.description,
+                    root_cause,
+                    outcome,
+                    incident.received_at.isoformat(),
+                ),
+            )
 
     def incident_history(
         self, *, labeled_only: bool = False, limit: int = 1000
     ) -> list[dict[str, object]]:
-        rows = self.history_store.read().get("history", [])
-        return [
-            r
-            for r in sorted(rows, key=lambda item: item["created_at"], reverse=True)
-            if not labeled_only or r.get("root_cause")
-        ][:limit]
+        with connect(self.runtime_db) as db:
+            query = "SELECT * FROM incident_history"
+            if labeled_only:
+                query += " WHERE root_cause IS NOT NULL AND root_cause != ''"
+            return [
+                dict(row)
+                for row in db.execute(query + " ORDER BY created_at DESC LIMIT ?", (limit,))
+            ]
 
     @staticmethod
     def _json_write(path: Path, value: object) -> None:
@@ -464,22 +538,21 @@ class Storage:
             handle.write(content.rstrip() + "\n")
 
     def add_message(self, conversation_id: str, role: str, content: str) -> None:
-        with self.messages_store.transaction() as data:
-            data.setdefault("messages", []).append(
-                {
-                    "conversation_id": conversation_id,
-                    "role": role,
-                    "content": content,
-                    "created_at": utc_now().isoformat(),
-                }
+        with transaction(self.runtime_db) as db:
+            db.execute(
+                "INSERT INTO messages(conversation_id,role,content,created_at) VALUES (?,?,?,?)",
+                (conversation_id, role, content, utc_now().isoformat()),
             )
 
     def messages(self, conversation_id: str) -> list[tuple[str, str]]:
-        return [
-            (str(r["role"]), str(r["content"]))
-            for r in self.messages_store.read().get("messages", [])
-            if r["conversation_id"] == conversation_id
-        ]
+        with connect(self.runtime_db) as db:
+            return [
+                (str(r["role"]), str(r["content"]))
+                for r in db.execute(
+                    "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id",
+                    (conversation_id,),
+                )
+            ]
 
     def search_messages(
         self,
@@ -494,11 +567,15 @@ class Storage:
             raise ValueError("conversation search pattern must contain 1-500 characters")
         if not 1 <= limit <= 50:
             raise ValueError("conversation search limit must be between 1 and 50")
-        rows = [
-            (r["role"], r["content"], r["created_at"])
-            for r in self.messages_store.read().get("messages", [])
-            if r["conversation_id"] == conversation_id
-        ]
+        with connect(self.runtime_db) as db:
+            rows = [
+                tuple(r)
+                for r in db.execute(
+                    "SELECT role,content,created_at FROM messages "
+                    "WHERE conversation_id=? ORDER BY id",
+                    (conversation_id,),
+                )
+            ]
         if not rows:
             return []
         corpus = "".join(
