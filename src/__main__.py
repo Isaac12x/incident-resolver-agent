@@ -22,6 +22,7 @@ from .bundles import (
     rollback_bundle,
 )
 from .config import ConnectorConfig, load_config, save_config
+from .dashboard.cli import add_dashboard_parser, run_dashboard_command
 from .lifecycle import (
     bootstrap,
     default_config_path,
@@ -112,6 +113,7 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     tree = commands.add_parser("tree", help="capture a structured tree with seed-cli")
     tree.add_argument("path", type=Path, nargs="?", default=Path("."))
     tree.add_argument("--out", type=Path, default=Path("structure.seed"))
+    add_dashboard_parser(commands)
     return parser.parse_args(argv)
 
 
@@ -125,17 +127,21 @@ async def _worker(application: Application) -> None:
 
 async def _run_direct(application: Application, path: Path) -> None:
     incident = Incident.model_validate_json(path.read_text(encoding="utf-8"))
-    task = await application.workflow.submit(incident)
-    while task.state not in {
-        TaskState.WAITING_FOR_DEPLOYMENT,
-        TaskState.WAITING_FOR_REVIEW,
-        TaskState.COMPLETED,
-        TaskState.BLOCKED,
-        TaskState.FAILED,
-        TaskState.CANCELLED,
-    }:
-        task = await application.workflow.process(task.task_id)
-    print(json.dumps(task.model_dump(mode="json"), indent=2))
+    await application.connectors.start()
+    try:
+        task = await application.workflow.submit(incident)
+        while task.state not in {
+            TaskState.WAITING_FOR_DEPLOYMENT,
+            TaskState.WAITING_FOR_REVIEW,
+            TaskState.COMPLETED,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }:
+            task = await application.workflow.process(task.task_id)
+        print(json.dumps(task.model_dump(mode="json"), indent=2))
+    finally:
+        await application.connectors.stop()
 
 
 def _load_eval_records(path: Path) -> list[dict[str, object]]:
@@ -196,6 +202,14 @@ def main(argv: list[str] | None = None) -> None:
             print(rendered)
         if report.get("failed", 0):
             raise SystemExit(1)
+        return
+    # Dashboard startup is deliberately before bootstrap, readiness checks, and
+    # Application.build: it is a read-only process over an existing runtime.
+    if args.command == "dashboard":
+        config_path = args.config or default_config_path()
+        result = run_dashboard_command(args, config_path)
+        if result:
+            raise SystemExit(result)
         return
     if args.command == "update":
         managed_tools: tuple[str, ...] = ()
