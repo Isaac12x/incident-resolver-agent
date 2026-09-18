@@ -1,13 +1,13 @@
 # Incident Harness
 
 A durable, long-horizon agent harness that turns production incidents into locally tested,
-deployment-verified pull requests. Every intake protocol uses one file-backed workflow, so
+deployment-verified pull requests. Every intake protocol uses one durable workflow, so
 tasks remain inspectable and recoverable while the process is running or after a restart.
 
 ## What is implemented
 
 - Incident intake over signed HTTP webhooks, MCP-compatible endpoints, A2A endpoints, and JSON files.
-- Atomic JSON task state and event history, readable `.agent/tasks` artifacts, and file-backed conversation history.
+- Transactional SQLite runtime state and event history, readable `.agent/tasks` artifacts, and durable conversation history.
 - Incident deduplication and restart recovery without an external queue.
 - Per-task Git worktrees backed by one bare mirror per configured repository.
 - One durable lead-agent session per task, with stable research and implementation sub-agent
@@ -147,10 +147,10 @@ actual search method. Production quality and cost require representative data an
 
 ### Runtime policies and versions
 
-Task state, event order, worker leases, and workspace identity are stored together in `tasks.json`.
-Task folders contain readable artifacts and can be reconstructed from the file catalog; their location
-is not the scheduling authority. Existing task folders migrate on startup. File transactions use
-process locks, atomic replacement, and file/directory synchronization to preserve committed state.
+Task state, event order, worker leases, and workspace identity are stored in `runtime.sqlite3`.
+Task folders contain readable artifacts and can be reconstructed from the catalog; their location
+is not the scheduling authority. Existing task folders migrate on startup. SQLite transactions
+commit task transitions and their events together; WAL permits readers alongside a writer.
 `logs/runtime.jsonl` contains rotating structured operation records. Authenticated `/metrics`
 exports persisted counts, failures, and elapsed time; `/mcp/resources/metrics` returns JSON.
 
@@ -484,7 +484,7 @@ restart automatically when authentication is repaired or the service restarts.
 Concurrent incidents wait for a busy repository lock without consuming their failure budget.
 
 The same tab selects the execution runtime. `agents-sdk` uses the configured API endpoint and keeps
-the task and sub-agent histories in JSON files under `.agent/sessions/`. `subscription-cli` starts `codex --yolo
+the task and sub-agent histories in `.agent/runtime.sqlite3`. `subscription-cli` starts `codex --yolo
 exec` by default and reuses device OAuth already completed by the host CLI. It captures the CLI thread ID,
 uses `codex --yolo exec resume` after external deployment or review events, translates eligible configured
 MCP servers into CLI configuration, and exposes authenticated per-run lifecycle commands. Change
@@ -559,7 +559,7 @@ GitHub adapter before waiting for a fresh deployment.
 ### Crash recovery
 
 Run the worker again with the same `runtime_root` after a crash (systemd restarts the
-service automatically). Atomic JSON files store the latest lifecycle state, review requests, and
+service automatically). SQLite transactions store the latest lifecycle state, review requests, and
 session identity; worktrees and task memory remain on disk. The worker scans unfinished
 work at startup and every `poll_interval_seconds`, including intake committed before its
 in-memory wakeup was delivered. Subscription CLI thread IDs are saved when the CLI emits
@@ -573,27 +573,27 @@ retried. This does not provide exactly-once execution for arbitrary shell comman
 external side effects, or recovery after the runtime directory is lost. Terminal tasks
 remain terminal, and deployment/review waits still require their corresponding events.
 
-### File storage and lifecycle routing
+### Runtime storage and lifecycle routing
 
-Harness-owned runtime state is stored as inspectable files:
+Harness-owned runtime state is stored in indexed tables in `runtime.sqlite3`:
 
-| Path under `runtime_root` | Contents |
+| Data | Storage |
 | --- | --- |
-| `tasks.json` | Task records, ordered events, leases, and workspace identities |
-| `sessions/messages.json` | Conversation recall history |
-| `sessions/observability.json` | Intake events and deduplication metadata |
-| `sessions/history.json` | Incident labels and outcomes |
-| `sessions/<session-hash>.json` | SDK lead and subagent conversation items |
-| `telemetry.json` | Persisted metrics |
-| `operations/<task-id>.json` | Publication and deployment-verification attempts and outcomes |
-| `tasks/<bucket>/<task-id>/` | Readable snapshots, memory, and verification artifacts |
+| Task records, ordered events, leases, workspace identities | SQLite catalog tables |
+| Conversation recall, intake events, incident outcomes | SQLite history tables |
+| SDK lead and subagent conversation items | SQLite session tables |
+| Persisted metrics | SQLite metric rows |
+| Publication and deployment-verification attempts and outcomes | SQLite operation tables |
+| Readable snapshots, memory, verification evidence | `tasks/<bucket>/<task-id>/` files |
+| Rotating structured audit logs | `logs/runtime.jsonl` |
 
-Stop existing workers before upgrading a runtime directory. On first use, legacy SQLite
-catalogs, conversation histories, and metrics are imported read-only when their corresponding
-file store does not yet exist. Legacy databases are preserved; newer file state takes precedence.
-Back up the entire runtime directory, including worktrees. Do not run old SQLite-writing workers
-alongside the new runtime. The third-party `.code-review-graph/graph.db` remains a rebuildable
-repository index; it is not the authority for incident state or conversation history.
+Stop existing workers before upgrading a runtime directory and back up the entire directory,
+including worktrees. Each store imports existing JSON state once in a transaction; JSON takes
+precedence over older SQLite state. Import markers prevent stale source files from overwriting
+subsequent updates or restoring cleared histories. Original files and legacy databases are retained.
+Do not run old workers alongside workers using `runtime.sqlite3`.
+The third-party `.code-review-graph/graph.db` remains a rebuildable repository index;
+it is not the authority for incident state or conversation history.
 
 The lifecycle graph declares legal task transitions and validates its topology at startup.
 Transition validation, state changes, and their events are committed together. Existing evidence,
@@ -605,9 +605,11 @@ Publication and deployment verification retain operation attempts across restart
 per input revision and across the task. Their journals record intent before execution and outcome
 afterward. Interrupted external writes may still require reconciliation or replay; a checkpoint
 does not make arbitrary shell commands or remote services execute exactly once.
-File stores serialize writes and rewrite their JSON documents; use a local filesystem with
-working POSIX locks and atomic renames. This design favors inspectability for a local worker
-over high-volume distributed storage.
+SQLite uses WAL, a busy timeout, and full synchronization on a local filesystem. Writes update
+individual records and serialize per database; readers can continue during a write. Keep
+transactions short. This remains a local runtime, not a database shared over a network filesystem.
+For a live backup, use SQLite’s backup API; copying only the database while WAL writes are active
+can omit committed data. A stopped-worker backup should preserve the entire runtime directory.
 
 ### Adding skills
 
@@ -731,7 +733,7 @@ source file as well as at least 90% aggregate coverage.
 
 ## Architecture
 
-The implementation uses one asyncio event loop, small responsibility-based modules, JSON task
+The implementation uses one asyncio event loop, small responsibility-based modules, SQLite task
 state and session history, and no additional workflow framework. The workflow owns transition
 validation, retries, deployment events, and recovery. Each task's durable lead session decides when
 to investigate, delegate, edit, test, remember, and publish by calling the workflow's lifecycle tools.

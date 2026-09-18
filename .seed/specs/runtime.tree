@@ -1,8 +1,7 @@
 ./
 └── <runtime_root>/
     ├── config.toml
-    ├── sessions/
-    │   └── ...
+    ├── runtime.sqlite3
     ├── memory/
     │   ├── global.md
     │   └── repositories/

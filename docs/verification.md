@@ -78,3 +78,30 @@ confirmed task and SDK session persistence without creating SQLite files.
 No static type checker is configured. No live model, production deployment, or remote
 preview verification was performed. Performance/token improvements are not benchmarked.
 Stop old workers before migration; preserve the full runtime directory and legacy databases.
+
+
+## SQLite runtime state — 2026-09-18
+
+Replaced whole-document runtime JSON updates with indexed tables in one `runtime.sqlite3`.
+Tasks and transition events, leases, workspace identities, conversations, SDK session items,
+observability/history, metric counters, and operation attempts now use SQLite transactions.
+Readable artifacts and rotating JSONL logs remain files. Migration markers prevent stale JSON
+or older SQLite sources from overwriting committed data; original sources are preserved.
+
+Validation: 345 tests passed, 95.18% aggregate coverage, every source module above 90%.
+Tests cover transaction rollback, process death before commit, WAL readers during writes,
+concurrent deduplication, leases, session appends, metric increments, operation budgets,
+source precedence, corrupt imports, and restart behavior. The test run emitted SQLite
+ResourceWarnings; assertions and coverage gates passed. Ruff, compileall, uv lock --check,
+and wheel/sdist builds passed. No static type checker is configured.
+
+All 12 offline contracts and the scripted repair lifecycle passed (completed, zero unsafe
+attempts). An isolated extracted-wheel smoke verified fresh runtime creation and migrated
+a fixture produced by the previous committed JSON implementation. It retained task state,
+ordered events, conversations, alert/history data, SDK history, metrics and operation budgets;
+all seven original JSON sources remained byte-identical. Session clearing and lease exclusion
+survived restarts; SQLite integrity and foreign-key checks passed. No live model, production
+deployment, or remote preview was exercised. Performance improvements were not benchmarked.
+
+Stop old workers before upgrading, keep the complete runtime backup, and use SQLite's backup
+API for live database backups rather than copying only the main file while WAL is active.
