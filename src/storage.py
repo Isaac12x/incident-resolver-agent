@@ -364,7 +364,9 @@ class Storage:
             self.task_directory(task.task_id) / "state.json", task.model_dump(mode="json")
         )
 
-    def transition(self, task_id: str, state: TaskState, **updates: object) -> TaskRecord:
+    def transition(
+        self, task_id: str, state: TaskState, *, event: TaskEvent | None = None, **updates: object
+    ) -> TaskRecord:
         task = self.load_task(task_id)
         task.state = state
         for key, value in updates.items():
@@ -372,7 +374,7 @@ class Storage:
                 raise ValueError(f"unknown task field: {key}")
             setattr(task, key, value)
         task.updated_at = utc_now()
-        self.catalog.save(task, TaskEvent(type=f"task.{state.value}"))
+        self.catalog.save(task, event or TaskEvent(type=f"task.{state.value}"))
         self.telemetry.record(
             "task.transition",
             task_id=task_id,

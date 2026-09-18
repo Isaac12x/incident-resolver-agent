@@ -371,11 +371,21 @@ class ExecutionConfig(BaseModel):
         return value
 
 
+class TriageConfig(BaseModel):
+    enabled: bool = False
+    mode: Literal["shadow", "enforce"] = "shadow"
+    model: str = Field("jev-1.13.0", min_length=1)
+    api_key_env: str = Field("TYPESAFE_API_KEY", pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    timeout_seconds: float = Field(10, gt=0, le=60)
+    review_threshold: float = Field(0.95, gt=0.5, le=1)
+
+
 class Config(BaseModel):
     runtime_root: Path = Path(".agent")
     max_concurrent_tasks: int = Field(2, ge=1)
     poll_interval_seconds: float = Field(2, gt=0)
     model: ModelConfig = Field(default_factory=ModelConfig)
+    triage: TriageConfig = Field(default_factory=TriageConfig)
     trigger: TriggerConfig = Field(default_factory=TriggerConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
@@ -473,6 +483,7 @@ def save_config(config: Config, path: Path = Path(".agent/config.toml")) -> None
     lines.append("")
     for section in (
         "model",
+        "triage",
         "trigger",
         "agent",
         "safety",
