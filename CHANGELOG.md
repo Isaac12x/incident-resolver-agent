@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add GitHub Pages-ready documentation with a complete configuration reference, validated
+  example TOML, configuration discovery and credential guidance, and publishing instructions.
+
 - Add optional TypeSafe triage before worktree creation, with shadow evaluation, explicit non-code
   review holds, operator release, bounded provider fallback, and durable versioned assessments.
   Expose configuration in the TUI and include the credential reference in systemd exports.
