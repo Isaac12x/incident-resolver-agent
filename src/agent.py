@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from .adaptive import AdaptiveToolRouter, ToolPolicy
 from .config import Config
 from .extensions import TrustedToolRegistry
+from .file_session import FileSession
 from .models import (
     FixResult,
     InvestigationResult,
@@ -79,7 +80,7 @@ class AgentRunContext:
 
 
 class _CompactingSession:
-    """Bound a SQLite SDK session while retaining an extractive task-memory checkpoint."""
+    """Bound a file-backed SDK session while retaining a task-memory checkpoint."""
 
     def __init__(
         self,
@@ -629,13 +630,11 @@ class OpenAIAgentsBackend:
         model = self._model(agents_module) if agents_module else self.config.model.name
         session: Any | None = None
         if run_context is not None:
-            from agents import SQLiteSession
-
             def durable_session(session_id: str) -> Any:
-                sqlite_session = SQLiteSession(session_id, db_path=run_context.session_db)
+                file_session = FileSession(session_id, db_path=run_context.session_db)
                 return (
                     _CompactingSession(
-                        sqlite_session,
+                        file_session,
                         threshold=self.config.model.compaction_threshold,
                         keep=self.config.model.session_history_limit,
                         memory_writer=lambda value: self._write_compaction_memory(
@@ -643,7 +642,7 @@ class OpenAIAgentsBackend:
                         ),
                     )
                     if self.config.model.compaction_enabled
-                    else sqlite_session
+                    else file_session
                 )
 
             session = durable_session(run_context.session_id)
@@ -1527,7 +1526,7 @@ class IncidentAgent:
                 run_context = AgentRunContext(
                     task=task,
                     session_id=session_id,
-                    session_db=self.storage.root / "sessions.sqlite3",
+                    session_db=self.storage.root / "sessions",
                     lifecycle=lifecycle,
                     save_backend_session=save_backend_session,
                     memory_writer=lambda value: self.storage.append_task_memory(

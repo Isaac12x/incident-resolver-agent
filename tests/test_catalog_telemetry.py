@@ -22,10 +22,12 @@ def incident() -> Incident:
     )
 
 
-def test_catalog_recovers_without_folder_queue_or_snapshots(tmp_path: Path) -> None:
+def test_catalog_recovers_without_folder_queue_or_snapshots(
+    restore_task_state, tmp_path: Path
+) -> None:
     storage = Storage(tmp_path / "custom-state")
     task = storage.create_task(incident())
-    storage.transition(task.task_id, TaskState.INVESTIGATING)
+    restore_task_state(storage, task.task_id, TaskState.INVESTIGATING)
     storage.append_event(task.task_id, TaskEvent(type="test.evidence"))
     shutil.rmtree(storage.tasks_root)
     restarted = Storage(storage.root)

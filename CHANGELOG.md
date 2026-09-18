@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Store harness task state, events, leases, sessions, incident history, metrics, and operation
+  checkpoints in atomic JSON files; import legacy SQLite state read-only and retain the originals.
+- Declare and validate lifecycle transitions at the shared persistence boundary, retaining the
+  agent reasoning loop and existing verification gates.
+- Persist publication and deployment-verification attempts and outcomes across restarts, with
+  bounded retries and input-specific recovery.
+
 - Persist subscription CLI session identities before completion so interrupted first runs resume
   the same conversation. Periodically recover committed work and review requests, back off on
   occupied leases, and stop owned tasks and CLI processes on cancellation.
