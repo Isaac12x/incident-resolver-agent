@@ -1,0 +1,61 @@
+# Replace repository identifiers and the Playwright command before running.
+# Paths here are relative to the worker's current working directory.
+runtime_root = ".agent"
+max_concurrent_tasks = 2
+poll_interval_seconds = 2
+
+[model]
+runtime = "agents-sdk"
+mode = "remote"
+provider = "openai"
+name = "gpt-6-astra"
+reasoning = "max"
+api_key_env = "OPENAI_API_KEY"
+auto_upgrade = true
+
+[server]
+host = "0.0.0.0"
+port = 8765
+require_api_auth = true
+api_token_env = "INCIDENT_AGENT_API_TOKEN"
+webhook_secret_env = "AGENT_WEBHOOK_SECRET"
+
+[trigger]
+hook_path = "/hooks/incidents"
+
+[github]
+webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
+draft_pull_requests = true
+
+[permissions]
+mode = "workspace"
+allow_dependency_installation = true
+allow_migrations = false
+allow_ci_modification = false
+allow_snapshot_updates = false
+allow_review_resolution = true
+
+[execution]
+mode = "host"
+
+[[repositories]]
+name = "example/service"
+clone_url = "https://github.com/example/service.git"
+base_branch = "main"
+publish_mode = "github"
+responsibility_paths = ["."]
+incident_environments = ["production"]
+verification_environment = "preview"
+project_instructions = "AGENTS.md"
+
+[repositories.playwright]
+# Use your repository's actual preview test command.
+command = "npx playwright test"
+base_url_env = "PLAYWRIGHT_TEST_BASE_URL"
+timeout_seconds = 900
+retries = 1
+
+[[connectors]]
+name = "grafana"
+purpose = "incident"
+type = "webhook"

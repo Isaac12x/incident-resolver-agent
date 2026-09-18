@@ -504,12 +504,12 @@ class Storage:
             self.task_directory(task.task_id) / "state.json", task.model_dump(mode="json")
         )
 
-    def transition(self, task_id: str, state: TaskState, **updates: object) -> TaskRecord:
+    def transition(
+        self, task_id: str, state: TaskState, *, event: TaskEvent | None = None, **updates: object
+    ) -> TaskRecord:
         task = self.catalog.transition(
-            task_id, state, event=TaskEvent(type=f"task.{state.value}"), **updates
+            task_id, state, event=event or TaskEvent(type=f"task.{state.value}"), **updates
         )
-        task.updated_at = utc_now()
-        self.catalog.save(task)
         self.telemetry.record(
             "task.transition",
             task_id=task_id,
