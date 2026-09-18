@@ -30,6 +30,8 @@ def referenced_env_vars(config: Config) -> frozenset[str]:
         names.add(config.model.api_key_env)
     if config.model.organization_env:
         names.add(config.model.organization_env)
+    if config.triage.enabled:
+        names.add(config.triage.api_key_env)
     names.add(config.server.webhook_secret_env)
     names.add(config.server.api_token_env)
     names.add(config.github.webhook_secret_env)

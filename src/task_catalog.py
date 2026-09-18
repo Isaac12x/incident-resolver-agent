@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .lifecycle_graph import validate_transition
-from .models import Incident, TaskEvent, TaskRecord
+from .models import Incident, TaskEvent, TaskRecord, utc_now
 from .sqlite_store import connect, transaction
 
 _SCHEMA = """
@@ -394,12 +394,23 @@ class TaskCatalog:
             if row is None:
                 raise FileNotFoundError(task_id)
             task = TaskRecord.model_validate_json(row["record"])
-            validate_transition(task.state, state)
+            triage = updates.get("triage")
+            triage_release = bool(
+                event
+                and event.type == "triage.released"
+                and task.triage
+                and task.triage.get("route") == "operator_review"
+                and isinstance(triage, dict)
+                and triage.get("route") == "agent"
+                and triage.get("operator_released") is True
+            )
+            validate_transition(task.state, state, triage_release=triage_release)
             for key, value in updates.items():
                 if key not in TaskRecord.model_fields:
                     raise ValueError(f"unknown task field: {key}")
                 setattr(task, key, value)
             task.state = state
+            task.updated_at = utc_now()
             db.execute(
                 "UPDATE catalog_tasks SET state = ?, record = ? WHERE task_id = ?",
                 (task.state.value, task.model_dump_json(), task_id),

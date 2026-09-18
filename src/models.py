@@ -21,6 +21,7 @@ def new_task_id() -> str:
 
 class TaskState(StrEnum):
     RECEIVED = "received"
+    TRIAGING = "triaging"
     COLLECTING_CONTEXT = "collecting_context"
     INVESTIGATING = "investigating"
     REPRODUCING = "reproducing"
@@ -168,6 +169,7 @@ class TaskRecord(BaseModel):
     external_id: str
     source: str
     conversation_id: str
+    triage: dict[str, Any] | None = None
     agent_session_id: str | None = None
     backend_session_id: str | None = None
     pending_review_comments: list[ReviewComment] = Field(default_factory=list)

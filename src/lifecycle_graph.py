@@ -17,7 +17,8 @@ class InvalidLifecycleTransition(ValueError):
 # These are the routes exercised by both the durable session and the fallback
 # phase runner.  External events supply deployment and merge edges.
 TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = {
-    TaskState.RECEIVED: frozenset({TaskState.COLLECTING_CONTEXT}),
+    TaskState.RECEIVED: frozenset({TaskState.TRIAGING, TaskState.COLLECTING_CONTEXT}),
+    TaskState.TRIAGING: frozenset({TaskState.TRIAGING, TaskState.COLLECTING_CONTEXT}),
     TaskState.COLLECTING_CONTEXT: frozenset({TaskState.INVESTIGATING}),
     TaskState.INVESTIGATING: frozenset({TaskState.REPRODUCING}),
     TaskState.REPRODUCING: frozenset(
@@ -77,6 +78,7 @@ TRANSITIONS = {
 ACTIVE_STATES = frozenset(
     {
         TaskState.RECEIVED,
+        TaskState.TRIAGING,
         TaskState.COLLECTING_CONTEXT,
         TaskState.INVESTIGATING,
         TaskState.REPRODUCING,
@@ -114,13 +116,19 @@ def validate_topology() -> None:
         raise InvalidLifecycleTransition("terminal lifecycle state has an outgoing edge")
 
 
-def validate_transition(source: TaskState | str, target: TaskState | str) -> None:
+def validate_transition(
+    source: TaskState | str, target: TaskState | str, *, triage_release: bool = False
+) -> None:
     """Raise unless ``source -> target`` is a declared lifecycle edge."""
     try:
         source_state = TaskState(source)
         target_state = TaskState(target)
     except ValueError as error:
         raise InvalidLifecycleTransition(f"unknown lifecycle state: {error}") from error
+    # Explicit operator release is not a scheduler edge out of a terminal state.
+    # The catalog verifies the persisted hold and audit update in its transaction.
+    if triage_release and source_state == TaskState.BLOCKED and target_state == TaskState.RECEIVED:
+        return
     # These are executor outcomes: any non-terminal operation may be cancelled
     # or fail, including a provider error at an otherwise valid graph node.
     if (
