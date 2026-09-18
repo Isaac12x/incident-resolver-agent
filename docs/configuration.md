@@ -295,6 +295,19 @@ Output contract:
 - Publish through a reviewable pull request and verify the exact deployed head SHA before completion.
 - Fail closed and escalate with evidence when a required tool, permission, test, deployment, or review fails.
 
+## Environment-only controls
+
+These variables are read directly rather than stored as TOML options. Credential-variable names are configurable through the `_env` options above.
+
+| Variable | Default when unset | Meaning |
+| --- | --- | --- |
+| `INCIDENT_AGENT_CONFIG` | Automatic discovery | Select a config file unless `--config` is supplied. |
+| `XDG_CONFIG_HOME` | `~/.config` | Parent directory for the per-user `incident-harness/config.toml`. |
+| `XDG_STATE_HOME` | `~/.local/state` | Parent directory used for new per-user runtime state. Existing `runtime_root` values are retained. |
+| `INCIDENT_HARNESS_SOURCE` | `git+https://github.com/Isaac12x/incident-resolver-agent.git` | Source passed to `uv tool install --from` by `install.sh`, such as a pinned revision or fork. |
+| `INCIDENT_HARNESS_PACKAGE` | `incident-harness` | Package name installed by `install.sh`. |
+| `INTELLIGENCE_ENABLE_DOWNLOAD` | Unset | Any nonempty value allows automatic vector-index builds to download sentence-transformer weights; even `"0"` enables it. Unset it to require cached weights for automatic builds. Explicit rebuilds can allow downloads independently. Optional vector dependencies are still required. |
+
 ## Operational notes
 
 - Restart the worker after editing configuration. If a versioned bundle is active, its captured configuration is used; rebuild and activate a bundle, or update your bundle selection, then restart.
