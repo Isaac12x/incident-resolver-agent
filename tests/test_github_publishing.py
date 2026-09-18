@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -131,13 +132,12 @@ async def test_publishes_verified_commit_and_reuses_pr_on_retry(publication):
 
 
 @pytest.mark.asyncio
-async def test_update_commits_and_tracks_exact_head(publication):
+async def test_update_commits_and_tracks_exact_head(restore_task_state, publication):
     config, storage, task, worktree, remote, adapter = publication
-    from types import SimpleNamespace
-
     from src.github import GitHubService
+    from src.workflow import WorkflowEngine
 
-    task = storage.transition(task.task_id, TaskState.TESTING_LOCAL, pr_number=7)
+    task = restore_task_state(storage, task.task_id, TaskState.TESTING_LOCAL, pr_number=7)
 
     def api(endpoint, *args):
         return {
@@ -146,8 +146,8 @@ async def test_update_commits_and_tracks_exact_head(publication):
             "head": {"sha": git(remote, "rev-parse", task.branch)},
         }
 
-    workflow = SimpleNamespace(
-        config=config, storage=storage, github=GitHubService(config.github, api=adapter)
+    workflow = WorkflowEngine(
+        config, storage, None, GitHubService(config.github, api=adapter), None
     )
     with patch.object(adapter, "_api", side_effect=api):
         result = await _TaskLifecycle(workflow, task.task_id, worktree).open_pr("Verified fix")
@@ -235,17 +235,15 @@ def test_credentials_export_and_case_insensitive_discovery(tmp_path):
         repository_candidates(source.parent, "company/application")
 
 
-def test_selected_repository_and_github_events_ignore_owner_case(publication):
+def test_selected_repository_and_github_events_ignore_owner_case(restore_task_state, publication):
     config, storage, task, _, _, _ = publication
     assert config.repository("Company/Application") is config.repositories[0]
-    task = storage.transition(task.task_id, TaskState.WAITING_FOR_DEPLOYMENT, pr_number=7)
+    task = restore_task_state(storage, task.task_id, TaskState.WAITING_FOR_DEPLOYMENT, pr_number=7)
     assert storage.find_by_pr("Company/Application", 7).task_id == task.task_id
 
 
 @pytest.mark.asyncio
 async def test_live_repository_lock_does_not_exhaust_task_budget(publication):
-    from types import SimpleNamespace
-
     from src.github import GitHubService
     from src.verify import DeploymentVerifier
     from src.workflow import WorkflowEngine

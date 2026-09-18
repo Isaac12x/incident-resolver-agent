@@ -52,6 +52,9 @@ class Application:
             default_repository=(
                 config.repositories[0].name if len(config.repositories) == 1 else None
             ),
+            default_application=(
+                config.applications[0].name if len(config.applications) == 1 else None
+            ),
         )
         github = GitHubService(
             config.github,

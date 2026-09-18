@@ -30,6 +30,8 @@ class ConnectorManager:
         factories: dict[str, Callable[[ConnectorConfig], Awaitable[Any]]] | None = None,
         *,
         default_repository: str | None = None,
+        default_application: str | None = None,
+        default_service: str | None = None,
     ) -> None:
         self.configs = {config.name: config for config in configs}
         self.factories: dict[str, Callable[[ConnectorConfig], Awaitable[Any]]] = {
@@ -43,6 +45,8 @@ class ConnectorManager:
         self.sessions: dict[str, Any] = {}
         self.errors: dict[str, str] = {}
         self.default_repository = default_repository
+        self.default_application = default_application
+        self.default_service = default_service
 
     @staticmethod
     async def _observability_factory(config: ConnectorConfig) -> Any:
@@ -224,15 +228,23 @@ class ConnectorManager:
             raise KeyError(f"connector is not configured: {name}")
         if "alerts" in payload and not payload.get("external_id"):
             payload = self._normalize_grafana_payload(payload)
-        required = ("external_id", "repository", "environment", "summary")
+        required = ("external_id", "environment", "summary")
         missing = [key for key in required if not payload.get(key)]
+        if (
+            not payload.get("repository")
+            and not payload.get("application")
+            and not payload.get("service")
+        ):
+            missing.append("repository or application")
         if missing:
             raise ValueError(f"missing incident fields: {', '.join(missing)}")
         evidence = [IncidentEvidence.model_validate(item) for item in payload.get("evidence", [])]
         values: dict[str, Any] = dict(
             external_id=str(payload["external_id"]),
             source=name,
-            repository=str(payload["repository"]),
+            repository=str(payload.get("repository") or ""),
+            application=(str(payload["application"]) if payload.get("application") else None),
+            service=(str(payload["service"]) if payload.get("service") else None),
             environment=str(payload["environment"]),
             summary=str(payload["summary"]),
             description=str(payload.get("description", "")),
@@ -266,6 +278,8 @@ class ConnectorManager:
             **(alert.get("annotations") or {}),
         }
         repository = labels.get("repository") or labels.get("repo") or self.default_repository
+        application = labels.get("application") or labels.get("app") or self.default_application
+        service = labels.get("service") or self.default_service
         summary = (
             annotations.get("summary")
             or payload.get("title")
@@ -276,6 +290,8 @@ class ConnectorManager:
         normalized = {
             "external_id": external_id,
             "repository": repository,
+            "application": application,
+            "service": service,
             "environment": labels.get("environment") or labels.get("env") or "production",
             "summary": summary,
             "description": annotations.get("description") or payload.get("message") or "",

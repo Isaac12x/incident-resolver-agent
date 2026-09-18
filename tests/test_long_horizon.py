@@ -78,6 +78,7 @@ class _Verifier(DeploymentVerifier):
 @pytest.mark.asyncio
 async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_session(
     tmp_path: Path,
+    restore_task_state,
 ) -> None:
     config = Config(runtime_root=tmp_path / ".agent")
     config.repositories.append(
@@ -165,7 +166,7 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
     assert "verification.local" in lifecycle_events
     assert "task.publishing_pr" in lifecycle_events
 
-    task = storage.transition(task.task_id, TaskState.WAITING_FOR_REVIEW)
+    task = restore_task_state(storage, task.task_id, TaskState.WAITING_FOR_REVIEW)
     workflow._review_comments[task.task_id] = [
         ReviewComment(id=91, author="owner", body="add a note")
     ]  # noqa: SLF001
@@ -174,17 +175,21 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
     assert len(calls) == 2
     assert calls[0].session_id == calls[1].session_id
     assert len(github.updated) == 1
-    assert task.pr_head_sha == subprocess.run(
-        ["git", "-C", str(worktree), "rev-parse", "HEAD"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    assert (
+        task.pr_head_sha
+        == subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
 
 
 @pytest.mark.asyncio
 async def test_durable_route_keeps_deployment_verification_and_review_recovery(
     tmp_path: Path,
+    restore_task_state,
 ) -> None:
     config = Config(runtime_root=tmp_path / ".agent")
     config.repositories.append(RepositoryConfig(name="company/service", publish_mode="github"))
@@ -203,7 +208,7 @@ async def test_durable_route_keeps_deployment_verification_and_review_recovery(
     task.pr_head_sha = "sha-1"
     task.branch = "agent/fix"
     storage.save_task(task)
-    storage.transition(task.task_id, TaskState.WAITING_FOR_DEPLOYMENT)
+    restore_task_state(storage, task.task_id, TaskState.WAITING_FOR_DEPLOYMENT)
 
     class NoAgentBackend(OpenAIAgentsBackend):
         async def __call__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -334,9 +339,7 @@ async def test_session_compaction_writes_memory_and_keeps_recent_items() -> None
     memory: list[str] = []
     underlying = Session()
     session = _CompactingSession(underlying, threshold=3, keep=2, memory_writer=memory.append)
-    await session.add_items(
-        [{"role": "user", "content": f"message {index}"} for index in range(4)]
-    )
+    await session.add_items([{"role": "user", "content": f"message {index}"} for index in range(4)])
     assert memory and "message 1" in memory[0]
     assert len(await session.get_items()) == 3
     assert "Durable checkpoint" in (await session.get_items())[0]["content"]
@@ -355,7 +358,7 @@ async def test_agents_sdk_attaches_durable_main_and_subagent_sessions(
     created_sessions: list[str] = []
     created_agents: list[SimpleNamespace] = []
 
-    class SQLiteSession:
+    class FileSession:
         def __init__(self, session_id, db_path):  # noqa: ANN001
             self.session_id = session_id
             self.db_path = db_path
@@ -379,9 +382,7 @@ async def test_agents_sdk_attaches_durable_main_and_subagent_sessions(
                 "delegate_research",
                 "delegate_implementation",
             }
-            lifecycle_names = {
-                tool.__name__ for tool in agent.tools if callable(tool)
-            }
+            lifecycle_names = {tool.__name__ for tool in agent.tools if callable(tool)}
             assert {
                 "mark_investigation_complete",
                 "run_tests",
@@ -392,11 +393,11 @@ async def test_agents_sdk_attaches_durable_main_and_subagent_sessions(
                 final_output={"summary": "checkpoint", "waiting_for_external_event": True}
             )
 
+    monkeypatch.setattr("src.agent.FileSession", FileSession)
     fake_agents = SimpleNamespace(
         Agent=Agent,
         ModelSettings=lambda **values: SimpleNamespace(**values),
         Runner=Runner,
-        SQLiteSession=SQLiteSession,
         function_tool=lambda function: function,
     )
     monkeypatch.setitem(sys.modules, "agents", fake_agents)
@@ -446,7 +447,9 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
     config = Config(
         runtime_root=tmp_path / ".agent",
         model=ModelConfig(
-            runtime="subscription-cli", subscription_command=["codex"], name=model,
+            runtime="subscription-cli",
+            subscription_command=["codex"],
+            name=model,
             reasoning=reasoning,
         ),
         connectors=[
@@ -473,8 +476,9 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
     remembered: list[tuple[str, str]] = []
     lifecycle = SimpleNamespace(
         remember=AsyncMock(
-            side_effect=lambda note, scope="task": remembered.append((note, scope))
-            or {"stored": True}
+            side_effect=lambda note, scope="task": (
+                remembered.append((note, scope)) or {"stored": True}
+            )
         )
     )
     for name in ("mark_investigation_complete", "run_tests", "open_pr"):
@@ -628,7 +632,7 @@ async def test_subscription_cli_maps_mcp_bridges_tools_parses_and_resumes(
     assert saved == ["thread-123"]
     assert remembered == [("CLI memory", "task")]
     assert commands[0][:3] == ["codex", "--yolo", "exec"]
-    assert "mcp_servers.logs.command=\"log-mcp\"" in commands[0]
+    assert 'mcp_servers.logs.command="log-mcp"' in commands[0]
     assert commands[0][commands[0].index("--sandbox") + 1] == "read-only"
     assert (worktree / "cli-change.txt").read_text() == "mapped write\n"
 

@@ -10,7 +10,14 @@ from fastapi.testclient import TestClient
 
 from src.agent import IncidentAgent
 from src.app import Application
-from src.config import Config, RepositoryConfig, TriageConfig, load_config, save_config
+from src.config import (
+    ApplicationConfig,
+    Config,
+    RepositoryConfig,
+    TriageConfig,
+    load_config,
+    save_config,
+)
 from src.connectors import ConnectorManager
 from src.github import GitHubService
 from src.models import Incident, TaskState
@@ -174,11 +181,13 @@ def test_invalid_answers_rejected(mutation):
         validate_answers(payload, questions([]))
 
 
-def make_application(tmp_path, mode="enforce"):
+def make_application(tmp_path, mode="enforce", application_scope=False):
     config = Config(
         runtime_root=tmp_path / ".agent",
         triage=TriageConfig(enabled=True, mode=mode),
         repositories=[RepositoryConfig(name="org/repo")],
+        applications=[ApplicationConfig(name="storefront", repositories=["org/repo"])]
+        if application_scope else [],
     )
     storage = Storage(config.runtime_root)
     connectors = ConnectorManager([])
@@ -190,8 +199,9 @@ def make_application(tmp_path, mode="enforce"):
 
 
 @pytest.mark.asyncio
-async def test_hold_restart_release_and_assessment_reuse(tmp_path, monkeypatch):
-    app = make_application(tmp_path)
+@pytest.mark.parametrize("application_scope", [False, True])
+async def test_hold_restart_release_and_assessment_reuse(tmp_path, monkeypatch, application_scope):
+    app = make_application(tmp_path, application_scope=application_scope)
     task = await app.workflow.submit(incident())
     monkeypatch.setattr(
         app.workflow, "_worktree", AsyncMock(side_effect=AssertionError("too early"))
@@ -210,7 +220,7 @@ async def test_hold_restart_release_and_assessment_reuse(tmp_path, monkeypatch):
     assert (await app.workflow.process(task.task_id)).state == TaskState.BLOCKED
     assert (await app.workflow.process(task.task_id)).state == TaskState.BLOCKED
     assert (app.storage.task_directory(task.task_id) / "artifacts/triage.json").exists()
-    app = make_application(tmp_path)  # Reload SQLite, not the filesystem assessment.
+    app = make_application(tmp_path, application_scope=application_scope)  # Reload SQLite.
     await app.workflow.recover()
     assert app.workflow._wakeups.empty()
     with pytest.raises(ValueError, match="busy"):

@@ -10,6 +10,18 @@ MINIMUM_FILE_COVERAGE = 90.0
 PER_FILE_COVERAGE_FAILED = pytest.StashKey[bool]()
 
 
+@pytest.fixture
+def restore_task_state():
+    """Arrange a persisted checkpoint without pretending to execute its lifecycle."""
+
+    def restore(storage, task_id, state, **updates):
+        task = storage.load_task(task_id).model_copy(update={"state": state, **updates})
+        storage.save_task(task)
+        return task
+
+    return restore
+
+
 @pytest.hookimpl(wrapper=True, tryfirst=True)
 def pytest_runtestloop(session: pytest.Session):  # noqa: ANN201
     """Fail the suite when any source module violates the vision's coverage floor."""

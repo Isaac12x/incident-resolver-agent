@@ -7,14 +7,23 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from .models import Incident, TaskEvent, TaskRecord, TaskState, new_task_id, utc_now
+from .config import ApplicationConfig, Config
+from .models import (
+    Incident,
+    RepositoryTaskState,
+    TaskEvent,
+    TaskRecord,
+    TaskState,
+    new_task_id,
+    utc_now,
+)
+from .sqlite_store import connect, transaction
 from .task_catalog import TaskCatalog
 from .telemetry import Telemetry
 from .tooling import repository_candidates
@@ -29,6 +38,19 @@ STATE_BUCKET = {
     TaskState.BLOCKED: "blocked",
     TaskState.FAILED: "failed",
 }
+
+
+def repository_slug(repository: str) -> str:
+    """Return a filesystem-safe stable name for a repository identifier."""
+    value = repository.strip()
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts or "\\" in value:
+        raise ValueError(f"unsafe repository identifier: {repository!r}")
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", value.replace("/", "--"))
+    slug = slug.strip(".-")
+    if not slug or slug.endswith(".lock"):
+        raise ValueError(f"unsafe repository identifier: {repository!r}")
+    return slug
 
 
 class RepositoryBusyError(FileExistsError):
@@ -52,7 +74,7 @@ class Storage:
         global_memory = self.root / "memory" / "global.md"
         global_memory.touch(exist_ok=True)
         self._initialise_sessions()
-        self.catalog = TaskCatalog(self.root / "tasks.sqlite3")
+        self.catalog = TaskCatalog(self.runtime_db)
         self._migrate_catalog()
         self.telemetry = Telemetry(self.root)
 
@@ -80,29 +102,128 @@ class Storage:
                     continue
 
     def _initialise_sessions(self) -> None:
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            connection.execute(
+        self.runtime_db = self.root / "runtime.sqlite3"
+        with transaction(self.runtime_db) as db:
+            db.executescript(
                 "CREATE TABLE IF NOT EXISTS messages ("
-                "conversation_id TEXT, role TEXT, content TEXT, created_at TEXT)"
-            )
-            connection.execute(
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id TEXT NOT NULL, "
+                "role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);"
+                "CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, id);"
                 "CREATE TABLE IF NOT EXISTS observability_events ("
                 "event_id TEXT PRIMARY KEY, source TEXT NOT NULL, group_key TEXT NOT NULL, "
-                "fingerprint TEXT, payload TEXT NOT NULL, received_at TEXT NOT NULL, "
-                "duplicate_of TEXT, task_id TEXT)"
-            )
-            connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_observability_group "
-                "ON observability_events(source, group_key)"
-            )
-            connection.execute(
+                "fingerprint TEXT NOT NULL, payload TEXT NOT NULL, received_at TEXT NOT NULL, "
+                "duplicate_of TEXT, task_id TEXT);"
+                "CREATE INDEX IF NOT EXISTS observability_received "
+                "ON observability_events(received_at);"
+                "CREATE INDEX IF NOT EXISTS observability_group "
+                "ON observability_events(source, group_key, fingerprint, received_at);"
                 "CREATE TABLE IF NOT EXISTS incident_history ("
                 "task_id TEXT PRIMARY KEY, external_id TEXT NOT NULL, source TEXT NOT NULL, "
                 "repository TEXT NOT NULL, environment TEXT NOT NULL, summary TEXT NOT NULL, "
                 "description TEXT NOT NULL, root_cause TEXT, outcome TEXT, "
-                "created_at TEXT NOT NULL)"
+                "created_at TEXT NOT NULL);"
+                "CREATE INDEX IF NOT EXISTS incident_history_created "
+                "ON incident_history(created_at);"
             )
-            connection.commit()
+        self._migrate_session_rows()
+
+    def _migrate_session_rows(self) -> None:
+        """Import current JSON snapshots, or the old session database, once."""
+        import sqlite3
+
+        specs = {
+            "messages": ("messages", "conversation_id, role, content, created_at"),
+            "observability": (
+                "observability_events",
+                "event_id, source, group_key, fingerprint, payload, received_at, "
+                "duplicate_of, task_id",
+            ),
+            "history": (
+                "incident_history",
+                "task_id, external_id, source, repository, environment, summary, "
+                "description, root_cause, outcome, created_at",
+            ),
+        }
+        sessions = self.root / "sessions"
+        legacy = self.root / "sessions.sqlite3"
+        with transaction(self.runtime_db) as db:
+            for name, (table, columns) in specs.items():
+                marker = f"session-v1:{name}"
+                if db.execute(
+                    "SELECT 1 FROM runtime_migrations WHERE name=?", (marker,)
+                ).fetchone():
+                    continue
+                json_path = sessions / f"{name}.json"
+                if json_path.exists():
+                    try:
+                        document = json.loads(json_path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError) as error:
+                        raise ValueError(f"cannot read session snapshot: {json_path}") from error
+                    if not isinstance(document, dict) or document.get("version") != 1:
+                        raise ValueError(f"invalid session snapshot: {json_path}")
+                    records = (
+                        document.get(name if name != "observability" else "events")
+                        if isinstance(document, dict)
+                        else None
+                    )
+                    if not isinstance(records, list):
+                        raise ValueError(f"invalid session snapshot: {json_path}")
+                    required = columns.split(", ")
+                    for record in records:
+                        if not isinstance(record, dict) or any(
+                            field not in record for field in required
+                        ):
+                            raise ValueError(f"invalid session snapshot: {json_path}")
+                        if name == "observability":
+                            record = dict(record)
+                            if not isinstance(record["payload"], dict):
+                                raise ValueError(f"invalid session snapshot: {json_path}")
+                            record["payload"] = json.dumps(
+                                record["payload"], ensure_ascii=False, sort_keys=True
+                            )
+                        values = tuple(record.get(column) for column in columns.split(", "))
+                        db.execute(
+                            f"INSERT INTO {table} ({columns}) VALUES "
+                            f"({','.join('?' for _ in values)})",
+                            values,
+                        )
+                    db.execute("INSERT INTO runtime_migrations(name) VALUES (?)", (marker,))
+                    continue
+                if legacy.exists():
+                    try:
+                        with closing(
+                            sqlite3.connect(legacy.resolve().as_uri() + "?mode=ro", uri=True)
+                        ) as source:
+                            table_exists = source.execute(
+                                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                (table,),
+                            ).fetchone()
+                            rows = (
+                                source.execute(
+                                    f"SELECT {columns} FROM {table} ORDER BY rowid"
+                                ).fetchall()
+                                if table_exists
+                                else []
+                            )
+                    except (OSError, sqlite3.DatabaseError) as error:
+                        raise ValueError(
+                            f"cannot read legacy session database: {legacy}"
+                        ) from error
+                    for row in rows:
+                        values = list(row)
+                        if name == "observability":
+                            try:
+                                json.loads(values[4])
+                            except (TypeError, json.JSONDecodeError) as error:
+                                raise ValueError(
+                                    f"invalid legacy observability event: {legacy}"
+                                ) from error
+                        db.execute(
+                            f"INSERT INTO {table} ({columns}) VALUES "
+                            f"({','.join('?' for _ in values)})",
+                            values,
+                        )
+                db.execute("INSERT INTO runtime_migrations(name) VALUES (?)", (marker,))
 
     def record_observability_event(
         self, source: str, payload: dict[str, object], *, task_id: str | None = None
@@ -141,10 +262,9 @@ class Storage:
         fingerprint = ",".join(sorted(fingerprints)) or str(payload.get("external_id") or "")
         event_id = hashlib.sha256(f"{source}\0{encoded}".encode()).hexdigest()
         received = utc_now().isoformat()
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            prior = connection.execute(
-                "SELECT event_id, task_id FROM observability_events WHERE event_id=?", (event_id,)
+        with transaction(self.runtime_db) as db:
+            prior = db.execute(
+                "SELECT * FROM observability_events WHERE event_id=?", (event_id,)
             ).fetchone()
             if prior:
                 return {
@@ -152,39 +272,37 @@ class Storage:
                     "group_key": group_key,
                     "fingerprint": fingerprint,
                     "duplicate": True,
-                    "duplicate_of": prior[0],
-                    "task_id": prior[1],
+                    "duplicate_of": prior["event_id"],
+                    "task_id": prior["task_id"],
                 }
             grouped = (
-                connection.execute(
-                    "SELECT event_id, task_id FROM observability_events "
-                    "WHERE source=? AND group_key=? "
-                    "AND fingerprint=? ORDER BY received_at DESC LIMIT 1",
+                db.execute(
+                    "SELECT event_id FROM observability_events WHERE source=? "
+                    "AND group_key=? AND fingerprint=? ORDER BY received_at DESC LIMIT 1",
                     (source, group_key, fingerprint),
                 ).fetchone()
                 if fingerprint
                 else None
             )
-            connection.execute(
-                "INSERT INTO observability_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            db.execute(
+                "INSERT INTO observability_events VALUES (?,?,?,?,?,?,?,?)",
                 (
                     event_id,
                     source,
                     group_key,
                     fingerprint,
-                    encoded,
+                    json.dumps(payload, sort_keys=True, default=str, ensure_ascii=False),
                     received,
-                    grouped[0] if grouped else None,
+                    grouped["event_id"] if grouped else None,
                     task_id,
                 ),
             )
-            connection.commit()
         return {
             "event_id": event_id,
             "group_key": group_key,
             "fingerprint": fingerprint,
             "duplicate": bool(grouped),
-            "duplicate_of": grouped[0] if grouped else None,
+            "duplicate_of": grouped["event_id"] if grouped else None,
             "task_id": task_id,
         }
 
@@ -193,44 +311,30 @@ class Storage:
     ) -> list[dict[str, object]]:
         if not 1 <= limit <= 500:
             raise ValueError("event limit must be between 1 and 500")
-        query = (
-            "SELECT event_id, source, group_key, fingerprint, payload, received_at, "
-            "duplicate_of, task_id FROM observability_events"
-        )
-        params: list[str | int] = []
-        clauses = []
-        if source:
-            clauses.append("source=?")
-            params.append(source)
-        if group_key:
-            clauses.append("group_key=?")
-            params.append(group_key)
-        if clauses:
-            query += " WHERE " + " AND ".join(clauses)
-        query += " ORDER BY received_at DESC LIMIT ?"
-        params.append(limit)
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            rows = connection.execute(query, params).fetchall()
-        return [
-            {
-                "event_id": row[0],
-                "source": row[1],
-                "group_key": row[2],
-                "fingerprint": row[3],
-                "payload": json.loads(row[4]),
-                "received_at": row[5],
-                "duplicate_of": row[6],
-                "task_id": row[7],
-            }
-            for row in rows
-        ]
+        with connect(self.runtime_db) as db:
+            query = "SELECT * FROM observability_events WHERE 1=1"
+            params: list[object] = []
+            if source:
+                query += " AND source=?"
+                params.append(source)
+            if group_key:
+                query += " AND group_key=?"
+                params.append(group_key)
+            rows = [
+                dict(row)
+                for row in db.execute(
+                    query + " ORDER BY received_at DESC LIMIT ?", (*params, limit)
+                )
+            ]
+        for row in rows:
+            row["payload"] = json.loads(row["payload"])
+        return rows
 
     def attach_event_task(self, event_id: str, task_id: str) -> None:
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            connection.execute(
+        with transaction(self.runtime_db) as db:
+            db.execute(
                 "UPDATE observability_events SET task_id=? WHERE event_id=?", (task_id, event_id)
             )
-            connection.commit()
 
     def record_incident_history(
         self,
@@ -240,12 +344,12 @@ class Storage:
         root_cause: str | None = None,
         outcome: str | None = None,
     ) -> None:
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            connection.execute(
-                "INSERT INTO incident_history VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        with transaction(self.runtime_db) as db:
+            db.execute(
+                "INSERT INTO incident_history VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(task_id) DO UPDATE SET "
-                "root_cause=COALESCE(excluded.root_cause, incident_history.root_cause), "
-                "outcome=COALESCE(excluded.outcome, incident_history.outcome)",
+                "root_cause=COALESCE(excluded.root_cause, root_cause), "
+                "outcome=COALESCE(excluded.outcome, outcome)",
                 (
                     task_id,
                     incident.external_id,
@@ -259,33 +363,18 @@ class Storage:
                     incident.received_at.isoformat(),
                 ),
             )
-            connection.commit()
 
     def incident_history(
         self, *, labeled_only: bool = False, limit: int = 1000
     ) -> list[dict[str, object]]:
-        query = (
-            "SELECT task_id, external_id, source, repository, environment, summary, "
-            "description, root_cause, outcome, created_at FROM incident_history"
-        )
-        if labeled_only:
-            query += " WHERE root_cause IS NOT NULL AND root_cause != ''"
-        query += " ORDER BY created_at DESC LIMIT ?"
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            rows = connection.execute(query, (limit,)).fetchall()
-        keys = (
-            "task_id",
-            "external_id",
-            "source",
-            "repository",
-            "environment",
-            "summary",
-            "description",
-            "root_cause",
-            "outcome",
-            "created_at",
-        )
-        return [dict(zip(keys, row, strict=True)) for row in rows]
+        with connect(self.runtime_db) as db:
+            query = "SELECT * FROM incident_history"
+            if labeled_only:
+                query += " WHERE root_cause IS NOT NULL AND root_cause != ''"
+            return [
+                dict(row)
+                for row in db.execute(query + " ORDER BY created_at DESC LIMIT ?", (limit,))
+            ]
 
     @staticmethod
     def _json_write(path: Path, value: object) -> None:
@@ -302,9 +391,51 @@ class Storage:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def create_task(self, incident: Incident) -> TaskRecord:
+    def create_task(
+        self,
+        incident: Incident,
+        application: ApplicationConfig | Config | None = None,
+        *,
+        repositories: list[str] | None = None,
+    ) -> TaskRecord:
+        """Create or recover a task, snapshotting application membership."""
+        selected: ApplicationConfig | None
+        if isinstance(application, Config):
+            selected = (
+                application.resolve_application(
+                    application=incident.application,
+                    service=incident.service,
+                    repository=incident.repository or None,
+                )
+                if incident.application or incident.service or incident.repository
+                else None
+            )
+        else:
+            selected = application
+        target_names = list(repositories or (selected.repositories if selected else []))
+        primary_repository = incident.repository or (target_names[0] if target_names else "")
+        if selected:
+            if incident.application and incident.application.casefold() != selected.name.casefold():
+                raise ValueError("incident application does not match selected application")
+            if primary_repository and primary_repository.casefold() not in {
+                item.casefold() for item in selected.repositories
+            }:
+                raise ValueError(f"repository is outside application scope: {primary_repository}")
+        if not primary_repository:
+            raise ValueError("task requires a repository or application membership")
+        normalized = incident.model_copy(
+            update={
+                "repository": primary_repository,
+                "application": selected.name if selected else incident.application,
+            }
+        )
         existing = self.find_by_incident(
-            incident.source, incident.external_id, incident.repository, incident.environment
+            normalized.source,
+            normalized.external_id,
+            normalized.repository,
+            normalized.environment,
+            application=normalized.application,
+            service=normalized.service,
         )
         if existing:
             return existing
@@ -315,11 +446,20 @@ class Storage:
             source=incident.source,
             conversation_id=f"incident:{task_id}",
             agent_session_id=f"task:{task_id}",
-            repository=incident.repository,
-            environment=incident.environment,
-            summary=incident.summary,
+            repository=primary_repository,
+            environment=normalized.environment,
+            summary=normalized.summary,
+            application=normalized.application,
+            service=normalized.service,
+            repositories={
+                name: RepositoryTaskState(repository=name) for name in target_names
+            },
         )
-        task, _created = self.catalog.create(task, incident)
+        # A repository-only task keeps the empty mapping for full legacy
+        # compatibility.  Application membership is a task snapshot.
+        if not selected:
+            task.repositories = {}
+        task, _created = self.catalog.create(task, normalized)
         self.task_directory(task.task_id)
         if _created:
             self.telemetry.record("task.created", task_id=task.task_id)
@@ -367,14 +507,9 @@ class Storage:
     def transition(
         self, task_id: str, state: TaskState, *, event: TaskEvent | None = None, **updates: object
     ) -> TaskRecord:
-        task = self.load_task(task_id)
-        task.state = state
-        for key, value in updates.items():
-            if key not in TaskRecord.model_fields:
-                raise ValueError(f"unknown task field: {key}")
-            setattr(task, key, value)
-        task.updated_at = utc_now()
-        self.catalog.save(task, event or TaskEvent(type=f"task.{state.value}"))
+        task = self.catalog.transition(
+            task_id, state, event=event or TaskEvent(type=f"task.{state.value}"), **updates
+        )
         self.telemetry.record(
             "task.transition",
             task_id=task_id,
@@ -422,6 +557,9 @@ class Storage:
         external_id: str,
         repository: str | None = None,
         environment: str | None = None,
+        *,
+        application: str | None = None,
+        service: str | None = None,
     ) -> TaskRecord | None:
         return next(
             (
@@ -429,7 +567,20 @@ class Storage:
                 for task in self.list_tasks()
                 if task.source == source
                 and task.external_id == external_id
-                and (repository is None or task.repository.casefold() == repository.casefold())
+                and (
+                    (
+                        application is not None
+                        and task.application is not None
+                        and task.application.casefold() == application.casefold()
+                    )
+                    or (
+                        application is None
+                        and (
+                            repository is None
+                            or task.repository.casefold() == repository.casefold()
+                        )
+                    )
+                )
                 and (environment is None or task.environment.casefold() == environment.casefold())
             ),
             None,
@@ -440,7 +591,16 @@ class Storage:
             (
                 task
                 for task in self.list_tasks()
-                if task.repository.casefold() == repository.casefold() and task.pr_number == number
+                if any(
+                    state.repository.casefold() == repository.casefold()
+                    and state.pr_number == number
+                    for state in task.repositories.values()
+                )
+                or (
+                    not task.repositories
+                    and task.repository.casefold() == repository.casefold()
+                    and task.pr_number == number
+                )
             ),
             None,
         )
@@ -476,20 +636,21 @@ class Storage:
             handle.write(content.rstrip() + "\n")
 
     def add_message(self, conversation_id: str, role: str, content: str) -> None:
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            connection.execute(
-                "INSERT INTO messages VALUES (?, ?, ?, ?)",
+        with transaction(self.runtime_db) as db:
+            db.execute(
+                "INSERT INTO messages(conversation_id,role,content,created_at) VALUES (?,?,?,?)",
                 (conversation_id, role, content, utc_now().isoformat()),
             )
-            connection.commit()
 
     def messages(self, conversation_id: str) -> list[tuple[str, str]]:
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            rows = connection.execute(
-                "SELECT role, content FROM messages WHERE conversation_id=? ORDER BY rowid",
-                (conversation_id,),
-            ).fetchall()
-        return [(str(role), str(content)) for role, content in rows]
+        with connect(self.runtime_db) as db:
+            return [
+                (str(r["role"]), str(r["content"]))
+                for r in db.execute(
+                    "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY id",
+                    (conversation_id,),
+                )
+            ]
 
     def search_messages(
         self,
@@ -504,12 +665,15 @@ class Storage:
             raise ValueError("conversation search pattern must contain 1-500 characters")
         if not 1 <= limit <= 50:
             raise ValueError("conversation search limit must be between 1 and 50")
-        with closing(sqlite3.connect(self.root / "sessions.sqlite3")) as connection:
-            rows = connection.execute(
-                "SELECT role, content, created_at FROM messages "
-                "WHERE conversation_id=? ORDER BY rowid",
-                (conversation_id,),
-            ).fetchall()
+        with connect(self.runtime_db) as db:
+            rows = [
+                tuple(r)
+                for r in db.execute(
+                    "SELECT role,content,created_at FROM messages "
+                    "WHERE conversation_id=? ORDER BY id",
+                    (conversation_id,),
+                )
+            ]
         if not rows:
             return []
         corpus = "".join(
@@ -615,17 +779,52 @@ class Storage:
         slug = slug[:64].rstrip(".-_") or "incident"
         return f"incident-harness/fix/{slug}-{task_id[-6:].lower()}"
 
+    def repository_worktree(self, task: TaskRecord, repository: str | None = None) -> Path:
+        """Return the durable workspace for a task or one application member."""
+        parent = self.root / "worktrees" / task.task_id
+        if not task.repositories:
+            return parent
+        if repository is None:
+            return parent
+        names = list(task.repositories)
+        target = next((name for name in names if name.casefold() == repository.casefold()), None)
+        if target is None:
+            raise KeyError(f"repository is not in task scope: {repository}")
+        slug = repository_slug(target)
+        peers = [name for name in names if name.casefold() != target.casefold()]
+        if any(repository_slug(name) == slug for name in peers):
+            slug = f"{slug}--{hashlib.sha256(target.encode()).hexdigest()[:10]}"
+        return parent / slug
+
+    def _repository_storage_slug(self, task: TaskRecord, repository: str) -> str:
+        slug = repository_slug(repository)
+        peers = [name for name in task.repositories if name.casefold() != repository.casefold()]
+        if any(repository_slug(name) == slug for name in peers):
+            return f"{slug}--{hashlib.sha256(repository.encode()).hexdigest()[:10]}"
+        return slug
+
     def create_worktree(
         self,
         task: TaskRecord,
         clone_url: str | None = None,
         base_branch: str = "main",
         local_path: Path | str | None = None,
+        repository: str | None = None,
     ) -> Path:
-        mirror = self.root / "repositories" / f"{task.repository.replace('/', '--')}.git"
-        worktree = self.root / "worktrees" / task.task_id
-        with self.lock(task.repository):
-            source = self._find_local_repository(task.repository, local_path)
+        target = repository or task.repository
+        if task.repositories and target.casefold() not in {
+            name.casefold() for name in task.repositories
+        }:
+            raise ValueError(f"repository is not in task scope: {target}")
+        mirror = self.root / "repositories" / f"{self._repository_storage_slug(task, target)}.git"
+        worktree = self.repository_worktree(task, target if task.repositories else None)
+        if worktree.exists():
+            self.catalog.verify_workspace(
+                task.task_id, worktree, target if task.repositories else ""
+            )
+            return worktree
+        with self.lock(target):
+            source = self._find_local_repository(target, local_path)
             if source is not None:
                 repository = source
                 self._refresh_repository(repository, base_branch)
@@ -638,26 +837,89 @@ class Storage:
                 if not mirror.exists():
                     subprocess.run(["git", "clone", "--mirror", clone_url, str(mirror)], check=True)
                 self._refresh_repository(mirror, base_branch)
-            branch = task.branch or self._branch_name(task.summary, task.task_id)
+            state = task.repository_state(target) if task.repositories else None
+            branch = (state.branch if state else task.branch) or self._branch_name(
+                task.summary, task.task_id
+            )
             base_ref = self._base_ref(repository, base_branch)
+            base_sha = subprocess.run(
+                ["git", "-C", str(repository), "rev-parse", base_ref],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            existing_branch = (
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repository),
+                        "rev-parse",
+                        "--verify",
+                        f"refs/heads/{branch}",
+                    ],
+                    capture_output=True,
+                    check=False,
+                ).returncode
+                == 0
+            )
+            worktree_args = (
+                ["worktree", "add", str(worktree), branch]
+                if existing_branch
+                else ["worktree", "add", "-b", branch, str(worktree), base_ref]
+            )
             subprocess.run(
                 [
                     "git",
                     "-C",
                     str(repository),
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    str(worktree),
-                    base_ref,
+                    *worktree_args,
                 ],
                 check=True,
             )
         task.branch = branch
-        self.catalog.register_workspace(task.task_id, worktree)
+        if task.repositories:
+            task.repositories[target].branch = branch
+            task.repositories[target].base_sha = base_sha
+            self.catalog.register_workspace(task.task_id, worktree, target)
+        else:
+            self.catalog.register_workspace(task.task_id, worktree)
         self.save_task(task)
         return worktree
+
+    def create_application_worktrees(
+        self, task: TaskRecord, config: ApplicationConfig | Config
+    ) -> dict[str, Path]:
+        """Prepare every snapshotted repository and return its isolated worktree."""
+        if isinstance(config, Config):
+            if not task.application:
+                raise ValueError("task is not application-scoped")
+            config.application(task.application)
+        if not task.repositories:
+            raise ValueError("task has no snapshotted application repositories")
+        parent = self.repository_worktree(task)
+        if parent.exists():
+            self.catalog.verify_workspace(task.task_id, parent)
+        else:
+            parent.mkdir(parents=True, exist_ok=True)
+            self.catalog.register_workspace(task.task_id, parent)
+        paths: dict[str, Path] = {}
+        for name, state in task.repositories.items():
+            repository_config = config.repository(name) if isinstance(config, Config) else None
+            worktree = self.repository_worktree(task, state.repository)
+            if worktree.exists():
+                self.catalog.verify_workspace(task.task_id, worktree, state.repository)
+                paths[state.repository] = worktree
+                continue
+            path = self.create_worktree(
+                task,
+                clone_url=repository_config.clone_url if repository_config else None,
+                base_branch=repository_config.base_branch if repository_config else "main",
+                local_path=repository_config.local_path if repository_config else None,
+                repository=state.repository,
+            )
+            paths[state.repository] = path
+        return paths
 
     def _find_local_repository(
         self, repository: str, configured_path: Path | str | None = None
@@ -803,8 +1065,10 @@ class Storage:
                 return ref
         raise RuntimeError(f"base branch {base_branch!r} was not found in {repository}")
 
-    def commit_worktree(self, task: TaskRecord, message: str) -> str:
-        worktree = self.root / "worktrees" / task.task_id
+    def commit_worktree(
+        self, task: TaskRecord, message: str, repository: str | None = None
+    ) -> str:
+        worktree = self.repository_worktree(task, repository)
         if not worktree.is_dir():
             raise FileNotFoundError(worktree)
         subprocess.run(
@@ -844,10 +1108,16 @@ class Storage:
             capture_output=True,
             text=True,
         )
-        return result.stdout.strip()
+        sha = result.stdout.strip()
+        if task.repositories and repository:
+            state = task.repository_state(repository)
+            state.pr_head_sha = sha
+            state.changed = True
+            self.save_task(task)
+        return sha
 
-    def worktree_diff(self, task: TaskRecord) -> str:
-        worktree = self.root / "worktrees" / task.task_id
+    def worktree_diff(self, task: TaskRecord, repository: str | None = None) -> str:
+        worktree = self.repository_worktree(task, repository)
         result = subprocess.run(
             ["git", "-C", str(worktree), "diff", "HEAD^", "HEAD"],
             check=True,
@@ -856,9 +1126,10 @@ class Storage:
         )
         return result.stdout
 
-    def remove_worktree(self, task: TaskRecord) -> None:
-        worktree = self.root / "worktrees" / task.task_id
-        mirror = self.root / "repositories" / f"{task.repository.replace('/', '--')}.git"
+    def remove_worktree(self, task: TaskRecord, repository: str | None = None) -> None:
+        worktree = self.repository_worktree(task, repository)
+        target = repository or task.repository
+        mirror = self.root / "repositories" / f"{repository_slug(target)}.git"
         if mirror.exists() and worktree.exists():
             subprocess.run(
                 ["git", "-C", str(mirror), "worktree", "remove", "--force", str(worktree)],
@@ -866,4 +1137,13 @@ class Storage:
             )
         elif worktree.exists():
             shutil.rmtree(worktree)
+        self.catalog.release_workspace(task.task_id, repository if task.repositories else None)
+
+    def cleanup_application_worktrees(self, task: TaskRecord) -> None:
+        """Remove all member worktrees while retaining the durable task record."""
+        for repository in task.repository_names():
+            self.remove_worktree(task, repository if task.repositories else None)
+        parent = self.repository_worktree(task)
+        if parent.exists():
+            shutil.rmtree(parent, ignore_errors=True)
         self.catalog.release_workspace(task.task_id)

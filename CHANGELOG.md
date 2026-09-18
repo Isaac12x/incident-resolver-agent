@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Integrate SQLite/application repair with TypeSafe triage: preserve both configuration tabs,
+  recover triaging tasks before workspace creation, and atomically persist assessments and
+  audited operator releases without reopening unrelated terminal tasks.
+
+- Add application-scoped incident repair for explicitly configured services and repositories: one
+  durable session, repository-aware tools, changed-only publication with linked sibling PRs,
+  per-repository exact-SHA verification, and optional parent-workspace integration checks, while
+  retaining repository-only routing and recovery.
+- Store harness task state, events, leases, sessions, incident history, metrics, and operation
+  checkpoints in indexed SQLite tables with transactional updates. Import current JSON state
+  once, prefer it over older SQLite sources, and retain readable artifacts and original sources.
+- Declare and validate lifecycle transitions at the shared persistence boundary, retaining the
+  agent reasoning loop and existing verification gates.
+- Persist publication and deployment-verification attempts and outcomes across restarts, with
+  bounded retries and input-specific recovery.
 - Add GitHub Pages-ready documentation with a complete configuration reference, validated
   example TOML, configuration discovery and credential guidance, and publishing instructions.
 
