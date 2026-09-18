@@ -310,7 +310,9 @@ def test_search_waits_for_rebuild_to_finish(tmp_path: Path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_show_me_summary_uses_persisted_lifecycle_artifacts(tmp_path, monkeypatch):
+async def test_show_me_summary_uses_persisted_lifecycle_artifacts(
+    restore_task_state, tmp_path, monkeypatch
+):
     from src.models import TaskState
     from src.workflow import _TaskLifecycle
 
@@ -331,7 +333,7 @@ async def test_show_me_summary_uses_persisted_lifecycle_artifacts(tmp_path, monk
         )
     )
     assert workflow.intelligence_summary(task.task_id)["method"] == "extractive-fallback"
-    storage.transition(task.task_id, TaskState.INVESTIGATING)
+    restore_task_state(storage, task.task_id, TaskState.INVESTIGATING)
     explanation = (
         "Missing session causes checkout failure.\n\n```mermaid\n"
         "flowchart LR\n  Request --> MissingSession\n```"

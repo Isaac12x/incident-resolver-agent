@@ -28,7 +28,13 @@ class DeploymentVerifier:
         self.deployment_source = deployment_source
         self.client = client
 
-    def accepts(self, task: TaskRecord, deployment: DeploymentReference) -> bool:
+    def accepts(
+        self, task: TaskRecord, deployment: DeploymentReference, repository: str | None = None
+    ) -> bool:
+        if repository and getattr(task, "repositories", None):
+            from .application_workflow import _view
+
+            task = _view(task, repository)
         try:
             repository = self.config.repository(task.repository)
         except KeyError:
@@ -43,11 +49,16 @@ class DeploymentVerifier:
             and deployment.url.startswith(("https://", "http://"))
         )
 
-    async def find_current_deployment(self, task: TaskRecord) -> DeploymentReference | None:
+    async def find_current_deployment(
+        self, task: TaskRecord, repository: str | None = None
+    ) -> DeploymentReference | None:
         if not self.deployment_source:
             return None
         deployments = await self.deployment_source(task)
-        return next((item for item in reversed(deployments) if self.accepts(task, item)), None)
+        return next(
+            (item for item in reversed(deployments) if self.accepts(task, item, repository)),
+            None,
+        )
 
     async def _reachable(self, url: str) -> bool:
         client = self.client or httpx.AsyncClient(follow_redirects=True)
@@ -69,8 +80,16 @@ class DeploymentVerifier:
                 await client.aclose()
 
     async def verify(
-        self, task: TaskRecord, deployment: DeploymentReference, worktree: Path
+        self,
+        task: TaskRecord,
+        deployment: DeploymentReference,
+        worktree: Path,
+        repository: str | None = None,
     ) -> VerificationResult:
+        if repository and getattr(task, "repositories", None):
+            from .application_workflow import _view
+
+            task = _view(task, repository)
         if not self.accepts(task, deployment):
             return VerificationResult(
                 passed=False,

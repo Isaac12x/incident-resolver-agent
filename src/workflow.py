@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import subprocess
 import threading
+import time
 from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from .agent import IncidentAgent
+from .application_workflow import ApplicationWorkflow
+from .application_workflow import _update_state as update_application_state
+from .application_workflow import _value as application_value
 from .code_review import review
 from .config import Config, RepositoryConfig
 from .github import GitHubService
@@ -22,6 +27,7 @@ from .intelligence import (
     SimilarIncidentSearch,
     summarize_incident,
 )
+from .lifecycle_graph import ACTIVE_STATES, TERMINAL_STATES
 from .models import (
     DeploymentReference,
     Incident,
@@ -30,7 +36,9 @@ from .models import (
     TaskEvent,
     TaskRecord,
     TaskState,
+    VerificationResult,
 )
+from .operations import OperationBudgetExceeded, OperationLedger
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
@@ -39,24 +47,6 @@ from .verification_graph import VerificationGraph
 from .verify import DeploymentVerifier
 
 GraphIndexer = Callable[[Path], ToolResult]
-
-ACTIVE_STATES = {
-    TaskState.RECEIVED,
-    TaskState.TRIAGING,
-    TaskState.COLLECTING_CONTEXT,
-    TaskState.INVESTIGATING,
-    TaskState.REPRODUCING,
-    TaskState.IMPLEMENTING,
-    TaskState.TESTING_LOCAL,
-    TaskState.PUBLISHING_PR,
-    TaskState.TESTING_DEPLOYMENT,
-}
-TERMINAL_STATES = {
-    TaskState.COMPLETED,
-    TaskState.BLOCKED,
-    TaskState.FAILED,
-    TaskState.CANCELLED,
-}
 
 
 class _TaskLifecycle:
@@ -118,27 +108,43 @@ class _TaskLifecycle:
         task = self.workflow.storage.transition(self.task_id, TaskState.REPRODUCING)
         return {"state": task.state.value, "reproduced": reproduced}
 
-    def _verification(self) -> VerificationGraph:
+    def _verification(self, repository: str | None = None) -> VerificationGraph:
+        relative = "artifacts/local/verification-graph.json"
+        if repository:
+            relative = f"artifacts/local/{repository.replace('/', '--')}/verification-graph.json"
         return VerificationGraph(
-            self.worktree,
-            self.workflow.storage.task_directory(self.task_id)
-            / "artifacts/local/verification-graph.json",
+            self.worktree
+            if repository is None
+            else self.workflow.application.worktree(self._task(), repository),
+            self.workflow.storage.task_directory(self.task_id) / relative,
         )
 
-    async def verification_plan(self, seed_paths: list[str]) -> dict[str, Any]:
+    async def verification_plan(
+        self, seed_paths: list[str], repository: str | None = None
+    ) -> dict[str, Any]:
         """Return the next concentric ring; seed regression must pass first."""
         if self.workflow.repository_indexer:
             result = await asyncio.to_thread(self.workflow.repository_indexer, self.worktree)
             if not result.succeeded:
                 raise RuntimeError("cannot plan verification with a failed graph refresh")
-        repository = self.workflow.config.repository(self._task().repository)
-        return self._verification().plan(seed_paths, repository.responsibility_paths)
+        task = self._task()
+        repository_name = repository or task.repository
+        configured = self.workflow.config.repository(repository_name)
+        ledger = self._verification(repository)
+        if self.workflow._is_application(task):
+            if seed_paths:
+                return ledger.plan(seed_paths, configured.responsibility_paths)
+            return self.workflow.application.verification_plan(
+                ledger, configured.responsibility_paths
+            )
+        return ledger.plan(seed_paths, configured.responsibility_paths)
 
     async def run_tests(
         self,
         command: str,
         paths: list[str] | None = None,
         force: bool = False,
+        repository: str | None = None,
     ) -> dict[str, Any]:
         task = self._task()
         if task.state not in {
@@ -148,15 +154,26 @@ class _TaskLifecycle:
             TaskState.WAITING_FOR_REVIEW,
         }:
             raise RuntimeError(f"tests cannot run from {task.state.value}")
-        repository = self.workflow.config.repository(task.repository)
+        repository_name = repository or task.repository
+        repository_config = self.workflow.config.repository(repository_name)
+        selected_worktree = (
+            self.workflow.application.worktree(task, repository_name)
+            if self.workflow._is_application(task)
+            else self.worktree
+        )
+        review_task = (
+            self.workflow.application.view(task, repository_name)
+            if self.workflow._is_application(task)
+            else task
+        )
         if (
-            "playwright" in command.casefold() or command == repository.playwright.command
-        ) and not await self.workflow._review_fix(task, self.worktree):
+            "playwright" in command.casefold() or command == repository_config.playwright.command
+        ) and not await self.workflow._review_fix(review_task, selected_worktree):
             return self.workflow._review_feedback(self.task_id)
         if task.state != TaskState.IMPLEMENTING:
             task = self.workflow.storage.transition(self.task_id, TaskState.IMPLEMENTING)
         tools = WorkspaceTools(
-            self.worktree,
+            selected_worktree,
             timeout=self.workflow.config.model.tool_timeout_seconds,
             permissions=self.workflow.config.permissions,
             execution=self.workflow.config.execution,
@@ -164,12 +181,17 @@ class _TaskLifecycle:
                 self.task_id, TaskEvent(type=str(data.pop("type")), data=data)
             ),
         )
-        ledger = self._verification()
+        ledger = self._verification(repository)
         if paths:
             paths = sorted({ledger.relative(path) for path in paths})
         if ledger.data["seeds"]:
-            repository = self.workflow.config.repository(task.repository)
-            plan = ledger.plan([], repository.responsibility_paths)
+            plan = (
+                self.workflow.application.verification_plan(
+                    ledger, repository_config.responsibility_paths
+                )
+                if self.workflow._is_application(task)
+                else ledger.plan([], repository_config.responsibility_paths)
+            )
             if paths and plan["next_ring"] is not None:
                 permitted = set().union(
                     *(set(ring) for ring in plan["rings"][: plan["next_ring"] + 1])
@@ -184,6 +206,16 @@ class _TaskLifecycle:
         )
         if cached:
             self.workflow.storage.transition(self.task_id, TaskState.TESTING_LOCAL, error=None)
+            if self.workflow._is_application(task):
+                current = self.workflow.storage.load_task(self.task_id)
+                update_application_state(
+                    current,
+                    repository_name,
+                    verification_status="passed",
+                    verification_command=command,
+                    verification_output=str(cached.get("stdout", ""))[-100_000:],
+                )
+                self.workflow.storage.save_task(current)
             self.workflow.storage.append_event(
                 self.task_id,
                 TaskEvent(
@@ -195,7 +227,7 @@ class _TaskLifecycle:
         result = await tools.shell(command)
         passed = result.returncode == 0
         if passed and self.workflow.local_tester:
-            passed = await self.workflow.local_tester(task, self.worktree)
+            passed = await self.workflow.local_tester(task, selected_worktree)
         stable = inputs == ledger.snapshot(paths, command)
         ledger.record(
             command,
@@ -213,6 +245,7 @@ class _TaskLifecycle:
             TaskEvent(
                 type="verification.local",
                 data={
+                    "repository": repository_name,
                     "command": command,
                     "returncode": result.returncode,
                     "passed": passed,
@@ -225,6 +258,16 @@ class _TaskLifecycle:
             task = self.workflow.storage.transition(
                 self.task_id, TaskState.TESTING_LOCAL, error=None
             )
+            if self.workflow._is_application(task):
+                current = self.workflow.storage.load_task(self.task_id)
+                update_application_state(
+                    current,
+                    repository_name,
+                    verification_status="passed",
+                    verification_command=command,
+                    verification_output=(result.stdout + result.stderr)[-100_000:],
+                )
+                self.workflow.storage.save_task(current)
         else:
             attempts = task.attempts + 1
             state = (
@@ -252,6 +295,61 @@ class _TaskLifecycle:
         task = self._task()
         if task.state not in {TaskState.TESTING_LOCAL, TaskState.PUBLISHING_PR}:
             raise RuntimeError("pull requests require successful local verification")
+        if self.workflow._is_application(task):
+            for repository in self.workflow.application.repositories(task):
+                ledger = self._verification(repository)
+                pending = (
+                    self.workflow.application.verification_pending(ledger)
+                    if self.workflow._is_application(task)
+                    else ledger.pending_checks()
+                )
+                if pending:
+                    raise RuntimeError(
+                        "pull requests require current passing results for every local check"
+                    )
+                if ledger.data["seeds"]:
+                    plan = await self.verification_plan([], repository)
+                    if plan["next_ring"] is not None:
+                        raise RuntimeError(
+                            f"complete verification of {repository} before publishing"
+                        )
+            self.workflow.storage.write_artifact(
+                self.task_id, "artifacts/local/fix.txt", summary.strip()
+            )
+            task = self._task()
+            if task.state != TaskState.PUBLISHING_PR:
+                task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
+            task = await self.workflow.application.publish(task)
+            if task.state not in {TaskState.PUBLISHING_PR, TaskState.WAITING_FOR_DEPLOYMENT}:
+                return self.workflow._review_feedback(self.task_id)
+            local_only = all(
+                self.workflow.config.repository(repository).publish_mode == "local"
+                or (
+                    self.workflow.config.repository(repository).publish_mode == "auto"
+                    and self.workflow.github.api is None
+                )
+                for repository in self.workflow.application.changed_repositories(task)
+            )
+            if local_only:
+                task = await self.workflow.application.maybe_complete(task)
+            else:
+                task = self.workflow.storage.transition(
+                    self.task_id, TaskState.WAITING_FOR_DEPLOYMENT, error=None
+                )
+            return {
+                "state": task.state,
+                "application": task.application,
+                "repositories": {
+                    repository: {
+                        "branch": member.branch,
+                        "pr_number": member.pr_number,
+                        "url": member.pr_url,
+                        "head_sha": member.pr_head_sha,
+                    }
+                    for repository, member in task.repositories.items()
+                    if member.changed
+                },
+            }
         ledger = self._verification()
         if ledger.pending_checks():
             raise RuntimeError(
@@ -276,7 +374,7 @@ class _TaskLifecycle:
         )
         repository = self.workflow.config.repository(task.repository)
         if task.pr_number and self.workflow.github.api is not None:
-            reference = await self.workflow.github.update_pull_request(task)
+            reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
                 raise RuntimeError("GitHub did not confirm the updated pull request")
             task = self.workflow.storage.transition(
@@ -286,32 +384,23 @@ class _TaskLifecycle:
                 pr_url=reference.url,
             )
         elif task.pr_number:
-            result = await WorkspaceTools(self.worktree).shell("git rev-parse HEAD")
-            if result.returncode:
-                raise RuntimeError(result.stderr or "could not determine updated PR head")
-            if not task.branch:
-                raise RuntimeError("cannot update a pull request without its branch")
-            push = await WorkspaceTools(self.worktree).shell(
-                f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
-            )
-            if push.returncode:
-                raise RuntimeError(push.stderr or "could not push the updated pull-request head")
-            updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
-            reference = await self.workflow.github.update_pull_request(updated)
+            reference = await self.workflow._publish(task, self.worktree, update=True)
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
-                pr_head_sha=result.stdout.strip(),
-                pr_url=reference.url if reference else task.pr_url,
+                pr_head_sha=reference.head_sha,
+                pr_url=reference.url,
             )
         elif repository.publish_mode == "local" or (
             repository.publish_mode == "auto" and self.workflow.github.api is None
         ):
+            if task.state != TaskState.PUBLISHING_PR:
+                task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
             task = self.workflow._local_publish(task, self.worktree)
         else:
             if task.state != TaskState.PUBLISHING_PR:
                 task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
-            pull_request = await self.workflow.github.create_pull_request(task)
+            pull_request = await self.workflow._publish(task, self.worktree)
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
@@ -377,6 +466,96 @@ class WorkflowEngine:
         self._intelligence_lock = threading.RLock()
         self._history_signature = self._current_history_signature()
         self._intelligence_initialized = False
+        self.application = ApplicationWorkflow(self)
+
+    def _is_application(self, task: TaskRecord) -> bool:
+        return self.application.is_application(task)
+
+    def _operations(self, task_id: str) -> OperationLedger:
+        return OperationLedger(
+            self.storage.root / "runtime.sqlite3",
+            namespace=task_id,
+            max_attempts=self.config.model.max_task_iterations,
+            overall_cap=self.config.model.max_task_iterations * 2,
+        )
+
+    @contextmanager
+    def _operation(self, task: TaskRecord, name: str, revision: str):
+        """Persist intent before an effect; charge every replay, even after a crash."""
+        ledger = self._operations(task.task_id)
+        try:
+            ledger.begin(name, revision, reuse_success=False)
+        except OperationBudgetExceeded as error:
+            self.storage.transition(task.task_id, TaskState.BLOCKED, error=str(error))
+            raise
+        started = time.monotonic()
+        outcome: dict[str, Any] = {}
+        try:
+            yield outcome
+        except Exception as error:
+            ledger.finish(
+                name,
+                revision,
+                succeeded=False,
+                outcome={"error": str(error), "duration_seconds": time.monotonic() - started},
+            )
+            raise
+        else:
+            outcome["duration_seconds"] = time.monotonic() - started
+            ledger.finish(name, revision, succeeded=outcome.get("passed", True), outcome=outcome)
+
+    def _publication_revision(self, task: TaskRecord, worktree: Path) -> str:
+        # Real Git workspaces include dirty/untracked inputs, not the previous PR SHA.
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True
+        )
+        if head.returncode:
+            # Custom publication adapters can operate without a Git checkout. They
+            # still share the task cap and never reuse a cached publication result.
+            return task.pr_head_sha or task.branch or task.task_id
+        inputs = VerificationGraph(worktree, self.storage.root / "unused-verification.json").files()
+        return hashlib.sha256(
+            json.dumps([head.stdout.strip(), inputs], sort_keys=True).encode()
+        ).hexdigest()
+
+    async def _publish(
+        self, task: TaskRecord, worktree: Path, *, update: bool = False
+    ) -> PullRequestReference:
+        revision = self._publication_revision(task, worktree)
+        with self._operation(task, "publish", revision) as outcome:
+            if update and self.github.api is None:
+                tools = WorkspaceTools(worktree)
+                result = await tools.shell("git rev-parse HEAD")
+                if result.returncode:
+                    raise RuntimeError(result.stderr or "could not determine updated PR head")
+                if not task.branch:
+                    raise RuntimeError("cannot update a pull request without its branch")
+                push = await tools.shell(
+                    f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
+                )
+                if push.returncode:
+                    raise RuntimeError(
+                        push.stderr or "could not push the updated pull-request head"
+                    )
+                updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
+                reference = await self.github.update_pull_request(updated)
+                reference = reference or PullRequestReference(
+                    repository=task.repository,
+                    number=task.pr_number,
+                    branch=task.branch,
+                    head_sha=result.stdout.strip(),
+                    url=task.pr_url or "",
+                )
+            else:
+                reference = (
+                    await self.github.update_pull_request(task)
+                    if update
+                    else await self.github.create_pull_request(task)
+                )
+                if reference is None:
+                    raise RuntimeError("GitHub did not confirm the updated pull request")
+            outcome.update(reference.model_dump(mode="json"))
+            return reference
 
     def _current_history_signature(self) -> tuple[tuple[str, str | None], ...]:
         return tuple(
@@ -396,20 +575,53 @@ class WorkflowEngine:
 
     def _has_review_comments(self, task_id: str) -> bool:
         task = self.storage.load_task(task_id)
-        return bool(task.pending_review_comments or self._review_comments.get(task_id))
+        if task.pending_review_comments or self._review_comments.get(task_id):
+            return True
+        if self._is_application(task):
+            return any(
+                application_value(task, repository, "pending_review_comments", [])
+                for repository in self.application.repositories(task)
+            )
+        return False
 
     def _take_review_comments(self, task_id: str) -> list[ReviewComment]:
         task = self.storage.load_task(task_id)
         comments = list(task.pending_review_comments)
         comments.extend(self._review_comments.pop(task_id, []))
+        if self._is_application(task):
+            for repository in self.application.repositories(task):
+                comments.extend(
+                    application_value(task, repository, "pending_review_comments", []) or []
+                )
+                update_application_state(task, repository, pending_review_comments=[])
+            self.storage.save_task(task)
         unique = {comment.id: comment for comment in comments}
         if task.pending_review_comments:
             task.pending_review_comments = []
             self.storage.save_task(task)
         return list(unique.values())
 
-    def _queue_review_comments(self, task_id: str, comments: list[ReviewComment]) -> None:
+    def _queue_review_comments(
+        self,
+        task_id: str,
+        comments: list[ReviewComment],
+        repository: str | None = None,
+    ) -> None:
         task = self.storage.load_task(task_id)
+        if self._is_application(task):
+            if comments:
+                repository = repository or getattr(comments[0], "repository", None)
+            repository = repository or task.repository
+            existing = application_value(task, repository, "pending_review_comments", []) or []
+            known = {getattr(comment, "id", None) for comment in existing}
+            update_application_state(
+                task,
+                repository,
+                pending_review_comments=existing
+                + [comment for comment in comments if getattr(comment, "id", None) not in known],
+            )
+            self.storage.save_task(task)
+            return
         known = {comment.id for comment in task.pending_review_comments}
         task.pending_review_comments.extend(
             comment for comment in comments if comment.id not in known
@@ -417,7 +629,45 @@ class WorkflowEngine:
         self.storage.save_task(task)
         self._review_comments[task_id] = list(task.pending_review_comments)
 
+    def _ack_application_review_comments(
+        self, task_id: str, acknowledged: dict[str, set[int]]
+    ) -> None:
+        task = self.storage.load_task(task_id)
+        if not self._is_application(task):
+            return
+        for repository, ids in acknowledged.items():
+            comments = application_value(task, repository, "pending_review_comments", []) or []
+            update_application_state(
+                task,
+                repository,
+                pending_review_comments=[comment for comment in comments if comment.id not in ids],
+            )
+        self.storage.save_task(task)
+
     async def submit(self, incident: Incident) -> TaskRecord:
+        selected_application = None
+        selected_application = self.config.resolve_application(
+            application=incident.application,
+            service=incident.service,
+            repository=incident.repository or None,
+        )
+        if selected_application:
+            primary = incident.repository or selected_application.repositories[0]
+            incident = incident.model_copy(
+                update={"repository": primary, "application": selected_application.name}
+            )
+        if selected_application:
+            for name in selected_application.repositories:
+                repository = self.config.repository(name)
+                if incident.environment not in repository.incident_environments:
+                    raise ValueError(
+                        f"environment {incident.environment!r} is not enabled for {name}"
+                    )
+            task = self.storage.create_task(incident, selected_application)
+            self.storage.record_incident_history(task.task_id, incident)
+            if task.state == TaskState.RECEIVED:
+                await self.wake(task.task_id)
+            return task
         try:
             repository = self.config.repository(incident.repository)
         except KeyError as error:
@@ -520,6 +770,21 @@ class WorkflowEngine:
         return self.storage.transition(task_id, TaskState.CANCELLED)
 
     async def _worktree(self, task: TaskRecord) -> Path:
+        if self._is_application(task):
+            # The durable lead session uses the application parent workspace;
+            # repository tools select a member checkout explicitly.  Prefer the
+            # storage-provided parent when available and retain a deterministic
+            # fallback for older task snapshots.
+            parent = self.storage.root / "worktrees" / task.task_id
+            create = getattr(self.storage, "create_application_worktrees", None)
+            created_application = False
+            if create and not parent.exists():
+                await asyncio.to_thread(create, task, self.config)
+                created_application = True
+            parent.mkdir(parents=True, exist_ok=True)
+            if not create or not created_application:
+                self.storage.catalog.verify_workspace(task.task_id, parent)
+            return parent
         worktree = self.storage.root / "worktrees" / task.task_id
         if not worktree.exists():
             repository = self.config.repository(task.repository)
@@ -559,6 +824,14 @@ class WorkflowEngine:
         return worktree
 
     def _local_publish(self, task: TaskRecord, worktree: Path) -> TaskRecord:
+        with self._operation(
+            task, "publish", self._publication_revision(task, worktree)
+        ) as outcome:
+            result = self._local_publish_effect(task, worktree)
+            outcome.update(head_sha=result.pr_head_sha, url=result.pr_url)
+            return result
+
+    def _local_publish_effect(self, task: TaskRecord, worktree: Path) -> TaskRecord:
         sha = self.storage.commit_worktree(task, f"Fix incident {task.external_id}")
         reference = PullRequestReference(
             repository=task.repository,
@@ -601,8 +874,11 @@ class WorkflowEngine:
         }
 
     async def _review_fix(self, task: TaskRecord, worktree: Path) -> bool:
+        if self.storage.load_task(task.task_id).state in TERMINAL_STATES:
+            return False
         if not self.config.code_review.enabled:
             return True
+        repository_name = task.repository
 
         def git(*args: str) -> str:
             return subprocess.run(
@@ -630,30 +906,50 @@ class WorkflowEngine:
                     raise ValueError("worktree changed after deployment; publish the fix again")
                 if self.config.permissions.mode != "workspace":
                     raise ValueError("OCR cannot commit changes with read-only permissions")
-                await asyncio.to_thread(
-                    self.storage.commit_worktree, task, f"Fix incident {task.external_id}"
-                )
+                if getattr(task, "repositories", None):
+                    await asyncio.to_thread(
+                        self.storage.commit_worktree,
+                        task,
+                        f"Fix incident {task.external_id}",
+                        repository_name,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self.storage.commit_worktree, task, f"Fix incident {task.external_id}"
+                    )
             head = await asyncio.to_thread(git, "rev-parse", "HEAD")
             if task.state == TaskState.TESTING_DEPLOYMENT and head != task.pr_head_sha:
                 raise ValueError("OCR checkout does not match the current PR head")
-            if task.code_review_sha == head:
+            member_state = (
+                task.repository_state(repository_name)
+                if getattr(task, "repositories", None)
+                else None
+            )
+            if (member_state.code_review_sha if member_state else task.code_review_sha) == head:
                 return True
             branch = await asyncio.to_thread(git, "branch", "--show-current")
             if not branch or (task.branch and branch != task.branch):
                 raise ValueError("OCR requires the incident feature branch checkout")
-            base = self.config.repository(task.repository).base_branch
+            base = self.config.repository(repository_name).base_branch
             # Managed clones may have only a remote-tracking base branch.
             try:
                 await asyncio.to_thread(git, "rev-parse", "--verify", f"{base}^{{commit}}")
             except subprocess.CalledProcessError:
                 base = f"origin/{base}"
                 await asyncio.to_thread(git, "rev-parse", "--verify", f"{base}^{{commit}}")
-            output = self.storage.task_directory(task.task_id) / "artifacts/code-review"
+            review_slug = (
+                repository_name.replace("/", "--") if getattr(task, "repositories", None) else ""
+            )
+            output = (
+                self.storage.task_directory(task.task_id) / "artifacts/code-review" / review_slug
+            )
             report = await asyncio.to_thread(
                 review, self.config, worktree, base, branch, output / "scan-result.json"
             )
             self.storage.write_artifact(
-                task.task_id, f"artifacts/code-review/{head}.json", json.dumps(report, indent=2)
+                task.task_id,
+                f"artifacts/code-review/{review_slug}/{head}.json",
+                json.dumps(report, indent=2),
             )
             if await asyncio.to_thread(git, "rev-parse", "HEAD") != head:
                 raise ValueError("checkout changed during OCR review")
@@ -669,20 +965,48 @@ class WorkflowEngine:
             task = self.storage.load_task(task.task_id)
             if report["comments"]:
                 attempts = task.attempts + 1
-                self.storage.transition(
-                    task.task_id,
-                    TaskState.BLOCKED
-                    if attempts >= self.config.model.max_task_iterations
-                    else TaskState.REPRODUCING,
-                    attempts=attempts,
-                    code_review_sha=None,
-                    playwright_status=None,
-                    error="Address OCR findings in artifacts/code-review/scan-result.json, "
-                    "then rerun local checks and publish before Playwright verification",
-                )
+                if getattr(task, "repositories", None):
+                    current = self.storage.load_task(task.task_id)
+                    review_error = (
+                        "Address OCR findings in the repository-specific code review report, "
+                        "then rerun local checks and publish before Playwright verification"
+                    )
+                    update_application_state(
+                        current,
+                        repository_name,
+                        attempts=attempts,
+                        code_review_sha=None,
+                        playwright_status=None,
+                        error=review_error,
+                    )
+                    self.storage.save_task(current)
+                    self.storage.transition(
+                        task.task_id,
+                        TaskState.BLOCKED
+                        if attempts >= self.config.model.max_task_iterations
+                        else TaskState.REPRODUCING,
+                        error=review_error,
+                    )
+                else:
+                    self.storage.transition(
+                        task.task_id,
+                        TaskState.BLOCKED
+                        if attempts >= self.config.model.max_task_iterations
+                        else TaskState.REPRODUCING,
+                        attempts=attempts,
+                        code_review_sha=None,
+                        playwright_status=None,
+                        error="Address OCR findings in artifacts/code-review/scan-result.json, "
+                        "then rerun local checks and publish before Playwright verification",
+                    )
                 return False
-            task.code_review_sha = head
-            self.storage.save_task(task)
+            if getattr(task, "repositories", None):
+                current = self.storage.load_task(task.task_id)
+                update_application_state(current, repository_name, code_review_sha=head)
+                self.storage.save_task(current)
+            else:
+                task.code_review_sha = head
+                self.storage.save_task(task)
             return True
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             # Do not persist subprocess stderr: provider errors may contain credentials.
@@ -698,6 +1022,8 @@ class WorkflowEngine:
     async def _process_agent_session(self, task: TaskRecord, worktree: Path) -> TaskRecord:
         lifecycle = _TaskLifecycle(self, task.task_id, worktree)
         prompt: str | None = None
+        application_review = False
+        acknowledged_reviews: dict[str, set[int]] = {}
         if task.state == TaskState.COLLECTING_CONTEXT:
             context = self.storage.task_directory(task.task_id) / "context.md"
             if context.exists():
@@ -706,10 +1032,33 @@ class WorkflowEngine:
                     "incident context follows.\n\n" + context.read_text(encoding="utf-8")
                 )
         elif task.state == TaskState.WAITING_FOR_REVIEW:
-            comments = self._take_review_comments(task.task_id)
-            prompt = "Address these authorized review comments in the same task session:\n\n" + (
-                "\n".join(f"{comment.author}: {comment.body}" for comment in comments)
-            )
+            if self._is_application(task):
+                application_review = True
+                sections: list[str] = []
+                for repository in self.application.repositories(task):
+                    comments = (
+                        application_value(task, repository, "pending_review_comments", []) or []
+                    )
+                    if comments:
+                        acknowledged_reviews[repository] = {comment.id for comment in comments}
+                        sections.append(
+                            f"Repository: {repository}\n"
+                            + "\n".join(
+                                f"{comment.id} {comment.path or ''}:{comment.line or ''} "
+                                f"{comment.url or ''} {comment.author}: {comment.body}"
+                                for comment in comments
+                            )
+                        )
+                prompt = (
+                    "Address these authorized review comments in the same task session:\n\n"
+                    + "\n\n".join(sections)
+                )
+            else:
+                comments = self._take_review_comments(task.task_id)
+                prompt = (
+                    "Address these authorized review comments in the same task session:\n\n"
+                    + ("\n".join(f"{comment.author}: {comment.body}" for comment in comments))
+                )
         else:
             prompt = (
                 f"Resume the same durable incident session from state `{task.state.value}`. "
@@ -717,6 +1066,10 @@ class WorkflowEngine:
                 "pull request using lifecycle tools."
             )
         result = await self.agent.run_session(task, worktree, lifecycle, prompt)
+        if application_review:
+            # Keep per-repository feedback durable if the backend raises or is
+            # cancelled; clear it only after a successful session checkpoint.
+            self._ack_application_review_comments(task.task_id, acknowledged_reviews)
         self.storage.append_task_memory(
             task.task_id, f"## Session checkpoint\n\n{result.summary.strip()}\n"
         )
@@ -776,6 +1129,109 @@ class WorkflowEngine:
                     await pending
             self.storage.catalog.release(task_id, owner)
 
+    async def _process_application(self, task: TaskRecord) -> TaskRecord | None:
+        """Advance application publication/deployment checkpoints.
+
+        Agent investigation and editing still run through the normal durable
+        session.  Once that session reaches a cross-repository gate, this method
+        performs only the aggregate work and leaves member evidence durable.
+        """
+        if not self._is_application(task):
+            return None
+        if task.state not in {TaskState.RECEIVED, TaskState.TRIAGING}:
+            self.application.verify_workspaces(task)
+        if task.state == TaskState.PUBLISHING_PR:
+            await self.application.publish(task)
+            current = self.storage.load_task(task.task_id)
+            if self.application.all_deployments_verified(current):
+                completed = await self.application.maybe_complete(current)
+                if completed.state == TaskState.TESTING_DEPLOYMENT:
+                    return self.storage.transition(completed.task_id, TaskState.WAITING_FOR_REVIEW)
+                return completed
+            return self.storage.transition(
+                task.task_id, TaskState.WAITING_FOR_DEPLOYMENT, error=None
+            )
+        pending_deployment = any(
+            application_value(task, repository, "deployment_sha")
+            and application_value(task, repository, "playwright_status") != "passed"
+            and self.application.requires_remote_deployment(repository)
+            for repository in self.application.changed_repositories(task)
+        )
+        if task.state == TaskState.TESTING_DEPLOYMENT or (
+            task.state == TaskState.WAITING_FOR_REVIEW and pending_deployment
+        ):
+            changed = self.application.changed_repositories(task)
+            for repository in changed:
+                member = self.application.view(self.storage.load_task(task.task_id), repository)
+                sha = application_value(task, repository, "deployment_sha")
+                url = application_value(task, repository, "deployment_url")
+                if (
+                    not sha
+                    or not url
+                    or application_value(task, repository, "playwright_status") == "passed"
+                ):
+                    continue
+                deployment = DeploymentReference(
+                    repository=repository,
+                    environment=application_value(task, repository, "deployment_environment", ""),
+                    sha=str(sha),
+                    url=str(url),
+                )
+                worktree = self.application.worktree(task, repository)
+                revision = json.dumps(
+                    [
+                        repository,
+                        application_value(task, repository, "pr_number"),
+                        deployment.environment,
+                        deployment.sha,
+                        deployment.url,
+                    ],
+                    separators=(",", ":"),
+                )
+                prior = self._operations(task.task_id).get(
+                    f"deployment_verification:{repository}", revision
+                )
+                if (
+                    self.verifier.accepts(member, deployment)
+                    and prior
+                    and prior["status"] == "succeeded"
+                ):
+                    result = VerificationResult.model_validate(prior["outcome"])
+                else:
+                    with self._operation(
+                        member, f"deployment_verification:{repository}", revision
+                    ) as outcome:
+                        result = await self.verifier.verify(member, deployment, worktree)
+                        outcome.update(result.model_dump(mode="json"))
+                task = self.storage.load_task(task.task_id)
+                update_application_state(
+                    task, repository, playwright_status="passed" if result.passed else "failed"
+                )
+                self.storage.append_event(
+                    task.task_id,
+                    TaskEvent(
+                        type="verification.local_deployment",
+                        data={"repository": repository, **result.model_dump(mode="json")},
+                    ),
+                )
+                await self.github.publish_verification(member, result)
+                if not result.passed:
+                    return self.storage.transition(
+                        task.task_id, TaskState.REPRODUCING, playwright_status="failed"
+                    )
+                self.storage.save_task(task)
+            current = self.storage.load_task(task.task_id)
+            if self.application.all_deployments_verified(current):
+                return await self.application.maybe_complete(current)
+            if current.state == TaskState.TESTING_DEPLOYMENT:
+                return self.storage.transition(current.task_id, TaskState.WAITING_FOR_REVIEW)
+            return current
+        if task.state == TaskState.WAITING_FOR_REVIEW and not self._has_review_comments(
+            task.task_id
+        ):
+            return await self.application.maybe_complete(task)
+        return None
+
     async def release_triage(self, task_id: str) -> TaskRecord:
         """Explicit operator release; preserve the assessment and audit the override."""
         owner = uuid4().hex
@@ -802,6 +1258,9 @@ class WorkflowEngine:
         try:
             if task.state in TERMINAL_STATES:
                 return task
+            application_result = await self._process_application(task)
+            if application_result is not None:
+                return application_result
             if task.state == TaskState.RECEIVED and self.config.triage.enabled and not task.triage:
                 return self.storage.transition(task_id, TaskState.TRIAGING)
             if task.state in {TaskState.RECEIVED, TaskState.TRIAGING}:
@@ -973,7 +1432,7 @@ class WorkflowEngine:
                     repository.publish_mode == "auto" and self.github.api is None
                 ):
                     return self._local_publish(task, worktree)
-                pull_request = await self.github.create_pull_request(task)
+                pull_request = await self._publish(task, worktree)
                 return self.storage.transition(
                     task_id,
                     TaskState.WAITING_FOR_DEPLOYMENT,
@@ -993,7 +1452,27 @@ class WorkflowEngine:
                     sha=task.deployment_sha or "",
                     url=task.deployment_url or "",
                 )
-                result = await self.verifier.verify(task, deployment, worktree)
+                revision = json.dumps(
+                    [
+                        task.repository,
+                        task.pr_number,
+                        deployment.environment,
+                        deployment.sha,
+                        deployment.url,
+                    ],
+                    separators=(",", ":"),
+                )
+                prior = self._operations(task_id).get("deployment_verification", revision)
+                if (
+                    self.verifier.accepts(task, deployment)
+                    and prior
+                    and prior["status"] == "succeeded"
+                ):
+                    result = VerificationResult.model_validate(prior["outcome"])
+                else:
+                    with self._operation(task, "deployment_verification", revision) as outcome:
+                        result = await self.verifier.verify(task, deployment, worktree)
+                        outcome.update(result.model_dump(mode="json"))
                 self.storage.write_artifact(
                     task_id, "artifacts/playwright/output.txt", result.output or result.reason or ""
                 )
@@ -1054,6 +1533,8 @@ class WorkflowEngine:
             return self.storage.load_task(task_id)
         except Exception as error:
             latest = self.storage.load_task(task_id)
+            if latest.state in TERMINAL_STATES:
+                return latest
             attempts = latest.attempts + 1
             self.storage.append_event(
                 task_id,
@@ -1070,33 +1551,117 @@ class WorkflowEngine:
 
     async def handle_github_event(self, event: str, payload: dict[str, Any]) -> TaskRecord | None:
         target = self.github.repository_and_pr(payload)
-        if not target:
-            return None
-        task = self.storage.find_by_pr(*target)
+        task = self.storage.find_by_pr(*target) if target else None
+        if task is None and target:
+            candidates = []
+            for candidate in self.storage.list_tasks("pending", "active", "waiting"):
+                if not self._is_application(candidate):
+                    continue
+                for repository in self.application.repositories(candidate):
+                    if (
+                        repository.casefold() == target[0].casefold()
+                        and application_value(candidate, repository, "pr_number") == target[1]
+                    ):
+                        candidates.append(candidate)
+                        break
+            if len(candidates) == 1:
+                task = candidates[0]
+        deployment_data = payload.get("deployment", payload)
+        deployment_status = payload.get("deployment_status", {})
+        deployment_repository = str(
+            payload.get("repository", {}).get("full_name")
+            or deployment_data.get("repository", {}).get("full_name", "")
+        )
+        deployment_sha = str(deployment_data.get("sha", ""))
+        deployment_environment = str(deployment_data.get("environment", ""))
+        # GitHub deployment_status events often have no pull_request object. Match
+        # an application member only by its repository, exact current PR SHA, and
+        # configured environment; ambiguity is rejected closed.
+        if (
+            task is None
+            and event in {"deployment_status", "deployment"}
+            and deployment_repository
+            and deployment_sha
+        ):
+            matches: list[TaskRecord] = []
+            for candidate in self.storage.list_tasks("pending", "active", "waiting"):
+                if not self._is_application(candidate):
+                    continue
+                for repository in self.application.repositories(candidate):
+                    if repository.casefold() != deployment_repository.casefold():
+                        continue
+                    if application_value(candidate, repository, "pr_head_sha") != deployment_sha:
+                        continue
+                    try:
+                        expected = self.config.repository(repository).verification_environment
+                    except KeyError:
+                        continue
+                    if deployment_environment == expected:
+                        matches.append(candidate)
+                        break
+            if len(matches) == 1:
+                task = matches[0]
         if not task:
             return None
+        if task.state in TERMINAL_STATES:
+            return task
         action = payload.get("action")
         if event == "pull_request" and action == "closed" and payload["pull_request"].get("merged"):
+            if self._is_application(task):
+                repository = (
+                    target[0] if target else str(payload.get("repository", {}).get("full_name", ""))
+                )
+                update_application_state(task, repository, merged=True)
+                self.storage.append_event(
+                    task.task_id,
+                    TaskEvent(
+                        type="publication.merged",
+                        data={"repository": repository, "pr_number": target[1] if target else None},
+                    ),
+                )
+                self.storage.save_task(task)
+                if self.application.all_deployments_verified(task):
+                    return await self.application.maybe_complete(task)
+                return task
             completed = self.storage.transition(task.task_id, TaskState.COMPLETED)
             self.storage.remove_worktree(completed)
             return completed
         if event in {"pull_request_review_comment", "issue_comment", "pull_request_review"}:
             comment = self.github.review_comment(payload)
             if comment:
-                self._queue_review_comments(task.task_id, [comment])
+                self._queue_review_comments(task.task_id, [comment], target[0] if target else None)
                 await self.wake(task.task_id)
             return task
         if event in {"deployment_status", "deployment"}:
-            deployment_data = payload.get("deployment", payload)
-            status = payload.get("deployment_status", {})
+            status = deployment_status
             deployment = DeploymentReference(
-                repository=task.repository,
+                repository=deployment_repository or task.repository,
                 environment=str(deployment_data.get("environment", "")),
                 sha=str(deployment_data.get("sha", "")),
                 url=str(status.get("environment_url") or status.get("target_url") or ""),
                 deployment_id=deployment_data.get("id"),
                 state=str(status.get("state", deployment_data.get("state", ""))),
             )
+            if self._is_application(task):
+                repository = next(
+                    (
+                        name
+                        for name in self.application.repositories(task)
+                        if name.casefold() == deployment.repository.casefold()
+                    ),
+                    deployment.repository,
+                )
+                if repository not in self.application.repositories(
+                    task
+                ) or not self.application.accept_deployment(task, repository, deployment):
+                    return task
+                task = self.application.record_deployment(task, repository, deployment)
+                if task.state == TaskState.WAITING_FOR_DEPLOYMENT:
+                    task = self.storage.transition(task.task_id, TaskState.TESTING_DEPLOYMENT)
+                await self.wake(task.task_id)
+                return task
+            if task.state != TaskState.WAITING_FOR_DEPLOYMENT:
+                return task
             if self.verifier.accepts(task, deployment):
                 task = self.storage.transition(
                     task.task_id,
@@ -1113,8 +1678,13 @@ class WorkflowEngine:
         for task in self.storage.list_tasks("pending", "active", "waiting"):
             if task.task_id in self._running_task_ids:
                 continue
+            application_comments = self._is_application(task) and any(
+                application_value(task, repository, "pending_review_comments", [])
+                for repository in self.application.repositories(task)
+            )
             if task.state in ACTIVE_STATES or (
-                task.state == TaskState.WAITING_FOR_REVIEW and task.pending_review_comments
+                task.state == TaskState.WAITING_FOR_REVIEW
+                and (task.pending_review_comments or application_comments)
             ):
                 await self.wake(task.task_id)
 

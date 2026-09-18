@@ -55,3 +55,68 @@ artifacts exist. The unused external command adapter/configuration and its five 
 tests were removed; a lifecycle/restart/API regression was added. Generic bounded subprocess tests
 remain for trusted extensions. The new wheel includes the expanded skill. Full checks above were
 rerun after this correction; model-generated prose quality was not evaluated with a live model.
+
+
+## File-backed lifecycle graph — 2026-09-18
+
+Implemented declarative lifecycle transitions, atomically committed with their events, while
+retaining the durable agent loop. Harness state, SDK sessions, intake/history, telemetry and
+operation journals now use JSON files with process locks and atomic replacement. Existing
+SQLite data is migrated read-only; the third-party repository graph remains a derived index.
+
+The file-only runtime regression initially failed because Storage created sessions.sqlite3;
+it now passes and verifies state/messages/events from a separate process. Additional checks
+exercise real legacy SQLite imports, concurrent processes, interrupted writes, corruption,
+empty-session migration, operation restart budgets, and stale deployment-cache rejection.
+Test fixtures that previously skipped lifecycle stages now restore explicit checkpoints;
+production transition validation is not disabled for tests.
+
+Validation: 311 tests passed; 95.39% overall coverage and every source module >90%. Ruff,
+compileall, uv lock --check, wheel/sdist builds, all 12 offline contracts, and the scripted repair
+lifecycle evaluation passed (completed; no unsafe attempts). An extracted-wheel smoke test
+confirmed task and SDK session persistence without creating SQLite files.
+No static type checker is configured. No live model, production deployment, or remote
+preview verification was performed. Performance/token improvements are not benchmarked.
+Stop old workers before migration; preserve the full runtime directory and legacy databases.
+
+
+## SQLite runtime state — 2026-09-18
+
+Replaced whole-document runtime JSON updates with indexed tables in one `runtime.sqlite3`.
+Tasks and transition events, leases, workspace identities, conversations, SDK session items,
+observability/history, metric counters, and operation attempts now use SQLite transactions.
+Readable artifacts and rotating JSONL logs remain files. Migration markers prevent stale JSON
+or older SQLite sources from overwriting committed data; original sources are preserved.
+
+Validation: 345 tests passed, 95.18% aggregate coverage, every source module above 90%.
+Tests cover transaction rollback, process death before commit, WAL readers during writes,
+concurrent deduplication, leases, session appends, metric increments, operation budgets,
+source precedence, corrupt imports, and restart behavior. The test run emitted SQLite
+ResourceWarnings; assertions and coverage gates passed. Ruff, compileall, uv lock --check,
+and wheel/sdist builds passed. No static type checker is configured.
+
+All 12 offline contracts and the scripted repair lifecycle passed (completed, zero unsafe
+attempts). An isolated extracted-wheel smoke verified fresh runtime creation and migrated
+a fixture produced by the previous committed JSON implementation. It retained task state,
+ordered events, conversations, alert/history data, SDK history, metrics and operation budgets;
+all seven original JSON sources remained byte-identical. Session clearing and lease exclusion
+survived restarts; SQLite integrity and foreign-key checks passed. No live model, production
+deployment, or remote preview was exercised. Performance improvements were not benchmarked.
+
+Stop old workers before upgrading, keep the complete runtime backup, and use SQLite's backup
+API for live database backups rather than copying only the main file while WAL is active.
+
+## PR #23 integration with master — 2026-09-18
+
+Merged TypeSafe triage and configuration documentation from master into the SQLite/application
+branch. A marker-only resolution failed import-time graph validation because TRIAGING was
+undeclared. Added triage graph/recovery support, deferred application workspace validation
+until after triage, and retained atomic assessment/audit persistence and guarded operator release.
+Regression coverage includes application-scoped hold/restart/release, rejected unaudited
+release and rollback on audit-insert failure.
+
+Validation: 420 tests passed, 94.56% overall coverage, all per-file gates passed; 56 focused
+triage/catalog/lifecycle tests passed. Ruff, compileall, lock validation, wheel/sdist builds,
+12/12 offline contracts and scripted repair lifecycle passed. Extracted-wheel SQLite triage,
+hold, release and restart smoke passed. No static type checker or hosted preview is configured;
+no live TypeSafe request or deployment was performed.
