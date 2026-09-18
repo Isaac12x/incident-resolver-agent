@@ -22,6 +22,7 @@ def container_command(
     policy: ExecutionConfig,
     permissions: PermissionsConfig,
     name: str,
+    protected_paths: list[Path] | None = None,
 ) -> list[str]:
     executable = shutil.which("docker")
     if executable is None:
@@ -62,12 +63,29 @@ def container_command(
         mount,
     ]
     # Protect existing harness/Git/CI control files even when source edits are enabled.
-    protected = [".git", ".agent"]
+    protected = [root / ".git", root / ".agent"]
     if not permissions.allow_ci_modification:
-        protected.append(".github")
-    for relative in protected:
-        path = root / relative
+        protected.append(root / ".github")
+    if protected_paths is None and not (root / ".git").exists():
+        # An application parent is not itself a Git checkout. Discover nested control roots so
+        # direct callers of this low-level helper receive the same boundary as WorkspaceTools.
+        control_names = [".git", ".agent"]
+        if not permissions.allow_ci_modification:
+            control_names.append(".github")
+        for control_name in control_names:
+            protected.extend(path for path in root.rglob(control_name) if not path.is_symlink())
+    elif protected_paths is not None:
+        protected.extend(Path(path).resolve() for path in protected_paths)
+    emitted: set[Path] = set()
+    for path in protected:
+        if path in emitted:
+            continue
+        emitted.add(path)
         if path.exists() and not path.is_symlink():
+            try:
+                relative = path.relative_to(root)
+            except ValueError:
+                continue
             command.extend(
                 ["--mount", f"type=bind,source={path},target=/workspace/{relative},readonly"]
             )
@@ -82,9 +100,12 @@ async def execute_container(
     *,
     timeout: float,
     max_output: int,
+    protected_paths: list[Path] | None = None,
 ) -> tuple[int, str, str, bool]:
     name = "incident-command-" + uuid4().hex
-    command = container_command(tokens, workspace, policy, permissions, name)
+    command = container_command(
+        tokens, workspace, policy, permissions, name, protected_paths=protected_paths
+    )
     process = await asyncio.create_subprocess_exec(
         *command,
         stdout=asyncio.subprocess.PIPE,

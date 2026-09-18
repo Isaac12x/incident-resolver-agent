@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -266,6 +267,21 @@ class RepositoryConfig(BaseModel):
     project_instructions: str = "AGENTS.md"
     playwright: PlaywrightConfig = Field(default_factory=PlaywrightConfig)
 
+    @field_validator("name")
+    @classmethod
+    def safe_repository_name(cls, value: str) -> str:
+        value = value.strip()
+        path = Path(value)
+        if (
+            not value
+            or path.is_absolute()
+            or ".." in path.parts
+            or "\\" in value
+            or any(ord(character) < 32 for character in value)
+        ):
+            raise ValueError("repository name must be a safe nonempty repository identifier")
+        return value
+
     @field_validator("responsibility_paths")
     @classmethod
     def bounded_responsibility(cls, paths: list[str]) -> list[str]:
@@ -347,6 +363,52 @@ class ConnectorConfig(BaseModel):
         return self
 
 
+class ApplicationConfig(BaseModel):
+    """A named incident scope spanning configured services and repositories."""
+
+    name: str
+    services: list[str] = Field(default_factory=list)
+    repositories: list[str] = Field(default_factory=list)
+    integration_command: str = ""
+
+    @model_validator(mode="after")
+    def requires_repositories(self) -> ApplicationConfig:
+        if not self.repositories:
+            raise ValueError("application must include at least one repository")
+        return self
+
+    @field_validator("name")
+    @classmethod
+    def application_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(character in value for character in "\r\n"):
+            raise ValueError("application name must be nonempty and single-line")
+        return value
+
+    @field_validator("services", "repositories")
+    @classmethod
+    def unique_members(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            value = value.strip()
+            if not value or any(character in value for character in "\r\n"):
+                raise ValueError("application members must be nonempty and single-line")
+            key = value.casefold()
+            if key in seen:
+                raise ValueError("application members must be unique")
+            seen.add(key)
+            cleaned.append(value)
+        return cleaned
+
+    @field_validator("integration_command")
+    @classmethod
+    def clean_integration_command(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("integration command cannot contain NUL")
+        return value.strip()
+
+
 class PermissionsConfig(BaseModel):
     mode: Literal["read-only", "workspace"] = "workspace"
     allow_dependency_installation: bool = True
@@ -386,13 +448,108 @@ class Config(BaseModel):
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     repositories: list[RepositoryConfig] = Field(default_factory=list)
+    applications: list[ApplicationConfig] = Field(default_factory=list)
     connectors: list[ConnectorConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_memberships(self) -> Config:
+        repository_names: set[str] = set()
+        repository_slugs: dict[str, str] = {}
+        for repository in self.repositories:
+            key = repository.name.casefold()
+            if key in repository_names:
+                raise ValueError(f"repository is configured more than once: {repository.name}")
+            repository_names.add(key)
+            slug = re.sub(
+                r"[^A-Za-z0-9._-]+", "-", repository.name.replace("/", "--")
+            ).strip(".-")
+            if not slug or slug.endswith(".lock"):
+                raise ValueError(
+                    f"repository name is unsafe for durable storage: {repository.name}"
+                )
+            prior = repository_slugs.get(slug)
+            if prior and prior.casefold() != repository.name.casefold():
+                raise ValueError(
+                    "repository names collide in durable storage: "
+                    f"{prior!r} and {repository.name!r}"
+                )
+            repository_slugs[slug] = repository.name
+        application_names: set[str] = set()
+        for application in self.applications:
+            key = application.name.casefold()
+            if key in application_names:
+                raise ValueError(f"application is configured more than once: {application.name}")
+            application_names.add(key)
+            missing = [
+                repository
+                for repository in application.repositories
+                if repository.casefold() not in repository_names
+            ]
+            if missing:
+                raise ValueError(
+                    f"application {application.name!r} references unconfigured repositories: "
+                    + ", ".join(missing)
+                )
+        return self
 
     def repository(self, name: str) -> RepositoryConfig:
         for repository in self.repositories:
             if repository.name.casefold() == name.casefold():
                 return repository
         raise KeyError(f"repository is not configured: {name}")
+
+    def application(self, name: str) -> ApplicationConfig:
+        for application in self.applications:
+            if application.name.casefold() == name.casefold():
+                return application
+        raise KeyError(f"application is not configured: {name}")
+
+    def resolve_application(
+        self,
+        *,
+        application: str | None = None,
+        service: str | None = None,
+        repository: str | None = None,
+    ) -> ApplicationConfig | None:
+        """Resolve an intake hint, failing closed when membership is ambiguous."""
+        if application:
+            selected = self.application(application)
+            if service and service.casefold() not in {
+                item.casefold() for item in selected.services
+            }:
+                raise ValueError(
+                    f"service {service!r} is not a member of application {selected.name!r}"
+                )
+            if repository and repository.casefold() not in {
+                item.casefold() for item in selected.repositories
+            }:
+                raise ValueError(
+                    f"repository {repository!r} is not a member of application {selected.name!r}"
+                )
+            return selected
+
+        candidates = self.applications
+        if service:
+            candidates = [
+                item
+                for item in candidates
+                if service.casefold() in {member.casefold() for member in item.services}
+            ]
+        if repository:
+            candidates = [
+                item
+                for item in candidates
+                if repository.casefold() in {member.casefold() for member in item.repositories}
+            ]
+        if not service and not repository:
+            if not candidates:
+                return None
+            raise ValueError("incident has no application, service, or repository routing hint")
+        if len(candidates) > 1:
+            raise ValueError("incident routing matches multiple applications")
+        if service and not candidates:
+            raise ValueError("incident service does not match a configured application")
+        return candidates[0] if candidates else None
 
 
 def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True) -> Config:
@@ -491,6 +648,11 @@ def save_config(config: Config, path: Path = Path(".agent/config.toml")) -> None
             lines.append(f"{key} = {_toml_value(value)}")
         lines.append("")
         _write_table(lines, "repositories.playwright", playwright)
+    for application in data["applications"]:
+        lines.append("[[applications]]")
+        for key, value in application.items():
+            lines.append(f"{key} = {_toml_value(value)}")
+        lines.append("")
     for connector in data["connectors"]:
         lines.append("[[connectors]]")
         for key, value in connector.items():

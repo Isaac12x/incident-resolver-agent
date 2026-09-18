@@ -31,7 +31,9 @@ class GitHubCLIAdapter:
     @staticmethod
     async def _health_command(*command: str) -> str:
         process = await asyncio.create_subprocess_exec(
-            *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout=4)
@@ -54,11 +56,16 @@ class GitHubCLIAdapter:
                             "gh", "api", "--hostname", "github.com", f"repos/{repository.name}"
                         ),
                         self._health_command(
-                            "gh", "api", "--hostname", "github.com",
+                            "gh",
+                            "api",
+                            "--hostname",
+                            "github.com",
                             f"repos/{repository.name}/pulls?per_page=1",
                         ),
                         self._health_command(
-                            "git", "ls-remote", "--exit-code",
+                            "git",
+                            "ls-remote",
+                            "--exit-code",
                             repository.clone_url or f"https://github.com/{repository.name}.git",
                             f"refs/heads/{repository.base_branch}",
                         ),
@@ -68,14 +75,19 @@ class GitHubCLIAdapter:
                         raise ValueError("repository archived or GitHub account lacks push access")
                 return key, {"status": "ok"}
             except Exception as error:
-                message = str(error) if isinstance(error, (RuntimeError, ValueError)) else (
-                    "GitHub connection check timed out or could not run"
+                message = (
+                    str(error)
+                    if isinstance(error, (RuntimeError, ValueError))
+                    else ("GitHub connection check timed out or could not run")
                 )
                 return key, {"status": "failed", "error": message}
 
-        repositories = [r for r in self.config.repositories if r.publish_mode != "local" and (
-            r.publish_mode == "github" or "github.com" in (r.clone_url or "")
-        )]
+        repositories = [
+            r
+            for r in self.config.repositories
+            if r.publish_mode != "local"
+            and (r.publish_mode == "github" or "github.com" in (r.clone_url or ""))
+        ]
         return dict(await asyncio.gather(*(check(r) for r in repositories)))
 
     def _api(self, endpoint: str, method: str = "GET", data: dict | None = None) -> Any:
@@ -107,12 +119,21 @@ class GitHubCLIAdapter:
             raise RuntimeError(f"Git {arguments[0]} failed: {result.stderr.strip()}")
         return result.stdout.strip()
 
+    def _worktree(self, task: TaskRecord) -> Path:
+        """Resolve an application member's checkout while retaining legacy layout."""
+        repository = getattr(task, "repository", "")
+        helper = getattr(self.storage, "repository_worktree", None)
+        if helper:
+            return Path(helper(task, repository))
+        return self.storage.root / "worktrees" / task.task_id
+
     def _body(self, task: TaskRecord) -> str:
         directory = self.storage.task_directory(task.task_id)
         sections = [f"Fix incident {task.external_id}: {task.summary}"]
         for title, relative in (
             ("Root cause and evidence", "investigation.md"),
             ("Changed behavior and local verification", "artifacts/local/fix.txt"),
+            ("Application repository publication", "artifacts/application-publication.json"),
         ):
             path = directory / relative
             if path.exists():
@@ -135,11 +156,36 @@ class GitHubCLIAdapter:
         )
         return "\n\n".join(sections)
 
+    def _sync_application(self, task: TaskRecord) -> None:
+        """Refresh every application PR body with the complete sibling set."""
+        if not task.repositories:
+            return
+        from .application_workflow import _view
+
+        references = []
+        for repository, state in task.repositories.items():
+            if state.pr_number:
+                references.append(
+                    f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
+                    f"(SHA `{state.pr_head_sha or ''}`)"
+                )
+        sibling_text = "\n\n## Application pull requests\n\n" + "\n".join(references)
+        for repository, state in task.repositories.items():
+            if not state.pr_number:
+                continue
+            member = _view(task, repository)
+            body = self._body(member) + sibling_text
+            self._api(
+                f"repos/{repository}/pulls/{state.pr_number}",
+                "PATCH",
+                {"body": body},
+            )
+
     def _publish(self, task: TaskRecord) -> dict[str, Any]:
         if not task.branch:
             raise RuntimeError("cannot publish without an incident branch")
         repository = self.config.repository(task.repository)
-        worktree = self.storage.root / "worktrees" / task.task_id
+        worktree = self._worktree(task)
         # Do not create another commit when retrying a push or PR API failure.
         changes = self._git(
             worktree,
@@ -152,7 +198,32 @@ class GitHubCLIAdapter:
             ":(exclude).code-review-graph.db",
         )
         if changes:
-            self.storage.commit_worktree(task, f"Fix incident {task.external_id}: {task.summary}")
+            if getattr(task, "repositories", None):
+                self._git(
+                    worktree,
+                    "add",
+                    "-A",
+                    "--",
+                    ".",
+                    ":(exclude)harness-out",
+                    ":(exclude).code-review-graph",
+                    ":(exclude).code-review-graph.db",
+                )
+                self._git(
+                    worktree,
+                    "-c",
+                    "user.name=Incident Agent",
+                    "-c",
+                    "user.email=incident-agent@localhost",
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    f"Fix incident {task.external_id}: {task.summary}",
+                )
+            else:
+                self.storage.commit_worktree(
+                    task, f"Fix incident {task.external_id}: {task.summary}"
+                )
         sha = self._git(worktree, "rev-parse", "HEAD")
         # A managed mirror has remote.origin.mirror=true; an incident must push only its branch.
         self._git(
@@ -207,6 +278,10 @@ class GitHubCLIAdapter:
         return reference.model_dump(mode="json")
 
     def _operate(self, operation: str, payload: dict[str, Any]) -> Any:
+        if operation == "sync_application_pull_requests":
+            task = TaskRecord.model_validate(payload)
+            self._sync_application(task)
+            return {"synced": True}
         if operation in {"create_pull_request", "update_pull_request"}:
             return self._publish(TaskRecord.model_validate(payload))
         if operation == "publish_verification":
@@ -229,6 +304,9 @@ class GitHubCLIAdapter:
 
     async def __call__(self, operation: str, payload: dict[str, Any]) -> Any:
         return await asyncio.to_thread(self._operate, operation, payload)
+
+    async def sync_application_pull_requests(self, task: TaskRecord) -> None:
+        await asyncio.to_thread(self._sync_application, task)
 
 
 class GitHubService:
@@ -311,6 +389,10 @@ class GitHubService:
             "publish_verification",
             {"task": task.model_dump(mode="json"), "result": result.model_dump(mode="json")},
         )
+
+    async def sync_application_pull_requests(self, task: TaskRecord) -> None:
+        if self.api and hasattr(self.api, "sync_application_pull_requests"):
+            await self.api.sync_application_pull_requests(task)
 
     async def reply_to_review(self, comment: ReviewComment, message: str) -> None:
         await self._call("reply_to_review", {"comment_id": comment.id, "message": message})
