@@ -45,3 +45,11 @@ Full-suite result and publication/review follow-up are recorded below.
 Final full suite: 420 passed in 84.36s, 94.56% total coverage; all per-file gates passed.
 The first full run found one incorrect new-test expectation about the existing intake event;
 corrected it to assert the audit history is unchanged, then reran the complete suite green.
+
+Committed/pushed integration fix: `f5043fdf3a7a4fb3cf6c678cd6c1e6e37975dfc6`.
+Updated PR #23 title/body with the final scope, integration cause and validation evidence.
+Initial post-push check at 2026-09-18 11:55:50 UTC: open, clean and mergeable; no general
+or inline comments, reviews or CI checks. Follow-up at 12:01:10 UTC (5m20s later): still
+open, clean and mergeable at the same commit, with no comments, reviews or CI checks.
+No feedback required changes. This final handoff-only commit records the follow-up;
+monitoring ends here, and no background monitor is installed.
