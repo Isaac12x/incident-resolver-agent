@@ -127,17 +127,21 @@ async def _worker(application: Application) -> None:
 
 async def _run_direct(application: Application, path: Path) -> None:
     incident = Incident.model_validate_json(path.read_text(encoding="utf-8"))
-    task = await application.workflow.submit(incident)
-    while task.state not in {
-        TaskState.WAITING_FOR_DEPLOYMENT,
-        TaskState.WAITING_FOR_REVIEW,
-        TaskState.COMPLETED,
-        TaskState.BLOCKED,
-        TaskState.FAILED,
-        TaskState.CANCELLED,
-    }:
-        task = await application.workflow.process(task.task_id)
-    print(json.dumps(task.model_dump(mode="json"), indent=2))
+    await application.connectors.start()
+    try:
+        task = await application.workflow.submit(incident)
+        while task.state not in {
+            TaskState.WAITING_FOR_DEPLOYMENT,
+            TaskState.WAITING_FOR_REVIEW,
+            TaskState.COMPLETED,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }:
+            task = await application.workflow.process(task.task_id)
+        print(json.dumps(task.model_dump(mode="json"), indent=2))
+    finally:
+        await application.connectors.stop()
 
 
 def _load_eval_records(path: Path) -> list[dict[str, object]]:

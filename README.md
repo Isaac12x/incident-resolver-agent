@@ -574,6 +574,48 @@ The Safety tab also contains the complete system prompt. That prompt and the pos
 negative goals, guardrails, and safeguards are assembled into every investigation, implementation,
 and review agent run as a binding instruction contract.
 
+### Local application logs (no observability stack required)
+
+In the TUI **Connections** tab, add a connection, choose **local-logs**, enter an absolute
+file path such as `/tmp/logs/app-name.log`, and click **Test connection**, then **Save**.
+Use one connection per log file. The harness process must be able to read that file on its
+own host (or through a read-only mount). No URL, token, MCP command, Grafana, or Loki is needed.
+Remove the default Grafana webhook connection if you do not use Grafana alerting.
+
+```toml
+[[connectors]]
+name = "app-logs"
+purpose = "observability"
+type = "local-logs"
+log_path = "/tmp/logs/app-name.log"
+capabilities = ["logs"]
+```
+
+Both agent runtimes can call `app_logs_read_logs` with an optional case-sensitive `contains`
+filter and a `limit` (default 100, maximum 200). Reads scan the last 1 MB and return up to
+64 KB of log text, with an explicit truncation flag. The path is fixed in configuration;
+the agent cannot select arbitrary files. Plain text and JSON-lines logs are returned as lines;
+timestamps are not parsed, so the agent must check them against the incident window.
+Each read reopens the path to pick up replacement/rotated files. Missing or unreadable files
+fail the connection test and health check; tools become usable when the file recovers.
+
+This connection supplies investigation evidence; it does not watch files or create alerts.
+Start an investigation without Grafana by submitting an incident JSON file:
+
+```json
+{
+  "external_id": "app-error-001",
+  "source": "manual",
+  "repository": "owner/repo",
+  "environment": "production",
+  "summary": "Investigate application errors in the app-logs connection"
+}
+```
+
+Run `incident-agent run incident.json` using your configured repository and environment.
+The manual command starts and closes the same connector sessions as the server/worker.
+Existing webhook and API intake can also use these logs as evidence.
+
 ### Read-only production log connections
 
 Incoming webhooks supply alert metadata; they do not provide a log-query client. Add native
