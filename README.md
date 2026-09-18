@@ -4,6 +4,12 @@ A durable, long-horizon agent harness that turns production incidents into local
 deployment-verified pull requests. Every intake protocol uses one SQLite-backed workflow, so
 tasks remain inspectable and recoverable while the process is running or after a restart.
 
+## Documentation
+
+See the [documentation home](docs/index.md), [configuration reference](docs/configuration.md),
+and [example configuration](docs/configuration-example.toml). The `docs` folder is ready for
+GitHub Pages; publishing instructions are included on the documentation home page.
+
 ## What is implemented
 
 - Incident intake over signed HTTP webhooks, MCP-compatible endpoints, A2A endpoints, and JSON files.
