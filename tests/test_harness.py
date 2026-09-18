@@ -2623,6 +2623,9 @@ async def test_cli_async_helpers(
     incident_path.write_text(incident.model_dump_json())
     await _run_direct(application, incident_path)
     assert "waiting_for_pr_deployment" in capsys.readouterr().out
+    connectors.start.assert_awaited_once()
+    connectors.stop.assert_awaited_once()
+    connectors.reset_mock()
     await _worker(application)
     connectors.start.assert_awaited_once()
     connectors.stop.assert_awaited_once()
