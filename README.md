@@ -108,6 +108,74 @@ workspace. Configure them in the TUI's **Applications** tab or in `[[application
 see the [application-scoped repair guide](docs/application-scopes.md) for routing, worktrees,
 review/restart behavior, and the two-repository configuration example.
 
+### Live incident dashboard
+
+```bash
+incident-agent dashboard
+incident-agent dashboard -d
+incident-agent dashboard status
+incident-agent dashboard stop
+incident-agent dashboard logs
+```
+
+The dashboard serves a browser interface at `http://127.0.0.1:8766` and reads the same
+runtime selected by global `--config PATH`. `--listen-port PORT` changes its internal
+loopback listener. Foreground and detached modes both update live. `--detached` and
+`--dettached` are aliases for `-d`; detached operation survives terminal exit, but does
+not install an automatic boot service. Starting the dashboard does not start repair workers.
+
+The overview tracks incidents, resolved incidents, failed/successful repairs, PRs opened,
+and mean/median resolution time. Resolved/successful means the durable task reached
+`completed`; cancelled and blocked tasks are separate. Resolution timing runs from task
+creation to its recorded completion event, excluding tasks with unavailable timing.
+It measures harness resolution, not independently confirmed production recovery.
+PRs are deduplicated by repository and PR number. Date filters use incident creation time
+and include both selected UTC calendar dates. Existing operation telemetry is labelled
+as global lifetime data, separately from filtered incident metrics.
+
+Use the dashboard-specific token stored at `<runtime_root>/dashboard/token` to sign in.
+The browser receives an expiring session cookie; the agent control API token is not used.
+Raw prompts, model conversations, tool output, and connector credentials are not displayed.
+
+To expose a detached dashboard through an existing supported reverse proxy:
+
+```bash
+incident-agent dashboard -d
+incident-agent dashboard port 8443 --host incidents.example.com --proxy caddy
+incident-agent dashboard port close
+```
+
+For a nonstandard proxy configuration, supply its path explicitly. nginx also needs
+certificate and key files:
+
+```bash
+incident-agent --config /absolute/path/config.toml dashboard port 8443 \
+  --host incidents.example.com --proxy nginx --proxy-config /etc/nginx/nginx.conf \
+  --tls-cert /etc/ssl/incidents/fullchain.pem --tls-key /etc/ssl/incidents/privkey.pem
+```
+
+Run the dashboard itself as the runtime owner. If routing needs elevated privileges,
+use the same installed CLI and an explicit absolute `--config` path for the routing
+command so it selects that user's running dashboard. Closing uses the saved routing
+configuration; the certificate/config flags do not need to be repeated.
+Elevated routing requires a root-owned proxy configuration and directories. Run routing
+without `sudo` for a user-owned proxy, such as a per-user Caddy installation. Generated
+includes and recovery records live in `incident-dashboard` beside the proxy configuration.
+
+The public port is separate from the internal listener. Caddy and nginx adapters check for
+conflicts, validate configuration, and gracefully reload the proxy. A conflict produces an
+error without taking over another listener. HTTPS needs a hostname and certificate setup;
+nginx uses certificate/key files, while Caddy can manage certificates when its issuance
+requirements are met. Proxy configuration changes require the corresponding filesystem and
+service permissions. Firewall, DNS, NAT, and cloud ingress configuration remain external.
+A successful local route check is not a claim that the endpoint is reachable from the internet.
+
+Closing public access revokes public sessions and removes the dashboard-owned route.
+If proxy cleanup fails, access stays revoked and the command reports incomplete cleanup.
+Local viewing remains available. `stop` stops the dashboard process; use `port close` to
+remove its persistent public route as well. Restarting the dashboard does not silently
+re-enable public access.
+
 ### Incident history and evaluations
 
 Grafana intake stores events, grouping keys, fingerprints, duplicate references, and task links

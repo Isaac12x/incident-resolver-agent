@@ -6,6 +6,12 @@
   durable session, repository-aware tools, changed-only publication with linked sibling PRs,
   per-repository exact-SHA verification, and optional parent-workspace integration checks, while
   retaining repository-only routing and recovery.
+
+- Add a live, read-only incident dashboard with incident/resolution counts, completion-event
+  resolution timing, failed/successful repairs, unique PR counts, task filters, and timelines.
+- Add foreground and detached dashboard commands with process identity checks and local token
+  login; support reversible authenticated HTTPS routes through Caddy and nginx adapters.
+
 - Store harness task state, events, leases, sessions, incident history, metrics, and operation
   checkpoints in indexed SQLite tables with transactional updates. Import current JSON state
   once, prefer it over older SQLite sources, and retain readable artifacts and original sources.

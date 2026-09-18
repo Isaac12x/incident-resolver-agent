@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Read-only incident harness runtime dashboard">
+  <title>Incident dashboard</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">INCIDENT HARNESS</p>
+      <h1>Runtime dashboard</h1>
+      <p id="runtime-meta" class="muted">Read-only operational view</p>
+    </div>
+    <div class="topbar-actions">
+      <span id="status" class="pill" role="status" aria-live="polite">Connecting…</span>
+      <button id="logout" type="button">Log out</button>
+    </div>
+  </header>
+  <main>
+    <section id="login" class="panel login-panel" aria-labelledby="login-title">
+      <h2 id="login-title">Sign in</h2>
+      <label for="token">Dashboard token</label>
+      <input id="token" type="password" autocomplete="current-password" spellcheck="false">
+      <button id="sign-in" type="button">Open dashboard</button>
+      <p id="login-error" class="error" role="alert"></p>
+    </section>
+
+    <section id="app" hidden>
+      <section id="cards" class="cards" aria-label="Overview metrics"></section>
+      <div id="secondary" class="secondary-strip" aria-label="Current task states"></div>
+      <section class="panel metrics-panel" aria-labelledby="metrics-title">
+        <div class="section-heading"><h2 id="metrics-title">Operational metrics</h2><span class="muted">Global lifetime totals</span></div>
+        <div id="metrics" class="metrics-grid"></div>
+      </section>
+      <section class="panel" aria-labelledby="tasks-title">
+        <div class="section-heading"><h2 id="tasks-title">Tasks</h2><span id="results" class="muted"></span></div>
+        <form id="filters" class="filters">
+          <label>Application <input name="application" autocomplete="off"></label>
+          <label>Repository <input name="repository" autocomplete="off"></label>
+          <label>Environment <input name="environment" autocomplete="off"></label>
+          <label>State
+            <select name="state">
+              <option value="">All states</option><option value="active">Active</option>
+              <option value="waiting">Waiting</option><option value="blocked">Blocked</option>
+              <option value="failed">Failed</option><option value="cancelled">Cancelled</option>
+              <option value="completed">Completed</option>
+            </select>
+          </label>
+          <label>From <input name="since" type="date"></label>
+          <label>To <input name="until" type="date"></label>
+          <button type="submit">Apply filters</button>
+          <button id="clear-filters" type="button" class="secondary">Clear</button>
+        </form>
+        <div id="empty" class="empty" hidden>No tasks match these filters.</div>
+        <div class="table-wrap">
+          <table>
+            <caption class="sr-only">Incident tasks</caption>
+            <thead><tr><th scope="col">Summary</th><th scope="col">Application</th><th scope="col">Repository</th><th scope="col">Environment</th><th scope="col">State</th><th scope="col">Age</th><th scope="col">Updated</th></tr></thead>
+            <tbody id="tasks"></tbody>
+          </table>
+        </div>
+        <nav class="pagination" aria-label="Task pages">
+          <button id="previous" type="button" class="secondary">Previous</button>
+          <span id="page-label" aria-live="polite">Page 1</span>
+          <button id="next" type="button" class="secondary">Next</button>
+        </nav>
+      </section>
+      <section id="detail" class="panel detail-panel" hidden aria-labelledby="detail-title">
+        <div class="section-heading"><h2 id="detail-title"></h2><button id="close-detail" type="button" class="secondary">Close</button></div>
+        <p id="detail-meta" class="muted"></p>
+        <div class="detail-columns"><div><h3>Timeline</h3><ol id="timeline"></ol></div><div><h3>Repositories</h3><div id="repositories"></div></div></div>
+      </section>
+      <p class="fine">Resolution time uses the completion event and measures harness lifecycle time, not production recovery. Cancelled and blocked tasks are separate from failures.</p>
+    </section>
+  </main>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>
