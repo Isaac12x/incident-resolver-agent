@@ -68,5 +68,10 @@ Files: agent.py, tools.py, execution.py, tui.py, optional application tools modu
 ## Task 5: Fresh Luna documentation, then parent delivery
 
 - [x] After implementation, launch a new Luna agent for README, configuration docs and changelog.
-- [ ] Parent verifies docs, appends handoff, commits only owned changes and opens a PR.
-- [ ] Check review feedback initially and after 5–10 minutes; integrate authorized corrections.
+- [x] Parent verifies docs, appends handoff, commits only owned changes and opens a PR.
+- [x] Check review feedback initially and after 5–10 minutes; integrate authorized corrections.
+
+Delivered in PR #21, stacked on the SQLite runtime PR. Parent verification: 384 tests pass,
+94.45% total coverage, every module >90%; lint, compilation, lock, build, installed wheel and
+offline evaluations pass. Initial and five-minute follow-up checks found no review feedback.
+See the local handoff for verification limits and monitoring timestamps.
