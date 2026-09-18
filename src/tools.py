@@ -32,8 +32,11 @@ class CommandResult:
 class WorkspaceTools:
     def __init__(
         self,
-        workspace: Path | str,
+        workspace: Path | str | dict[str, Path | str],
         *,
+        repositories: dict[str, Path | str] | None = None,
+        parent_workspace: Path | str | None = None,
+        default_repository: str | None = None,
         timeout: int = 600,
         max_output: int = 100_000,
         logger: Callable[[dict[str, object]], None] | None = None,
@@ -41,7 +44,30 @@ class WorkspaceTools:
         execution: ExecutionConfig | None = None,
         conversation_searcher: Callable[[str, int], list[dict[str, object]]] | None = None,
     ) -> None:
-        self.workspace = Path(workspace).resolve()
+        # ``workspace`` remains the compatibility primary target.  Applications pass either a
+        # mapping or ``repositories=`` and receive one tool object with an explicit repository
+        # selector on every operation.  A parent workspace is reserved for application-level
+        # integration commands and is never an implicit member checkout.
+        if isinstance(workspace, dict):
+            roots = workspace
+            compatibility_workspace = next(iter(roots.values()), None)
+        else:
+            roots = repositories or {}
+            compatibility_workspace = workspace
+        if compatibility_workspace is None:
+            raise ToolError("at least one repository workspace is required")
+        self._repositories = {
+            str(name): Path(root).resolve() for name, root in roots.items()
+        }
+        if not self._repositories:
+            self._repositories = {
+                str(default_repository or ""): Path(compatibility_workspace).resolve()
+            }
+        self.workspace = Path(compatibility_workspace).resolve()
+        self.parent_workspace = Path(parent_workspace).resolve() if parent_workspace else None
+        self.default_repository = default_repository or next(iter(self._repositories))
+        if self.default_repository not in self._repositories:
+            raise ToolError(f"unknown default repository: {self.default_repository}")
         self.timeout = timeout
         self.max_output = max_output
         self.logger = logger
@@ -55,6 +81,63 @@ class WorkspaceTools:
         if not self.workspace.is_dir():
             raise ToolError("workspace must be a directory")
         self._workspace_identity = (stat.st_dev, stat.st_ino)
+        self._repository_identities = {
+            name: self._identity(root) for name, root in self._repositories.items()
+        }
+        self._parent_identity = (
+            self._identity(self.parent_workspace) if self.parent_workspace is not None else None
+        )
+
+    @staticmethod
+    def _identity(root: Path) -> tuple[int, int]:
+        try:
+            stat = root.stat()
+        except OSError as error:
+            raise ToolError(f"workspace is unavailable: {root}") from error
+        if not root.is_dir():
+            raise ToolError("workspace must be a directory")
+        return stat.st_dev, stat.st_ino
+
+    @property
+    def repository_names(self) -> tuple[str, ...]:
+        return tuple(self._repositories)
+
+    def repository_workspace(self, repository: str | None = None) -> Path:
+        """Resolve one configured checkout after validating its durable identity."""
+        return self._root(repository)
+
+    @property
+    def session_workspace(self) -> Path:
+        """Return the durable application session directory (or legacy checkout)."""
+        return self.parent_workspace or self.workspace
+
+    def _root(self, repository: str | None = None, *, integration: bool = False) -> Path:
+        if integration:
+            if self.parent_workspace is None:
+                raise ToolError("application integration workspace is not configured")
+            if self._parent_identity != self._identity(self.parent_workspace):
+                raise ToolError(
+                    "application integration workspace changed while the agent was running"
+                )
+            for repository, root in self._repositories.items():
+                if self._repository_identities[repository] != self._identity(root):
+                    raise ToolError(
+                        f"repository workspace changed while the agent was running: {repository}"
+                    )
+            return self.parent_workspace
+        selected = self.default_repository if repository is None else str(repository)
+        try:
+            root = self._repositories[selected]
+        except KeyError as error:
+            raise ToolError(f"unknown repository: {selected}") from error
+        identity = self._repository_identities[selected]
+        try:
+            current = root.stat()
+        except OSError as error:
+            raise ToolError(f"repository workspace disappeared: {selected}") from error
+        if (current.st_dev, current.st_ino) != identity:
+            raise ToolError(f"repository workspace changed while the agent was running: {selected}")
+        return root
 
     def _assert_workspace_identity(self) -> None:
         """Prevent a long-running agent from following a replaced workspace mount."""
@@ -65,36 +148,45 @@ class WorkspaceTools:
         if (current.st_dev, current.st_ino) != self._workspace_identity:
             raise ToolError("workspace changed while the agent was running")
 
-    def _path(self, relative_path: str) -> Path:
-        self._assert_workspace_identity()
+    def _path(
+        self, relative_path: str, repository: str | None = None, *, integration: bool = False
+    ) -> Path:
+        root = self._root(repository, integration=integration)
         if not relative_path or Path(relative_path).is_absolute():
             raise ToolError("path must be relative to the workspace")
-        path = (self.workspace / relative_path).resolve()
-        if not path.is_relative_to(self.workspace):
+        path = (root / relative_path).resolve()
+        if not path.is_relative_to(root):
             raise ToolError("path escapes the workspace")
-        if any(part in {".git", ".agent"} for part in Path(relative_path).parts):
+        if any(
+            part.casefold() in {".git", ".agent", ".github"}
+            for part in Path(relative_path).parts
+        ):
             raise ToolError("direct access to control directories is forbidden")
         return path
 
-    def read_file(self, relative_path: str) -> str:
-        return self._path(relative_path).read_text(encoding="utf-8")
+    def read_file(self, relative_path: str, repository: str | None = None) -> str:
+        return self._path(relative_path, repository).read_text(encoding="utf-8")
 
-    def write_file(self, relative_path: str, content: str) -> None:
+    def write_file(self, relative_path: str, content: str, repository: str | None = None) -> None:
         self._validate_write(relative_path)
-        path = self._path(relative_path)
+        path = self._path(relative_path, repository)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
 
-    def replace_in_file(self, relative_path: str, old: str, new: str) -> None:
+    def replace_in_file(
+        self, relative_path: str, old: str, new: str, repository: str | None = None
+    ) -> None:
         self._validate_write(relative_path)
-        path = self._path(relative_path)
+        path = self._path(relative_path, repository)
         content = path.read_text(encoding="utf-8")
         occurrences = content.count(old)
         if occurrences != 1:
             raise ToolError(f"expected exactly one match, found {occurrences}")
         path.write_text(content.replace(old, new, 1), encoding="utf-8")
 
-    def rg_conversation_history(self, pattern: str, limit: int = 20) -> str:
+    def rg_conversation_history(
+        self, pattern: str, limit: int = 20, repository: str | None = None
+    ) -> str:
         """Search the current incident's persisted conversation and return JSON matches."""
         if self.conversation_searcher is None:
             raise ToolError("conversation history search is not configured")
@@ -144,7 +236,8 @@ class WorkspaceTools:
             and not key.upper().endswith("_KEY")
         }
 
-    def _validate_command(self, command: str) -> list[str]:
+    def _validate_command(self, command: str, root: Path | None = None) -> list[str]:
+        root = root or self.workspace
         try:
             tokens = shlex.split(command)
         except ValueError as error:
@@ -188,9 +281,9 @@ class WorkspaceTools:
             if candidate_value.startswith("~"):
                 raise ToolError("command path escapes the workspace")
             candidate = Path(candidate_value)
-            if candidate.is_absolute() and not candidate.resolve().is_relative_to(self.workspace):
+            if candidate.is_absolute() and not candidate.resolve().is_relative_to(root):
                 raise ToolError("absolute command paths must stay inside the workspace")
-            if any(part in {".git", ".agent"} for part in candidate.parts):
+            if any(part.casefold() in {".git", ".agent"} for part in candidate.parts):
                 raise ToolError("direct access to control directories is forbidden")
 
         self._validate_command_permissions(tokens, executable)
@@ -303,30 +396,50 @@ class WorkspaceTools:
         ):
             raise ToolError("database migrations are disabled")
 
-    async def shell(self, command: str) -> CommandResult:
+    async def shell(
+        self, command: str, repository: str | None = None, *, integration: bool = False
+    ) -> CommandResult:
         started = time.monotonic()
         try:
-            result = await self._shell(command)
+            result = await self._shell(command, repository, integration=integration)
         except (Exception, asyncio.CancelledError):
             self._log(CommandResult(command, -1, "", ""), time.monotonic() - started)
             raise
         self._log(result, time.monotonic() - started)
         return result
 
-    async def _shell(self, command: str) -> CommandResult:
-        self._assert_workspace_identity()
-        tokens = self._validate_command(command)
+    async def _shell(
+        self, command: str, repository: str | None = None, *, integration: bool = False
+    ) -> CommandResult:
+        root = self._root(repository, integration=integration)
+        tokens = self._validate_command(command, root)
         if self.execution.mode == "container":
             from .execution import execute_container
 
             try:
                 code, stdout, stderr, truncated = await execute_container(
                     tokens,
-                    self.workspace,
+                    root,
                     self.execution,
                     self.permissions,
                     timeout=self.timeout,
                     max_output=self.max_output,
+                    protected_paths=(
+                        [
+                            control
+                            for repository_root in self._repositories.values()
+                            for control in (
+                                [repository_root / ".git", repository_root / ".agent"]
+                                + (
+                                    [repository_root / ".github"]
+                                    if not self.permissions.allow_ci_modification
+                                    else []
+                                )
+                            )
+                        ]
+                        if integration
+                        else None
+                    ),
                 )
             except TimeoutError as error:
                 raise ToolError(f"container command timed out after {self.timeout}s") from error
@@ -335,7 +448,7 @@ class WorkspaceTools:
         try:
             process = await asyncio.create_subprocess_exec(
                 *tokens,
-                cwd=self.workspace,
+                cwd=root,
                 env=self._secret_environment(),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

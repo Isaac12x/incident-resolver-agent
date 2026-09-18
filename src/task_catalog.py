@@ -24,9 +24,11 @@ CREATE TABLE IF NOT EXISTS catalog_events (
 );
 CREATE INDEX IF NOT EXISTS catalog_events_task_idx ON catalog_events(task_id, sequence);
 CREATE TABLE IF NOT EXISTS catalog_workspaces (
- task_id TEXT PRIMARY KEY REFERENCES catalog_tasks(task_id),
+ task_id TEXT NOT NULL REFERENCES catalog_tasks(task_id),
+ repository TEXT NOT NULL DEFAULT '',
  root TEXT NOT NULL, device INTEGER NOT NULL,
- inode INTEGER NOT NULL, active INTEGER NOT NULL
+ inode INTEGER NOT NULL, active INTEGER NOT NULL,
+ PRIMARY KEY(task_id, repository)
 );
 CREATE TABLE IF NOT EXISTS catalog_leases (
  task_id TEXT PRIMARY KEY REFERENCES catalog_tasks(task_id),
@@ -48,13 +50,19 @@ class TaskCatalog:
             requested if requested.suffix == ".json" else requested.with_name("tasks.json")
         )
         self.legacy_path = self.path.with_name("tasks.sqlite3")
-        with transaction(self.path) as db:
+        # ``executescript`` commits any open transaction before running its
+        # statements.  Keep schema creation separate so a workspace identity
+        # upgrade below always runs inside a transaction that can roll back as
+        # one unit after a process interruption.
+        with connect(self.path) as db:
             db.executescript(_SCHEMA)
+        with transaction(self.path) as db:
+            self._ensure_workspace_schema(db)
         self._migrate_json()
         self._migrate_legacy()
 
     @staticmethod
-    def scope(incident: Incident) -> str:
+    def legacy_scope(incident: Incident) -> str:
         return json.dumps(
             [
                 incident.source,
@@ -63,6 +71,43 @@ class TaskCatalog:
                 incident.environment,
             ]
         )
+
+    @classmethod
+    def scope(cls, incident: Incident) -> str:
+        # Application incidents intentionally deduplicate across member
+        # repositories and services.  Service is a routing hint; the
+        # application is the durable incident scope.
+        if incident.application:
+            return json.dumps(
+                [
+                    "application",
+                    incident.source,
+                    incident.external_id,
+                    incident.environment,
+                    incident.application.casefold(),
+                ]
+            )
+        return cls.legacy_scope(incident)
+
+    @staticmethod
+    def _ensure_workspace_schema(db: sqlite3.Connection) -> None:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(catalog_workspaces)")}
+        if "repository" in columns:
+            return
+        db.execute("ALTER TABLE catalog_workspaces RENAME TO catalog_workspaces_legacy")
+        db.execute(
+            """CREATE TABLE catalog_workspaces (
+                task_id TEXT NOT NULL REFERENCES catalog_tasks(task_id),
+                repository TEXT NOT NULL DEFAULT '', root TEXT NOT NULL,
+                device INTEGER NOT NULL, inode INTEGER NOT NULL, active INTEGER NOT NULL,
+                PRIMARY KEY(task_id, repository)
+            )"""
+        )
+        db.execute(
+            "INSERT INTO catalog_workspaces(task_id, repository, root, device, inode, active) "
+            "SELECT task_id, '', root, device, inode, active FROM catalog_workspaces_legacy"
+        )
+        db.execute("DROP TABLE catalog_workspaces_legacy")
 
     def _has_marker(self, name: str) -> bool:
         with connect(self.path) as db:
@@ -112,7 +157,7 @@ class TaskCatalog:
                         task = TaskRecord.model_validate(item["record"])
                         incident = Incident.model_validate(item["incident"])
                         scope = str(item["scope"])
-                        if scope != self.scope(incident):
+                        if scope not in {self.scope(incident), self.legacy_scope(incident)}:
                             raise ValueError("invalid scope")
                     except (KeyError, TypeError, ValueError) as error:
                         raise self._bad(self.json_path, error) from error
@@ -158,7 +203,9 @@ class TaskCatalog:
                         )
                     except (KeyError, TypeError, ValueError) as error:
                         raise self._bad(self.json_path, error) from error
-                    db.execute("INSERT INTO catalog_workspaces VALUES (?, ?, ?, ?, ?)", values)
+                    db.execute(
+                        "INSERT INTO catalog_workspaces VALUES (?, '', ?, ?, ?, ?)", values
+                    )
                 for task_id, item in payload["leases"].items():
                     if (
                         db.execute(
@@ -221,7 +268,7 @@ class TaskCatalog:
                     if (
                         row["task_id"] != task.task_id
                         or row["state"] != task.state.value
-                        or row["scope"] != self.scope(incident)
+                        or row["scope"] not in {self.scope(incident), self.legacy_scope(incident)}
                     ):
                         raise ValueError("legacy task identity mismatch")
                 except (TypeError, ValueError) as error:
@@ -259,7 +306,9 @@ class TaskCatalog:
                     is None
                 ):
                     raise ValueError(f"cannot migrate legacy task catalog: {self.legacy_path}")
-                db.execute("INSERT INTO catalog_workspaces VALUES (?, ?, ?, ?, ?)", tuple(row))
+                db.execute(
+                    "INSERT INTO catalog_workspaces VALUES (?, '', ?, ?, ?, ?)", tuple(row)
+                )
             for row in rows.get("leases", []):
                 if (
                     db.execute(
@@ -276,7 +325,8 @@ class TaskCatalog:
     ) -> tuple[TaskRecord, bool]:
         with transaction(self.path) as db:
             row = db.execute(
-                "SELECT record FROM catalog_tasks WHERE scope = ?", (self.scope(incident),)
+                "SELECT record FROM catalog_tasks WHERE scope IN (?, ?)",
+                (self.scope(incident), self.legacy_scope(incident)),
             ).fetchone()
             if row:
                 return TaskRecord.model_validate_json(row["record"]), False
@@ -385,24 +435,26 @@ class TaskCatalog:
             key=lambda task: task.created_at,
         )
 
-    def register_workspace(self, task_id: str, root: Path) -> None:
+    def register_workspace(self, task_id: str, root: Path, repository: str = "") -> None:
         self.load(task_id)
         root = root.resolve()
         stat = root.stat()
         with transaction(self.path) as db:
             db.execute(
-                "INSERT OR REPLACE INTO catalog_workspaces VALUES (?, ?, ?, ?, 1)",
-                (task_id, str(root), stat.st_dev, stat.st_ino),
+                "INSERT OR REPLACE INTO catalog_workspaces "
+                "(task_id, repository, root, device, inode, active) VALUES (?, ?, ?, ?, ?, 1)",
+                (task_id, repository, str(root), stat.st_dev, stat.st_ino),
             )
 
-    def verify_workspace(self, task_id: str, root: Path) -> None:
+    def verify_workspace(self, task_id: str, root: Path, repository: str = "") -> None:
         with connect(self.path) as db:
             row = db.execute(
-                "SELECT root, device, inode, active FROM catalog_workspaces WHERE task_id = ?",
-                (task_id,),
+                "SELECT root, device, inode, active FROM catalog_workspaces "
+                "WHERE task_id = ? AND repository = ?",
+                (task_id, repository),
             ).fetchone()
         if row is None:
-            return self.register_workspace(task_id, root)
+            return self.register_workspace(task_id, root, repository)
         stat = root.stat()
         if not row["active"] or (str(root.resolve()), stat.st_dev, stat.st_ino) != (
             row["root"],
@@ -411,9 +463,15 @@ class TaskCatalog:
         ):
             raise ValueError("workspace identity differs from its durable registration")
 
-    def release_workspace(self, task_id: str) -> None:
+    def release_workspace(self, task_id: str, repository: str | None = None) -> None:
         with transaction(self.path) as db:
-            db.execute("UPDATE catalog_workspaces SET active = 0 WHERE task_id = ?", (task_id,))
+            if repository is None:
+                db.execute("UPDATE catalog_workspaces SET active = 0 WHERE task_id = ?", (task_id,))
+            else:
+                db.execute(
+                    "UPDATE catalog_workspaces SET active = 0 WHERE task_id = ? AND repository = ?",
+                    (task_id, repository),
+                )
 
     def acquire(self, task_id: str, owner: str, ttl: float) -> bool:
         self.load(task_id)

@@ -9,7 +9,7 @@ import os
 import secrets
 import tempfile
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +30,7 @@ from .models import (
     TaskEvent,
     TaskRecord,
 )
-from .skills import Skill, SkillResolver
+from .skills import Skill, SkillResolution, SkillResolver
 from .storage import Storage
 from .tooling import stable_hash, subscription_cli_command
 from .tools import WorkspaceTools
@@ -54,9 +54,12 @@ class AgentLifecycle(Protocol):
         command: str,
         paths: list[str] | None = None,
         force: bool = False,
+        repository: str | None = None,
     ) -> dict[str, Any]: ...
 
-    async def verification_plan(self, seed_paths: list[str]) -> dict[str, Any]: ...
+    async def verification_plan(
+        self, seed_paths: list[str], repository: str | None = None
+    ) -> dict[str, Any]: ...
 
     async def open_pr(self, summary: str) -> dict[str, Any]: ...
 
@@ -372,9 +375,15 @@ class OpenAIAgentsBackend:
             )
 
         @function_tool
-        async def shell(command: str) -> str:
+        async def shell(
+            command: str, repository: str | None = None, integration: bool = False
+        ) -> str:
             """Run a shell command in the isolated repository worktree."""
-            result = await workspace.shell(command)
+            result = (
+                await workspace.shell(command)
+                if repository is None and not integration
+                else await workspace.shell(command, repository, integration=integration)
+            )
             return json.dumps(
                 {
                     "returncode": result.returncode,
@@ -385,33 +394,51 @@ class OpenAIAgentsBackend:
             )
 
         @function_tool
-        def read_file(path: str) -> str:
+        def read_file(path: str, repository: str | None = None) -> str:
             """Read one UTF-8 file relative to the repository root."""
-            return workspace.read_file(path)
+            if repository is None:
+                return workspace.read_file(path)
+            return workspace.read_file(path, repository)
 
         @function_tool
-        def write_file(path: str, content: str) -> str:
+        def write_file(path: str, content: str, repository: str | None = None) -> str:
             """Write one UTF-8 file relative to the repository root."""
-            workspace.write_file(path, content)
+            if repository is None:
+                workspace.write_file(path, content)
+            else:
+                workspace.write_file(path, content, repository)
             return "written"
 
         @function_tool
-        def replace_in_file(path: str, old: str, new: str) -> str:
+        def replace_in_file(
+            path: str, old: str, new: str, repository: str | None = None
+        ) -> str:
             """Replace exactly one occurrence in a repository file."""
-            workspace.replace_in_file(path, old, new)
+            if repository is None:
+                workspace.replace_in_file(path, old, new)
+            else:
+                workspace.replace_in_file(path, old, new, repository)
             return "replaced"
 
         @function_tool
-        def rg_conversation_history(pattern: str, limit: int = 20) -> str:
+        def rg_conversation_history(
+            pattern: str, limit: int = 20, repository: str | None = None
+        ) -> str:
             """Search prior messages for this incident with a ripgrep regular expression.
 
             Use this when asked what was done or why and the current context does not contain
             enough evidence. Matching messages are loaded into the current context as JSON.
             """
-            return workspace.rg_conversation_history(pattern, limit)
+            return (
+                workspace.rg_conversation_history(pattern, limit)
+                if repository is None
+                else workspace.rg_conversation_history(pattern, limit, repository)
+            )
 
         @function_tool
-        def code_graph_search(query: str, kind: str | None = None, limit: int = 20) -> str:
+        def code_graph_search(
+            query: str, kind: str | None = None, limit: int = 20, repository: str | None = None
+        ) -> str:
             """Search symbols in the freshly generated code-review graph."""
             from code_review_graph.tools import semantic_search_nodes
 
@@ -419,22 +446,30 @@ class OpenAIAgentsBackend:
                 query=query,
                 kind=kind,
                 limit=limit,
-                repo_root=str(workspace.workspace),
+                repo_root=str(workspace.repository_workspace(repository)),
             )
             return json.dumps(result, default=str)
 
         @function_tool
-        def code_graph_query(pattern: str, target: str) -> str:
+        def code_graph_query(pattern: str, target: str, repository: str | None = None) -> str:
             """Query callers, callees, imports, tests, inheritance, or file summaries."""
             from code_review_graph.tools import query_graph
 
             return json.dumps(
-                query_graph(pattern=pattern, target=target, repo_root=str(workspace.workspace)),
+                query_graph(
+                    pattern=pattern,
+                    target=target,
+                    repo_root=str(workspace.repository_workspace(repository)),
+                ),
                 default=str,
             )
 
         @function_tool
-        def code_graph_impact(changed_files: list[str] | None = None, max_depth: int = 2) -> str:
+        def code_graph_impact(
+            changed_files: list[str] | None = None,
+            max_depth: int = 2,
+            repository: str | None = None,
+        ) -> str:
             """Check the code-review graph for the blast radius of proposed changes."""
             from code_review_graph.tools import get_impact_radius
 
@@ -442,7 +477,7 @@ class OpenAIAgentsBackend:
                 get_impact_radius(
                     changed_files=changed_files,
                     max_depth=max_depth,
-                    repo_root=str(workspace.workspace),
+                    repo_root=str(workspace.repository_workspace(repository)),
                 ),
                 default=str,
             )
@@ -469,14 +504,21 @@ class OpenAIAgentsBackend:
                 command: str,
                 paths: list[str] | None = None,
                 force: bool = False,
+                repository: str | None = None,
             ) -> str:
                 """Run a verification command and durably record its result and state."""
-                return json.dumps(await run_context.lifecycle.run_tests(command, paths, force))
+                return json.dumps(
+                    await run_context.lifecycle.run_tests(command, paths, force, repository)
+                )
 
             @function_tool
-            async def verification_plan(seed_paths: list[str]) -> str:
+            async def verification_plan(
+                seed_paths: list[str], repository: str | None = None
+            ) -> str:
                 """Plan fix-first verification rings; pass [] to resume the existing plan."""
-                return json.dumps(await run_context.lifecycle.verification_plan(seed_paths))
+                return json.dumps(
+                    await run_context.lifecycle.verification_plan(seed_paths, repository)
+                )
 
             @function_tool
             async def open_pr(summary: str) -> str:
@@ -517,7 +559,15 @@ class OpenAIAgentsBackend:
         if adaptive_router is not None:
 
             async def adaptive_shell(payload: dict[str, Any]) -> Any:
-                result = await workspace.shell(str(payload["command"]))
+                repository = payload.get("repository")
+                integration = bool(payload.get("integration", False))
+                result = (
+                    await workspace.shell(str(payload["command"]))
+                    if repository is None and not integration
+                    else await workspace.shell(
+                        str(payload["command"]), repository, integration=integration
+                    )
+                )
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr or f"command failed ({result.returncode})")
                 return {
@@ -527,7 +577,12 @@ class OpenAIAgentsBackend:
                 }
 
             def adaptive_read(payload: dict[str, Any]) -> str:
-                return workspace.read_file(str(payload["path"]))
+                repository = payload.get("repository")
+                return (
+                    workspace.read_file(str(payload["path"]))
+                    if repository is None
+                    else workspace.read_file(str(payload["path"]), repository)
+                )
 
             adaptive_router.tools = {"shell": adaptive_shell, "read_file": adaptive_read}
             for index, server in enumerate(connector_tools):
@@ -779,17 +834,23 @@ JSON object as the final argument and use the returned JSON as authoritative:
 
 - `harness-out/incident-session-tool mark_investigation_complete JSON`
   (`root_cause`, `evidence`, `proposed_fix`, `reproducible`)
-- `harness-out/incident-session-tool run_tests JSON` (`command`, optional `paths`, `force`)
-- `harness-out/incident-session-tool verification_plan JSON` (`seed_paths`, [] to resume)
+- `harness-out/incident-session-tool run_tests JSON` (`command`, optional `paths`, `force`,
+  `repository`)
+- `harness-out/incident-session-tool verification_plan JSON` (`seed_paths`, optional
+  `repository`; [] to resume)
 - `harness-out/incident-session-tool open_pr JSON` (`summary`)
 - `harness-out/incident-session-tool remember JSON` (`note`, optional `scope`)
-- `harness-out/incident-session-tool shell JSON` (`command`)
-- `harness-out/incident-session-tool read_file JSON` (`path`)
-- `harness-out/incident-session-tool write_file JSON` (`path`, `content`)
-- `harness-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`)
-- `harness-out/incident-session-tool code_graph_search JSON` (`query`, optional `kind`, `limit`)
-- `harness-out/incident-session-tool code_graph_query JSON` (`pattern`, `target`)
-- `harness-out/incident-session-tool code_graph_impact JSON` (`changed_files`, optional `max_depth`)
+- `harness-out/incident-session-tool shell JSON` (`command`, optional `repository`, `integration`)
+- `harness-out/incident-session-tool read_file JSON` (`path`, optional `repository`)
+- `harness-out/incident-session-tool write_file JSON` (`path`, `content`, optional `repository`)
+- `harness-out/incident-session-tool replace_in_file JSON` (`path`, `old`, `new`, optional
+  `repository`)
+- `harness-out/incident-session-tool code_graph_search JSON` (`query`, optional `kind`, `limit`,
+  `repository`)
+- `harness-out/incident-session-tool code_graph_query JSON` (`pattern`, `target`, optional
+  `repository`)
+- `harness-out/incident-session-tool code_graph_impact JSON` (`changed_files`, optional
+  `max_depth`, `repository`)
 - `harness-out/incident-session-tool connector_call JSON` (`connector`, `tool`, `arguments`)
 - `harness-out/incident-session-tool adaptive_tool JSON` (`context`, optional `tool`, `arguments`)
 - `harness-out/incident-session-tool tool_catalog JSON`
@@ -922,7 +983,10 @@ its lifecycle command succeeds.
                         )
 
                     async def run_shell(payload: dict[str, Any]) -> dict[str, Any]:
-                        command_result = await workspace.shell(str(payload["command"]))
+                        command_result = await workspace.shell(
+                            str(payload["command"]), payload.get("repository"),
+                            integration=bool(payload.get("integration", False)),
+                        )
                         return {
                             "returncode": command_result.returncode,
                             "stdout": command_result.stdout,
@@ -934,7 +998,9 @@ its lifecycle command succeeds.
                         {
                             "shell": run_shell,
                             "read_file": lambda payload: {
-                                "content": workspace.read_file(str(payload["path"]))
+                                "content": workspace.read_file(
+                                    str(payload["path"]), payload.get("repository")
+                                )
                             },
                         }
                     )
@@ -1006,7 +1072,7 @@ its lifecycle command succeeds.
                         query=str(arguments["query"]),
                         kind=arguments.get("kind"),
                         limit=int(arguments.get("limit", 20)),
-                        repo_root=str(workspace.workspace),
+                        repo_root=str(workspace.repository_workspace(arguments.get("repository"))),
                     )
                 elif name == "code_graph_query":
                     from code_review_graph.tools import query_graph
@@ -1014,7 +1080,7 @@ its lifecycle command succeeds.
                     result = query_graph(
                         pattern=str(arguments["pattern"]),
                         target=str(arguments["target"]),
-                        repo_root=str(workspace.workspace),
+                        repo_root=str(workspace.repository_workspace(arguments.get("repository"))),
                     )
                 else:
                     from code_review_graph.tools import get_impact_radius
@@ -1022,7 +1088,7 @@ its lifecycle command succeeds.
                     result = get_impact_radius(
                         changed_files=arguments.get("changed_files"),
                         max_depth=int(arguments.get("max_depth", 2)),
-                        repo_root=str(workspace.workspace),
+                        repo_root=str(workspace.repository_workspace(arguments.get("repository"))),
                     )
                 response = {"ok": True, "result": result}
             except Exception as error:
@@ -1033,7 +1099,7 @@ its lifecycle command succeeds.
             await writer.wait_closed()
 
         server = await asyncio.start_unix_server(handle, path=socket_path)
-        launcher = workspace.workspace / "harness-out" / "incident-session-tool"
+        launcher = workspace.session_workspace / "harness-out" / "incident-session-tool"
         launcher.parent.mkdir(parents=True, exist_ok=True)
         self._launcher(launcher, socket_path, token)
         try:
@@ -1158,7 +1224,7 @@ its lifecycle command succeeds.
         if run_context is None:
             raise RuntimeError("subscription CLI requires a durable task run context")
         output_type = output_type or SessionResult
-        files = workspace.workspace / "harness-out"
+        files = workspace.session_workspace / "harness-out"
         files.mkdir(parents=True, exist_ok=True)
         schema_path = files / "session-output.schema.json"
         output_path = files / "session-output.json"
@@ -1172,10 +1238,15 @@ its lifecycle command succeeds.
 
         command = [*self._subscription_command(), "exec"]
         backend_session = run_context.task.backend_session_id
+        application_session = bool(run_context.task.repositories)
         if backend_session:
             command.extend(["resume", backend_session])
+            if application_session:
+                command.append("--skip-git-repo-check")
         else:
-            command.extend(["--sandbox", "read-only", "--cd", str(workspace.workspace)])
+            command.extend(["--sandbox", "read-only", "--cd", str(workspace.session_workspace)])
+            if application_session:
+                command.append("--skip-git-repo-check")
         command.extend(self._mcp_arguments(run_context.capabilities))
         if self.config.model.subscription_profile:
             command.extend(["--profile", self.config.model.subscription_profile])
@@ -1196,12 +1267,23 @@ its lifecycle command succeeds.
             ]
         )
         connector_help = await self._connector_help(run_context)
+        application_scope = ""
+        if run_context.task.repositories:
+            application_scope = (
+                "\nApplication repository scope (use repository on every repository tool):\n"
+                + "\n".join(
+                    f"- {repository}: {workspace.repository_workspace(repository)}"
+                    for repository in run_context.task.repositories
+                )
+                + f"\n- integration parent: {workspace.session_workspace}\n"
+            )
         full_prompt = (
             instructions
             + "\n\n"
             + self._TOOL_HELP
             + "\n\nAvailable runtime MCP adapters:\n"
             + connector_help
+            + application_scope
             + "\n\n"
             + prompt
         )
@@ -1215,7 +1297,7 @@ its lifecycle command succeeds.
             async with self._tool_bridge(run_context, workspace):
                 process = await asyncio.create_subprocess_exec(
                     *command,
-                    cwd=workspace.workspace,
+                    cwd=workspace.session_workspace,
                     stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -1283,13 +1365,39 @@ class IncidentAgent:
     def supports_durable_session(self) -> bool:
         return isinstance(self.backend, (OpenAIAgentsBackend, SubscriptionCLIBackend))
 
-    def _instructions(self, task: TaskRecord, worktree: Path, skills: tuple[Skill, ...]) -> str:
+    @staticmethod
+    def _worktree_map(worktree: Path | Mapping[str, Path]) -> dict[str, Path]:
+        if isinstance(worktree, Mapping):
+            return {str(name): Path(root).resolve() for name, root in worktree.items()}
+        return {"": Path(worktree).resolve()}
+
+    def _instructions(
+        self, task: TaskRecord, worktree: Path | Mapping[str, Path], skills: tuple[Skill, ...]
+    ) -> str:
+        worktrees = self._worktree_map(worktree)
         parts = [
             "# System Prompt\n\n" + self.config.agent.system_prompt.strip(),
             self.storage.read_memory(),
-            self.storage.read_memory(task.repository),
             self.storage.read_task_memory(task.task_id),
         ]
+        for repository, root in worktrees.items():
+            label = repository or task.repository or "repository"
+            try:
+                memory = self.storage.read_memory(label)
+            except (KeyError, FileNotFoundError):
+                memory = ""
+            if memory:
+                parts.append(f"# Memory · {label}\n\n{memory}")
+            try:
+                repository_config = self.config.repository(label)
+            except KeyError:
+                continue
+            project_instructions = root / repository_config.project_instructions
+            if project_instructions.is_file():
+                parts.append(
+                    f"# Repository instructions · {label}\n\n"
+                    + project_instructions.read_text(encoding="utf-8")
+                )
         safety = self.config.safety
         if self.config.code_review.enabled:
             parts.append(
@@ -1304,10 +1412,48 @@ class IncidentAgent:
             )
             if report.exists():
                 parts.append("# OCR report (JSON evidence)\n\n" + report.read_text())
+            if task.repositories:
+                for repository in task.repositories:
+                    member_report = (
+                        self.storage.task_directory(task.task_id)
+                        / "artifacts"
+                        / "code-review"
+                        / repository.replace("/", "--")
+                        / "scan-result.json"
+                    )
+                    if member_report.exists():
+                        parts.append(
+                            f"# OCR report · {repository} (JSON evidence)\n\n"
+                            + member_report.read_text()
+                        )
+        guardrails = list(safety.guardrails)
+        if task.repositories:
+            legacy_scope = (
+                "Work only in the configured repository and its isolated incident worktree."
+            )
+            guardrails = [
+                (
+                    "Work only in the configured application member repositories and their "
+                    "isolated worktrees."
+                    if item == legacy_scope
+                    else item
+                )
+                for item in guardrails
+            ]
+            mapping = "\n".join(
+                f"- {repository}: worktrees/{task.task_id}/{repository.replace('/', '--')}"
+                for repository in task.repositories
+            )
+            parts.append(
+                "# Application Repository Scope\n\n"
+                "Select a repository explicitly for every repository tool. The application "
+                "session workspace is reserved for the configured integration command.\n\n"
+                + mapping
+            )
         safety_sections = {
             "Positive goals": safety.positive_goals,
             "Negative goals": safety.negative_goals,
-            "Guardrails": safety.guardrails,
+            "Guardrails": guardrails,
             "Safeguards": safety.safeguards,
         }
         configured_safety = [
@@ -1389,7 +1535,7 @@ class IncidentAgent:
             "Complete the plan and all required checks before open_pr."
         )
         if skills:
-            loaded = ", ".join(skill.name for skill in skills)
+            loaded = ", ".join(f"{skill.name} ({skill.path})" for skill in skills)
             parts.append(
                 "# Preflight Skill Resolution\n\n"
                 f"The resolver searched the configured skill directories before this run and "
@@ -1397,53 +1543,81 @@ class IncidentAgent:
                 "operation; their full instructions appear below."
             )
             parts.extend(skill.content for skill in skills)
-        try:
-            repository = self.config.repository(task.repository)
-            project_instructions = worktree / repository.project_instructions
-            if project_instructions.is_file():
-                parts.append(project_instructions.read_text(encoding="utf-8"))
-        except KeyError:
-            pass
         return "\n\n".join(part for part in parts if part)
 
     @staticmethod
-    async def _graph_context(task: TaskRecord, worktree: Path, tools: WorkspaceTools) -> str:
+    async def _graph_context(
+        task: TaskRecord, worktree: Path | Mapping[str, Path], tools: WorkspaceTools
+    ) -> str:
         """Query the fresh code-review graph before the model starts inspecting the checkout."""
-        code_graph = worktree / ".code-review-graph" / "graph.db"
-        if not code_graph.is_file():
-            return ""
         from code_review_graph.tools import semantic_search_nodes
-
-        result = await asyncio.to_thread(
-            semantic_search_nodes,
-            query=task.summary,
-            limit=20,
-            repo_root=str(worktree),
-        )
+        contexts: list[str] = []
+        for repository, root in IncidentAgent._worktree_map(worktree).items():
+            code_graph = root / ".code-review-graph" / "graph.db"
+            if not code_graph.is_file():
+                continue
+            result = await asyncio.to_thread(
+                semantic_search_nodes, query=task.summary, limit=20, repo_root=str(root)
+            )
+            label = repository or task.repository or "repository"
+            contexts.append(f"## code-review-graph · {label}\n" + json.dumps(result, default=str))
         return (
             "# Fresh Repository Graph Context\n\n"
-            "## code-review-graph\n"
-            + json.dumps(result, default=str)
+            + "\n\n".join(contexts)
             + "\n\nConfirm graph leads against source and tests.\n\n"
+            if contexts
+            else ""
         )
 
     async def _run(
         self,
         task: TaskRecord,
-        worktree: Path,
+        worktree: Path | Mapping[str, Path],
         operation: str,
         prompt: str,
         skills: list[str],
         capabilities: set[str],
         lifecycle: AgentLifecycle | None = None,
+        parent_workspace: Path | None = None,
     ) -> dict[str, Any]:
         if not self.backend:
             raise RuntimeError("model backend is not configured")
-        roots = [self.skills_root]
-        roots.extend(worktree / directory for directory in self.config.agent.skill_directories)
+        requested_parent = parent_workspace
+        if task.repositories and not isinstance(worktree, Mapping):
+            application_parent = Path(worktree)
+            worktree = {
+                repository: self.storage.repository_worktree(task, repository)
+                for repository in task.repositories
+            }
+            requested_parent = requested_parent or application_parent
+        worktrees = self._worktree_map(worktree)
+        query = f"{operation}\n{task.summary}\n{prompt}"
         resolution = SkillResolver(
-            roots, max_auto_skills=self.config.agent.max_auto_skills
-        ).resolve(skills, f"{operation}\n{task.summary}\n{prompt}")
+            [self.skills_root], max_auto_skills=self.config.agent.max_auto_skills
+        ).resolve(skills, query)
+        # Resolve each member independently.  A checkout's SKILL.md is scoped to that checkout,
+        # so same-named skills from two repositories remain distinct and their paths stay visible
+        # in the run manifest and instructions.
+        selected = list(resolution.selected)
+        discovered = list(resolution.discovered)
+        for root in worktrees.values():
+            repository_resolution = SkillResolver(
+                [root / directory for directory in self.config.agent.skill_directories],
+                max_auto_skills=self.config.agent.max_auto_skills,
+            ).resolve(skills, query)
+            selected.extend(repository_resolution.selected)
+            discovered.extend(repository_resolution.discovered)
+        seen_skills: set[tuple[str, Path]] = set()
+        unique_selected: list[Skill] = []
+        for skill in selected:
+            identity = (skill.name.casefold(), skill.path)
+            if identity in seen_skills:
+                continue
+            seen_skills.add(identity)
+            unique_selected.append(skill)
+        resolution = SkillResolution(
+            tuple(discovered), tuple(unique_selected), resolution.missing_required
+        )
         self.storage.append_event(
             task.task_id,
             TaskEvent(
@@ -1460,7 +1634,10 @@ class IncidentAgent:
             raise RuntimeError(f"required agent skills were not found: {missing}")
         instructions = self._instructions(task, worktree, resolution.selected)
         tools = WorkspaceTools(
-            worktree,
+            worktrees,
+            default_repository=(task.repository if task.repository in worktrees else None),
+            parent_workspace=requested_parent
+            or (self.storage.task_directory(task.task_id) if len(worktrees) > 1 else None),
             timeout=self.config.model.tool_timeout_seconds,
             permissions=self.config.permissions,
             execution=self.config.execution,
@@ -1570,7 +1747,7 @@ class IncidentAgent:
     async def run_session(
         self,
         task: TaskRecord,
-        worktree: Path,
+        worktree: Path | Mapping[str, Path],
         lifecycle: AgentLifecycle,
         prompt: str | None = None,
     ) -> SessionResult:
@@ -1580,7 +1757,23 @@ class IncidentAgent:
             base_branch = repository.base_branch
         except KeyError:
             base_branch = "main"
-        await asyncio.to_thread(self.storage.refresh_worktree, worktree, base_branch)
+        if isinstance(worktree, Mapping):
+            for repository, root in worktree.items():
+                try:
+                    branch = self.config.repository(repository).base_branch
+                except KeyError:
+                    branch = base_branch
+                await asyncio.to_thread(self.storage.refresh_worktree, root, branch)
+        elif not task.repositories:
+            await asyncio.to_thread(self.storage.refresh_worktree, worktree, base_branch)
+        session_worktree: Path | Mapping[str, Path] = worktree
+        parent_workspace: Path | None = None
+        if task.repositories:
+            session_worktree = {
+                repository: self.storage.repository_worktree(task, repository)
+                for repository in task.repositories
+            }
+            parent_workspace = worktree if isinstance(worktree, Path) else None
         initial_prompt = (
             "Resolve this incident end to end in the current durable session. Use lifecycle tools "
             "to persist progress and delegate bounded sub-tasks.\n\n"
@@ -1588,7 +1781,7 @@ class IncidentAgent:
         )
         result = await self._run(
             task,
-            worktree,
+            session_worktree,
             "resolve",
             prompt or initial_prompt,
             [
@@ -1602,12 +1795,15 @@ class IncidentAgent:
             ],
             {"incidents", "errors", "logs", "traces", "metrics", "runtime"},
             lifecycle=lifecycle,
+            parent_workspace=parent_workspace,
         )
         validated = SessionResult.model_validate(result)
         self._cache_response(task, result)
         return validated
 
-    async def investigate(self, task: TaskRecord, worktree: Path) -> InvestigationResult:
+    async def investigate(
+        self, task: TaskRecord, worktree: Path | Mapping[str, Path]
+    ) -> InvestigationResult:
         incident = self.storage.load_incident(task.task_id)
         result = await self._run(
             task,
@@ -1621,7 +1817,9 @@ class IncidentAgent:
         self._cache_response(task, result)
         return validated
 
-    async def implement_fix(self, task: TaskRecord, worktree: Path) -> FixResult:
+    async def implement_fix(
+        self, task: TaskRecord, worktree: Path | Mapping[str, Path]
+    ) -> FixResult:
         investigation = self.storage.task_directory(task.task_id) / "investigation.md"
         result = await self._run(
             task,
@@ -1636,7 +1834,10 @@ class IncidentAgent:
         return validated
 
     async def address_review(
-        self, task: TaskRecord, comments: list[ReviewComment], worktree: Path
+        self,
+        task: TaskRecord,
+        comments: list[ReviewComment],
+        worktree: Path | Mapping[str, Path],
     ) -> ReviewResult:
         result = await self._run(
             task,

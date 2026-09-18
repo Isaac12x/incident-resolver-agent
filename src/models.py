@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -46,12 +46,42 @@ class IncidentEvidence(BaseModel):
 class Incident(BaseModel):
     external_id: str
     source: str
-    repository: str
     environment: str
     summary: str
+    # Empty repository is intentional for application-scoped intake.  The
+    # configured application membership supplies the target repositories.
+    repository: str = ""
+    application: str | None = None
+    service: str | None = None
     description: str = ""
     evidence: list[IncidentEvidence] = Field(default_factory=list)
     received_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("application", "service")
+    @classmethod
+    def optional_scope_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or any(character in value for character in "\r\n"):
+            raise ValueError("scope names must be nonempty and single-line")
+        return value
+
+    @field_validator("environment", "external_id", "source", "summary")
+    @classmethod
+    def incident_string_fields(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("incident identity and summary fields cannot be blank")
+        return value
+
+    @field_validator("repository")
+    @classmethod
+    def optional_repository(cls, value: str) -> str:
+        value = value.strip()
+        if any(character in value for character in "\r\n"):
+            raise ValueError("repository must be a single-line identifier")
+        return value
 
 
 class RepositoryTarget(BaseModel):
@@ -99,6 +129,33 @@ class ReviewComment(BaseModel):
     resolved: bool = False
 
 
+class RepositoryTaskState(BaseModel):
+    """Durable state for one repository in an application task."""
+
+    repository: str
+    state: TaskState = TaskState.RECEIVED
+    changed: bool = False
+    merged: bool = False
+    base_sha: str | None = None
+    branch: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    pr_head_sha: str | None = None
+    deployment_environment: str | None = None
+    deployment_sha: str | None = None
+    deployment_url: str | None = None
+    playwright_status: str | None = None
+    code_review_sha: str | None = None
+    verification_sha: str | None = None
+    verification_status: str | None = None
+    verification_command: str | None = None
+    verification_output: str = ""
+    pending_review_comments: list[ReviewComment] = Field(default_factory=list)
+    verification_progress: dict[str, Any] = Field(default_factory=dict)
+    attempts: int = 0
+    error: str | None = None
+
+
 class TaskEvent(BaseModel):
     type: str
     time: datetime = Field(default_factory=utc_now)
@@ -117,6 +174,9 @@ class TaskRecord(BaseModel):
     repository: str
     environment: str
     summary: str
+    application: str | None = None
+    service: str | None = None
+    repositories: dict[str, RepositoryTaskState] = Field(default_factory=dict)
     branch: str | None = None
     pr_number: int | None = None
     pr_url: str | None = None
@@ -130,6 +190,59 @@ class TaskRecord(BaseModel):
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    def repository_names(self) -> list[str]:
+        """Return the task's snapshotted targets, retaining legacy semantics."""
+        return (
+            list(self.repositories)
+            if self.repositories
+            else ([self.repository] if self.repository else [])
+        )
+
+    def repository_state(self, repository: str | None = None) -> RepositoryTaskState:
+        """Project the compatibility fields or one application member."""
+        name = repository or self.repository
+        if self.repositories:
+            for key, state in self.repositories.items():
+                if key.casefold() == name.casefold():
+                    return state
+            raise KeyError(f"repository is not in task scope: {name}")
+        return RepositoryTaskState(
+            repository=name,
+            changed=False,
+            merged=False,
+            branch=self.branch,
+            pr_number=self.pr_number,
+            pr_url=self.pr_url,
+            pr_head_sha=self.pr_head_sha,
+            deployment_environment=self.deployment_environment,
+            deployment_sha=self.deployment_sha,
+            deployment_url=self.deployment_url,
+            playwright_status=self.playwright_status,
+            code_review_sha=self.code_review_sha,
+            pending_review_comments=list(self.pending_review_comments),
+            attempts=self.attempts,
+            error=self.error,
+        )
+
+    def for_repository(self, repository: str | None = None) -> TaskRecord:
+        """Return a compatibility view containing one member's lifecycle fields."""
+        state = self.repository_state(repository)
+        return self.model_copy(
+            update={
+                "repository": state.repository,
+                "branch": state.branch,
+                "pr_number": state.pr_number,
+                "pr_url": state.pr_url,
+                "pr_head_sha": state.pr_head_sha,
+                "deployment_environment": state.deployment_environment,
+                "deployment_sha": state.deployment_sha,
+                "deployment_url": state.deployment_url,
+                "playwright_status": state.playwright_status,
+                "code_review_sha": state.code_review_sha,
+                "pending_review_comments": list(state.pending_review_comments),
+            }
+        )
 
 
 class TaskResult(BaseModel):
