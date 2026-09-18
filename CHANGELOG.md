@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add a native read-only `local-logs` connector configurable and testable in the TUI, with
+  bounded tail/filter tools for both agent runtimes and file readiness checks. Local log evidence
+  requires no Grafana/Loki service. Start connector sessions for manual incident-file runs too.
+
 - Add application-scoped incident repair for explicitly configured services and repositories: one
   durable session, repository-aware tools, changed-only publication with linked sibling PRs,
   per-repository exact-SHA verification, and optional parent-workspace integration checks, while

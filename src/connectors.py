@@ -41,12 +41,24 @@ class ConnectorManager:
             config.name: self._observability_factory
             for config in configs if config.type in {"loki", "grafana"}
         })
+        self.factories.update({
+            config.name: self._local_logs_factory
+            for config in configs if config.type == "local-logs"
+        })
         self.factories.update(factories or {})
         self.sessions: dict[str, Any] = {}
         self.errors: dict[str, str] = {}
         self.default_repository = default_repository
         self.default_application = default_application
         self.default_service = default_service
+
+    @staticmethod
+    async def _local_logs_factory(config: ConnectorConfig) -> Any:
+        from .local_logs import LocalLogServer
+
+        server = LocalLogServer(config)
+        await server.connect()
+        return server
 
     @staticmethod
     async def _observability_factory(config: ConnectorConfig) -> Any:
@@ -196,7 +208,7 @@ class ConnectorManager:
                 "capabilities": sorted(c.capabilities),
                 "endpoint_sha256": hashlib.sha256(
                     json.dumps(
-                        {"url": c.url, "command": list(c.command)},
+                        {"url": c.url, "command": list(c.command), "log_path": c.log_path},
                         sort_keys=True,
                         separators=(",", ":"),
                     ).encode("utf-8")
