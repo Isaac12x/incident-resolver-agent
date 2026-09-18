@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add `incident-agent plugins` and `incident-agent connect` for discovering and
+  configuring named MCP, webhook, Loki, Grafana, and local-log sources, including
+  JSON catalog output, interactive setup, repeated capabilities, and environment-only
+  bearer-token references.
+
 - Add a native read-only `local-logs` connector configurable and testable in the TUI, with
   bounded tail/filter tools for both agent runtimes and file readiness checks. Local log evidence
   requires no Grafana/Loki service. Start connector sessions for manual incident-file runs too.
