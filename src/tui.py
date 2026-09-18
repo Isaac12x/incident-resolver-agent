@@ -703,7 +703,12 @@ class ConfigurationApp(App[None]):
                 ("incident", "output", "observability", "other"),
             ),
             Label("Type"),
-            self._select(connector.type, f"{prefix}-type", ("mcp", "webhook", "loki", "grafana")),
+            self._select(
+                connector.type, f"{prefix}-type",
+                ("mcp", "webhook", "loki", "grafana", "local-logs"),
+            ),
+            Label("Local log file (absolute path on the harness host; local-logs only)"),
+            self._input(connector.log_path, f"{prefix}-log-path"),
             Label("MCP transport"),
             self._select(
                 connector.transport, f"{prefix}-transport", ("stdio", "streamable-http", "sse")
@@ -938,6 +943,7 @@ class ConfigurationApp(App[None]):
             auth_token_env=self._value(f"{prefix}-auth-token-env").strip() or None,
             tenant_id=self._value(f"{prefix}-tenant-id").strip() or None,
             datasource_uid=self._value(f"{prefix}-datasource-uid").strip() or None,
+            log_path=self._value(f"{prefix}-log-path").strip() or None,
             capabilities=self._split(self._value(f"{prefix}-capabilities")),
         )
 

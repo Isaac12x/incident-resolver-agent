@@ -329,7 +329,7 @@ class DeploymentConfig(BaseModel):
 class ConnectorConfig(BaseModel):
     name: str
     purpose: Literal["incident", "output", "observability", "other"] = "other"
-    type: Literal["mcp", "webhook", "loki", "grafana"] = "mcp"
+    type: Literal["mcp", "webhook", "loki", "grafana", "local-logs"] = "mcp"
     transport: Literal["stdio", "streamable-http", "sse"] = "streamable-http"
     url: str | None = None
     command: list[str] = Field(default_factory=list)
@@ -337,9 +337,17 @@ class ConnectorConfig(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     tenant_id: str | None = None
     datasource_uid: str | None = None
+    log_path: str | None = None
 
     @model_validator(mode="after")
     def transport_has_target(self) -> ConnectorConfig:
+        if self.type == "local-logs":
+            if not self.log_path or not Path(self.log_path).expanduser().is_absolute():
+                raise ValueError("local-logs connectors require an absolute log_path")
+            if "\x00" in self.log_path:
+                raise ValueError("log_path must not contain null bytes")
+            if not self.capabilities:
+                self.capabilities = ["logs"]
         if self.type in {"loki", "grafana"}:
             from urllib.parse import urlsplit
 
