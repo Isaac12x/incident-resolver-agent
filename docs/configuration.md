@@ -210,7 +210,7 @@ TOML header: `[repositories.playwright]`.
 
 | Option | Type / accepted values | Default | Meaning |
 | --- | --- | --- | --- |
-| `command` | string | `""` | Shell command used to verify a preview deployment. Configure a real test command; the empty default cannot complete required preview verification. |
+| `command` | string | `""` | Command used to verify a preview deployment. Arguments are split without a shell; use a script for pipes or shell expansion. Configure a real test command; the empty default cannot complete required preview verification. |
 | `base_url_env` | string | `"PLAYWRIGHT_TEST_BASE_URL"` | Environment variable set to the matched deployment URL for the test command. |
 | `timeout_seconds` | integer | `900` | Timeout for each Playwright command attempt. Bounds: ≥ 1. |
 | `retries` | integer | `1` | Additional attempts after the first Playwright command failure. Bounds: ≥ 0. |

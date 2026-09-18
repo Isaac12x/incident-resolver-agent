@@ -6,6 +6,12 @@ Added a GitHub Pages/Jekyll documentation home, complete 99-option configuration
 example TOML, and Pages configuration. Linked the docs from README and updated CHANGELOG.
 Validated all documented option names against Config.model_json_schema(), parsed and validated
 example TOML through Config, checked new Markdown links/anchors, and ran git diff --check.
-Local Jekyll rendering is being checked; no live Pages deployment or settings change performed.
+YAML/front matter parsing and Markdown rendering passed (15 tables, 99 four-column rows).
+Full Jekyll build could not run: RubyGems DNS lookup timed out during dependency setup.
+No live Pages deployment or settings change performed.
 Original checkout's uncommitted work is preserved; changes live in the isolated worktree
 /tmp/incident-harness-configuration-docs. No VISION.md exists on the source or default branch.
+
+PR: https://github.com/Isaac12x/incident-resolver-agent/pull/20
+Initial review check at approximately 2026-09-18 08:10 UTC: mergeable, no general or inline
+comments, reviews, or CI checks. Follow-up monitoring is in progress.

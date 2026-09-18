@@ -20,6 +20,8 @@ The CLI selects configuration in this order:
 3. `.agent/config.toml` when the current directory contains that file or an `.agent` directory.
 4. `$XDG_CONFIG_HOME/incident-harness/config.toml`, defaulting to `~/.config/incident-harness/config.toml`.
 
+When running from a source checkout, `init` defaults to `.agent/config.toml` unless `--config` or `INCIDENT_AGENT_CONFIG` is supplied.
+
 Run `incident-agent init` to initialize configuration, then `incident-agent config` to edit it in the terminal UI. `incident-agent tui` opens the same editor.
 
 New per-user configurations use `$XDG_STATE_HOME/incident-harness` for state (default `~/.local/state/incident-harness`), enable `server.require_api_auth`, and add a Grafana webhook connector. For a missing or empty explicit config, the loader initially uses the config file's parent as `runtime_root`. If an authenticated supported Codex CLI is available, initialization selects `subscription-cli`; otherwise it selects `agents-sdk`.
