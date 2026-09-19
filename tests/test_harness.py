@@ -1994,6 +1994,7 @@ async def test_tui_overview_and_empty_collection_states(tmp_path: Path) -> None:
     save_config(Config(runtime_root=tmp_path / "runtime"), path)
     app = ConfigurationApp(path)
     async with app.run_test() as pilot:
+        assert app.theme == "groknight"
         headline = app.query_one("#overview-headline", Static).render().plain
         assert "Ready for incident intake" in headline or "checks failed" in headline
         readiness = app.query_one("#readiness", Static).render().plain
