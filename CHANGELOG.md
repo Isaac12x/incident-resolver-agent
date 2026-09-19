@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-<<<<<<< Updated upstream
-=======
+## 0.3.0 - 2026-09-19
+
+- Add `incident-agent update nightly` to install the latest default-branch changes,
+  and use `incident-agent update` to return to the latest published release.
 - Add `incident-agent executions list` and `incident-agent executions SESSION_ID
   inspect` so operators can browse previous task sessions (`task:<task-id>`)
   and read the stored model conversation. The list TUI shows the summary title with
@@ -20,7 +22,6 @@
 - Improve the configuration TUI with a readiness checklist, saved-config snapshot,
   named sections, collection empty states, and collapsed Playwright fields.
 
->>>>>>> Stashed changes
 ## 0.2.0 - 2026-09-19
 
 - Add repository vision and architecture context handling, including optional architecture
