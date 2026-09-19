@@ -2,13 +2,85 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import urllib.request
 from dataclasses import dataclass
+from importlib.metadata import distribution
 from pathlib import Path
+from urllib.parse import urlparse
 
 PACKAGE_NAME = "incident-harness"
+DEFAULT_RELEASE_REPOSITORY = "Isaac12x/incident-resolver-agent"
+
+
+def release_asset_url(
+    *,
+    repository: str = DEFAULT_RELEASE_REPOSITORY,
+    version: str = "latest",
+    asset: str | None = None,
+    opener=urllib.request.urlopen,
+) -> str:
+    """Resolve a valid versioned wheel URL from a GitHub release."""
+    endpoint = f"https://api.github.com/repos/{repository}/releases/{version}"
+    if version != "latest":
+        endpoint = f"https://api.github.com/repos/{repository}/releases/tags/{version}"
+    try:
+        with opener(endpoint, timeout=10) as response:
+            release = json.load(response)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"could not resolve release metadata from {endpoint}: {error}"
+        ) from error
+    candidates = [
+        item for item in release.get("assets", []) if item.get("name", "").endswith(".whl")
+    ]
+    if asset:
+        candidates = [item for item in candidates if item.get("name") == asset]
+    else:
+        candidates = [
+            item
+            for item in candidates
+            if item.get("name", "").startswith("incident_harness-")
+        ]
+    if not candidates or not candidates[0].get("browser_download_url"):
+        requested = asset or "incident_harness wheel"
+        raise RuntimeError(f"release {repository}@{version} has no {requested} asset")
+    return candidates[0]["browser_download_url"]
+
+
+def installation_source() -> str:
+    """Return the explicit source or current valid release wheel URL."""
+    source = os.environ.get("INCIDENT_HARNESS_SOURCE")
+    if source:
+        return source
+    repository = os.environ.get("INCIDENT_HARNESS_REPOSITORY", DEFAULT_RELEASE_REPOSITORY)
+    version = os.environ.get("INCIDENT_HARNESS_VERSION", "latest")
+    asset = os.environ.get("INCIDENT_HARNESS_RELEASE_ASSET")
+    return release_asset_url(repository=repository, version=version, asset=asset)
+
+
+def installed_release_repository() -> str | None:
+    """Return the GitHub repository recorded for a release wheel install."""
+    try:
+        metadata = distribution(PACKAGE_NAME).read_text("direct_url.json")
+    except Exception:
+        return None
+    if not metadata:
+        return None
+    try:
+        url = json.loads(metadata).get("url", "")
+        parsed = urlparse(url)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if parsed.hostname != "github.com" or len(parts) < 5:
+        return None
+    if parts[2] != "releases" or parts[3] not in {"download", "latest"}:
+        return None
+    return "/".join(parts[:2])
 
 
 @dataclass(frozen=True)
@@ -214,8 +286,31 @@ def update_installation(
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("uv is required for updates; install it from https://docs.astral.sh/uv/")
+    explicit_source = any(
+        os.environ.get(name)
+        for name in (
+            "INCIDENT_HARNESS_SOURCE",
+            "INCIDENT_HARNESS_REPOSITORY",
+            "INCIDENT_HARNESS_VERSION",
+            "INCIDENT_HARNESS_RELEASE_ASSET",
+        )
+    )
+    if explicit_source:
+        command = [uv, "tool", "install", "--force", "--from", installation_source(), PACKAGE_NAME]
+    elif repository := installed_release_repository():
+        command = [
+            uv,
+            "tool",
+            "install",
+            "--force",
+            "--from",
+            release_asset_url(repository=repository),
+            PACKAGE_NAME,
+        ]
+    else:
+        command = [uv, "tool", "upgrade", PACKAGE_NAME]
     result = runner(
-        [uv, "tool", "upgrade", PACKAGE_NAME],
+        command,
         capture_output=True,
         text=True,
         check=False,
