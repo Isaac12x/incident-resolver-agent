@@ -122,3 +122,12 @@ monitor is installed. Publish v0.3.0 from the merged PR commit with the wheel,
 source archive, installer and SHA256SUMS, then verify public stable/nightly updates
 in the isolated uv tool environment. Release URL:
 https://github.com/Isaac12x/incident-resolver-agent/releases/tag/v0.3.0
+
+## 2026-09-19 — Sources investigation guidance
+
+Added the exact requested sentence as the first element of the TUI Sources page:
+"Connect to your logs to get the agent access to investigation evidence needed to fix the bug".
+Updated the Unreleased changelog. Verified the exact first-element text, the focused
+Sources test, all 15 selected TUI/theme tests, Ruff, diff checks, and wheel/sdist build.
+No type checker is configured. No deployment verification applies to this local TUI copy change.
+Changes isolated on fix/sources-evidence-guidance; other workspace edits preserved.
