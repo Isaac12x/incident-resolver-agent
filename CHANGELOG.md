@@ -2,13 +2,6 @@
 
 ## Unreleased
 
-- Add `incident-agent plugins` and `incident-agent connect` for discovering and
-  configuring named MCP, webhook, Loki, Grafana, and local-log sources, including
-  JSON catalog output, interactive setup, repeated capabilities, and environment-only
-  bearer-token references.
-- Improve the configuration TUI with a readiness checklist, saved-config snapshot,
-  named sections, collection empty states, and collapsed Playwright fields.
-
 ## 0.2.0 - 2026-09-19
 
 - Add repository vision and architecture context handling, including optional architecture

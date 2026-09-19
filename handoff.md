@@ -53,3 +53,32 @@ or inline comments, reviews or CI checks. Follow-up at 12:01:10 UTC (5m20s later
 open, clean and mergeable at the same commit, with no comments, reviews or CI checks.
 No feedback required changes. This final handoff-only commit records the follow-up;
 monitoring ends here, and no background monitor is installed.
+
+
+## Architecture-aware repair and release — 2026-09-19
+
+Implemented with requested Luna agents and root orchestration in isolated worktree
+`/Users/iamin/work/code/tools/incident-harness-release`, branch
+`feat/architecture-conflict-release`, based on `origin/master`. Original checkout edits
+(README.md, TODO.md, VENDORS.md and dashboard proposal) were preserved. No VISION.md exists.
+
+Adds scoped vision/architecture discovery with explicit missing/omitted documentation,
+normal-versus-architectural repair guidance, and pinned MIT-attributed Matt Pocock
+code-review, codebase-design, and resolving-merge-conflicts skill adaptations. Code review
+uses separate Standards and Spec axes. Conflicting tracked PRs are detected by signed
+webhooks and five-minute GitHub polling, merged against their actual base with durable
+lease-protected recovery, verified afresh, and pushed normally. Application member scope,
+retry budgets, stale/unknown head handling, crash cuts, and publication state are covered.
+Prepares v0.2.0 wheel/curl installer and source-preserving update behavior.
+
+Validation: 579 tests passed in 90.92s; 94.01% aggregate coverage and every module >90%.
+Ruff, compileall, uv lock --check, diff checks, wheel/sdist builds, all 12 offline contracts,
+and scripted repair evaluation passed. Clean Linux wheel installation and isolated macOS
+uv installation passed CLI help, offline eval, version and all three skill/license checks.
+Final wheel modules and skills match source bytes. Independent final audit found no blockers.
+No live model or hosted preview deployment exercised; architecture judgment is agent guidance.
+
+Commit `51e30d1f607ad4eb42e397d572249a54a757ac8a`; PR #27:
+https://github.com/Isaac12x/incident-resolver-agent/pull/27
+Initial review check at 2026-09-19 13:00 UTC: open, mergeable, no general/inline comments,
+reviews, or configured CI checks. Five-minute follow-up and public release pending.

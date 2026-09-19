@@ -44,12 +44,19 @@ TRANSITIONS: Mapping[TaskState, frozenset[TaskState]] = {
             TaskState.REPRODUCING,
         }
     ),
-    TaskState.WAITING_FOR_DEPLOYMENT: frozenset({TaskState.TESTING_DEPLOYMENT}),
+    TaskState.WAITING_FOR_DEPLOYMENT: frozenset(
+        {TaskState.TESTING_DEPLOYMENT, TaskState.REPRODUCING}
+    ),
     TaskState.TESTING_DEPLOYMENT: frozenset(
         {TaskState.WAITING_FOR_REVIEW, TaskState.REPRODUCING, TaskState.BLOCKED}
     ),
     TaskState.WAITING_FOR_REVIEW: frozenset(
-        {TaskState.IMPLEMENTING, TaskState.COMPLETED, TaskState.WAITING_FOR_REVIEW}
+        {
+            TaskState.IMPLEMENTING,
+            TaskState.REPRODUCING,
+            TaskState.COMPLETED,
+            TaskState.WAITING_FOR_REVIEW,
+        }
     ),
     TaskState.COMPLETED: frozenset(),
     TaskState.BLOCKED: frozenset(),

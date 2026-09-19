@@ -41,9 +41,154 @@ def test_checkout_config_wins_and_user_config_uses_state(monkeypatch, tmp_path: 
 
 def test_update_returns_actual_uv_result(monkeypatch) -> None:
     monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr(
+        "src.lifecycle.release_asset_url",
+        lambda **_: "https://github.com/example/release/releases/download/v0.2.0/incident_harness-0.2.0-py3-none-any.whl",
+    )
     expected = CompletedProcess(["uv"], 0, "updated\n", "")
     result = update_installation(runner=lambda *args, **kwargs: expected)
     assert result is expected
+
+
+def test_installation_source_defaults_to_latest_release(monkeypatch) -> None:
+    from src.lifecycle import installation_source
+
+    monkeypatch.delenv("INCIDENT_HARNESS_SOURCE", raising=False)
+    monkeypatch.delenv("INCIDENT_HARNESS_VERSION", raising=False)
+    monkeypatch.setattr(
+        "src.lifecycle.release_asset_url",
+        lambda **_: "https://github.com/Isaac12x/incident-resolver-agent/releases/download/v0.2.0/incident_harness-0.2.0-py3-none-any.whl",
+    )
+    assert installation_source().endswith("incident_harness-0.2.0-py3-none-any.whl")
+
+
+def test_installation_source_supports_pinned_release_and_fork(monkeypatch) -> None:
+    from src.lifecycle import installation_source
+
+    monkeypatch.setenv("INCIDENT_HARNESS_REPOSITORY", "example/fork")
+    monkeypatch.setenv("INCIDENT_HARNESS_VERSION", "v0.2.0")
+    monkeypatch.setattr(
+        "src.lifecycle.release_asset_url",
+        lambda **kwargs: (
+            f"https://github.com/{kwargs['repository']}/releases/download/{kwargs['version']}/"
+            "incident_harness-0.2.0-py3-none-any.whl"
+        ),
+    )
+    assert installation_source().endswith(
+        "example/fork/releases/download/v0.2.0/incident_harness-0.2.0-py3-none-any.whl"
+    )
+    monkeypatch.setenv("INCIDENT_HARNESS_SOURCE", "git+https://example/fork.git@dev")
+    assert installation_source() == "git+https://example/fork.git@dev"
+
+
+def test_installed_release_repository_reads_direct_url(monkeypatch) -> None:
+    from src.lifecycle import installed_release_repository
+
+    class Metadata:
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            return '{"url":"https://github.com/example/fork/releases/download/v0.2.0/incident_harness-0.2.0-py3-none-any.whl"}'
+
+    monkeypatch.setattr("src.lifecycle.distribution", lambda _: Metadata())
+    assert installed_release_repository() == "example/fork"
+
+
+def test_custom_installed_source_falls_back_to_uv_upgrade(monkeypatch) -> None:
+    from src.lifecycle import update_installation
+
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr("src.lifecycle.installed_release_repository", lambda: None)
+    commands = []
+    update_installation(
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", "")
+    )
+    assert commands[0] == ["/usr/bin/uv", "tool", "upgrade", "incident-harness"]
+
+
+def test_release_asset_url_selects_project_wheel() -> None:
+    import io
+
+    from src.lifecycle import release_asset_url
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.close()
+
+    response = Response(
+        b'{"assets":[{"name":"other.whl","browser_download_url":"https://example/other.whl"},'
+        b'{"name":"incident_harness-0.2.0-py3-none-any.whl",'
+        b'"browser_download_url":"https://example/incident_harness-0.2.0-py3-none-any.whl"}]}'
+    )
+    assert release_asset_url(opener=lambda *_args, **_kwargs: response).endswith(
+        "incident_harness-0.2.0-py3-none-any.whl"
+    )
+
+
+@pytest.mark.parametrize("payload", [b"not-json", b'{"assets": []}'])
+def test_release_asset_url_rejects_bad_or_missing_metadata(payload: bytes) -> None:
+    from src.lifecycle import release_asset_url
+
+    class Response:
+        def __enter__(self):
+            import io
+
+            return io.BytesIO(payload)
+
+        def __exit__(self, *_):
+            return None
+
+    with pytest.raises(RuntimeError, match="release|metadata"):
+        release_asset_url(opener=lambda *_args, **_kwargs: Response())
+
+
+def test_release_asset_url_supports_tag_and_exact_asset() -> None:
+    import io
+
+    from src.lifecycle import release_asset_url
+
+    class Response:
+        def __enter__(self):
+            return io.BytesIO(
+                b'{"assets":[{"name":"custom.whl","browser_download_url":"https://example/custom.whl"}]}'
+            )
+
+        def __exit__(self, *_):
+            return None
+
+    calls = []
+
+    def opener(url, **kwargs):
+        calls.append(url)
+        return Response()
+
+    assert release_asset_url(
+        repository="example/fork", version="v1.0.0", asset="custom.whl", opener=opener
+    ) == "https://example/custom.whl"
+    assert calls == ["https://api.github.com/repos/example/fork/releases/tags/v1.0.0"]
+
+
+def test_installed_release_repository_rejects_non_release_sources(monkeypatch) -> None:
+    from src.lifecycle import installed_release_repository
+
+    class Metadata:
+        def __init__(self, value):
+            self.value = value
+
+        def read_text(self, _):
+            return self.value
+
+    for value in (
+        None,
+        "not-json",
+        '{"url":"https://github.com/example/fork.git"}',
+        '{"url":"https://example.test/releases/download/v1/wheel.whl"}',
+    ):
+        monkeypatch.setattr("src.lifecycle.distribution", lambda _, value=value: Metadata(value))
+        assert installed_release_repository() is None
 
 
 def test_update_requires_uv(monkeypatch) -> None:

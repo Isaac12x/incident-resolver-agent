@@ -87,6 +87,18 @@ def test_skill_resolver_honors_auto_load_limit_and_ignores_missing_roots(tmp_pat
     assert resolution.selected[0].name == "security"
 
 
+def test_bundled_mattpocock_review_and_conflict_skills_include_instructions() -> None:
+    resolution = SkillResolver([Path("skills")]).resolve(
+        ["code-review", "resolving-merge-conflicts"],
+        "review an incident fix and resolve a pull request conflict",
+    )
+
+    by_name = {skill.name: skill for skill in resolution.selected}
+    assert "Standards" in by_name["code-review"].content
+    assert "Spec" in by_name["code-review"].content
+    assert "never `--abort`" in by_name["resolving-merge-conflicts"].content
+
+
 def test_agent_skill_directories_must_be_repository_relative() -> None:
     assert AgentConfig(skill_directories=["skills", ".agents/skills"]).max_auto_skills == 8
     with pytest.raises(ValueError, match="repository-relative"):
@@ -132,4 +144,5 @@ async def test_agent_fails_closed_when_a_required_skill_is_missing(tmp_path: Pat
         "code-review-graph",
         "incident-investigation",
         "show-me",
+        "code-review",
     ]

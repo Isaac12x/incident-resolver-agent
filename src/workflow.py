@@ -382,6 +382,9 @@ class _TaskLifecycle:
                 TaskState.WAITING_FOR_DEPLOYMENT,
                 pr_head_sha=reference.head_sha,
                 pr_url=reference.url,
+                conflict_pending=False,
+                conflict_merge_pending=False,
+                conflict_base_branch=None,
             )
         elif task.pr_number:
             reference = await self.workflow._publish(task, self.worktree, update=True)
@@ -390,6 +393,9 @@ class _TaskLifecycle:
                 TaskState.WAITING_FOR_DEPLOYMENT,
                 pr_head_sha=reference.head_sha,
                 pr_url=reference.url,
+                conflict_pending=False,
+                conflict_merge_pending=False,
+                conflict_base_branch=None,
             )
         elif repository.publish_mode == "local" or (
             repository.publish_mode == "auto" and self.workflow.github.api is None
@@ -408,6 +414,9 @@ class _TaskLifecycle:
                 pr_number=pull_request.number,
                 pr_url=pull_request.url,
                 pr_head_sha=pull_request.head_sha,
+                conflict_pending=False,
+                conflict_merge_pending=False,
+                conflict_base_branch=None,
             )
         return {
             "state": task.state.value,
@@ -461,6 +470,7 @@ class WorkflowEngine:
         self._queued_task_ids: set[str] = set()
         self._running_task_ids: set[str] = set()
         self._deferred_wakeups: set[str] = set()
+        self._next_conflict_poll = 0.0
         self.root_cause_model = LogisticRootCauseModel([], [], {}, 0)
         self.similar_incidents = SimilarIncidentSearch(allow_download=False)
         self._intelligence_lock = threading.RLock()
@@ -1059,6 +1069,16 @@ class WorkflowEngine:
                     "Address these authorized review comments in the same task session:\n\n"
                     + ("\n".join(f"{comment.author}: {comment.body}" for comment in comments))
                 )
+        elif task.conflict_pending:
+            prompt = (
+                "The pull request became conflicted with its base branch. Continue the same "
+                "durable incident session and resolve the merge conflict in the checked-out "
+                "repository. The GitHub base branch is "
+                f"`{task.conflict_base_branch or 'the branch named by the webhook'}`. "
+                "Preserve both the incident fix and compatible upstream changes, inspect every "
+                "conflict, run the required local checks, and publish the resolved head through "
+                "the normal lifecycle. Do not force-push or discard either side."
+            )
         else:
             prompt = (
                 f"Resume the same durable incident session from state `{task.state.value}`. "
@@ -1440,6 +1460,9 @@ class WorkflowEngine:
                     pr_number=pull_request.number,
                     pr_url=pull_request.url,
                     pr_head_sha=pull_request.head_sha,
+                    conflict_pending=False,
+                    conflict_merge_pending=False,
+                    conflict_base_branch=None,
                 )
 
             if task.state == TaskState.TESTING_DEPLOYMENT:
@@ -1606,26 +1629,12 @@ class WorkflowEngine:
         if task.state in TERMINAL_STATES:
             return task
         action = payload.get("action")
-        if event == "pull_request" and action == "closed" and payload["pull_request"].get("merged"):
-            if self._is_application(task):
-                repository = (
-                    target[0] if target else str(payload.get("repository", {}).get("full_name", ""))
-                )
-                update_application_state(task, repository, merged=True)
-                self.storage.append_event(
-                    task.task_id,
-                    TaskEvent(
-                        type="publication.merged",
-                        data={"repository": repository, "pr_number": target[1] if target else None},
-                    ),
-                )
-                self.storage.save_task(task)
-                if self.application.all_deployments_verified(task):
-                    return await self.application.maybe_complete(task)
-                return task
-            completed = self.storage.transition(task.task_id, TaskState.COMPLETED)
-            self.storage.remove_worktree(completed)
-            return completed
+        if event == "pull_request" and action == "closed":
+            if payload.get("pull_request", {}).get("merged"):
+                return await self._record_merged_pull_request(task, target, payload)
+            return task
+        if event == "pull_request" and self._is_conflicted_pull_request(payload):
+            return await self._recover_pull_request_conflict(task, target, payload)
         if event in {"pull_request_review_comment", "issue_comment", "pull_request_review"}:
             comment = self.github.review_comment(payload)
             if comment:
@@ -1674,6 +1683,314 @@ class WorkflowEngine:
             return task
         return task
 
+    @staticmethod
+    def _is_conflicted_pull_request(payload: dict[str, Any]) -> bool:
+        """Only act on GitHub's explicit dirty state; UNKNOWN is intentionally inert."""
+        pull_request = payload.get("pull_request")
+        if not isinstance(pull_request, dict):
+            return False
+        return bool(pull_request.get("head", {}).get("sha")) and str(
+            pull_request.get("mergeable_state", "")
+        ).casefold() == "dirty"
+
+    async def _record_merged_pull_request(
+        self, task: TaskRecord, target: tuple[str, int] | None, payload: dict[str, Any]
+    ) -> TaskRecord:
+        if self._is_application(task):
+            repository = target[0] if target else str(
+                payload.get("repository", {}).get("full_name", "")
+            )
+            update_application_state(task, repository, merged=True)
+            self.storage.append_event(
+                task.task_id,
+                TaskEvent(
+                    type="publication.merged",
+                    data={"repository": repository, "pr_number": target[1] if target else None},
+                ),
+            )
+            self.storage.save_task(task)
+            if self.application.all_deployments_verified(task):
+                return await self.application.maybe_complete(task)
+            return task
+        completed = self.storage.transition(task.task_id, TaskState.COMPLETED)
+        self.storage.remove_worktree(completed)
+        return completed
+
+    async def _recover_pull_request_conflict(
+        self,
+        task: TaskRecord,
+        target: tuple[str, int] | None,
+        payload: dict[str, Any],
+        *,
+        _lease_held: bool = False,
+    ) -> TaskRecord:
+        """Merge the webhook's actual base into the incident branch and wake its session."""
+        if not _lease_held:
+            owner = uuid4().hex
+            if not self.storage.catalog.acquire(task.task_id, owner, 600):
+                return task
+            try:
+                return await self._recover_pull_request_conflict(
+                    task, target, payload, _lease_held=True
+                )
+            finally:
+                self.storage.catalog.release(task.task_id, owner)
+        if not target:
+            return task
+        task = self.storage.load_task(task.task_id)
+        if task.state in TERMINAL_STATES:
+            return task
+        pull_request = payload.get("pull_request") or {}
+        base = pull_request.get("base") or {}
+        base_branch = str(base.get("ref") or "").strip()
+        base_repository = str((base.get("repo") or {}).get("full_name") or target[0])
+        if not base_branch or base_repository.casefold() != target[0].casefold():
+            return task
+        repository = target[0]
+        member_merge_pending = self._is_application(task) and application_value(
+            task, repository, "conflict_merge_pending", False
+        )
+        resuming_merge = (
+            member_merge_pending if self._is_application(task) else task.conflict_merge_pending
+        )
+        if (
+            (
+                self._is_application(task)
+                and application_value(task, repository, "conflict_pending", False)
+            )
+            or (not self._is_application(task) and task.conflict_pending)
+        ):
+            return task
+        expected_head = (
+            application_value(task, repository, "pr_head_sha")
+            if self._is_application(task)
+            else task.pr_head_sha
+        )
+        webhook_head = str(pull_request.get("head", {}).get("sha") or "")
+        if (not webhook_head and not resuming_merge) or (
+            not resuming_merge and expected_head and expected_head != webhook_head
+        ):
+            self.storage.append_event(
+                task.task_id,
+                TaskEvent(type="publication.conflict_stale", data={"repository": repository}),
+            )
+            return task
+        attempts = (
+            int(application_value(task, repository, "conflict_recovery_attempts", 0))
+            if self._is_application(task)
+            else task.conflict_recovery_attempts
+        )
+        attempt_increment = 0 if resuming_merge else 1
+        next_attempts = attempts + attempt_increment
+        if not resuming_merge and attempts >= self.config.model.max_task_iterations:
+            return self.storage.transition(
+                task.task_id,
+                TaskState.BLOCKED,
+                error=f"pull-request conflict recovery retry budget exhausted for {repository}",
+            )
+        worktree = (
+            self.application.worktree(task, repository)
+            if self._is_application(task)
+            else await self._worktree(task)
+        )
+        self.storage.catalog.verify_workspace(
+            task.task_id, worktree, repository if self._is_application(task) else ""
+        )
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=worktree,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+        if webhook_head and not resuming_merge:
+            local_head = await asyncio.to_thread(git, "rev-parse", "HEAD")
+            if local_head.returncode or local_head.stdout.strip() != webhook_head:
+                self.storage.append_event(
+                    task.task_id,
+                    TaskEvent(type="publication.conflict_stale", data={"repository": repository}),
+                )
+                return task
+        fetch = await asyncio.to_thread(git, "fetch", "origin", f"refs/heads/{base_branch}")
+        if fetch.returncode:
+            return self.storage.transition(
+                task.task_id,
+                TaskState.BLOCKED,
+                conflict_merge_pending=False,
+                error="could not fetch pull-request base for conflict recovery",
+            )
+        base_sha_result = await asyncio.to_thread(git, "rev-parse", "FETCH_HEAD")
+        if resuming_merge:
+            local_head = await asyncio.to_thread(git, "rev-parse", "HEAD")
+            merge_head = await asyncio.to_thread(git, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+            ancestor = await asyncio.to_thread(
+                git, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD"
+            )
+            if (
+                merge_head.returncode
+                and ancestor.returncode
+                and local_head.stdout.strip() != expected_head
+            ):
+                return self.storage.transition(
+                    task.task_id,
+                    TaskState.BLOCKED,
+                    conflict_merge_pending=False,
+                    error="interrupted conflict recovery no longer matches the recorded PR head",
+                )
+        if self._is_application(task):
+            current = self.storage.load_task(task.task_id)
+            update_application_state(
+                current,
+                repository,
+                conflict_recovery_attempts=next_attempts,
+                conflict_base_branch=base_branch,
+                conflict_merge_pending=True,
+            )
+            current.conflict_base_branch = base_branch
+            current.conflict_merge_pending = True
+            self.storage.save_task(current)
+            task = current
+        else:
+            task = self.storage.load_task(task.task_id).model_copy(
+                update={
+                    "conflict_recovery_attempts": next_attempts,
+                    "conflict_base_branch": base_branch,
+                    "conflict_merge_pending": True,
+                }
+            )
+            self.storage.save_task(task)
+        self.storage.append_event(
+            task.task_id,
+            TaskEvent(
+                type="publication.conflict_recovery_started",
+                data={
+                    "repository": repository,
+                    "base_branch": base_branch,
+                    "base_sha": base_sha_result.stdout.strip(),
+                },
+            ),
+        )
+        merge_head = await asyncio.to_thread(git, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        merge = (
+            merge_head
+            if merge_head.returncode == 0
+            else await asyncio.to_thread(
+                git,
+                "-c",
+                "user.name=Incident Agent",
+                "-c",
+                "user.email=incident-agent@localhost",
+                "merge",
+                "--no-edit",
+                "FETCH_HEAD",
+            )
+        )
+        unresolved = await asyncio.to_thread(git, "diff", "--name-only", "--diff-filter=U")
+        unresolved_paths = unresolved.stdout.strip()
+        if merge.returncode and not unresolved_paths:
+            # A failed merge without unmerged paths is an operational failure; do not wake
+            # the agent against an ambiguous checkout.
+            return self.storage.transition(
+                task.task_id,
+                TaskState.BLOCKED,
+                conflict_merge_pending=False,
+                error="pull-request base merge failed without conflict markers",
+            )
+        error = (
+            f"merge conflict with {base_branch}; resolve conflicts and rerun verification"
+            if unresolved_paths
+            else f"merged pull-request base {base_branch}; rerun verification before publishing"
+        )
+        if self._is_application(task):
+            current = self.storage.load_task(task.task_id)
+            update_application_state(
+                current,
+                repository,
+                conflict_recovery_attempts=next_attempts,
+                conflict_base_branch=base_branch,
+                conflict_pending=True,
+                conflict_merge_pending=False,
+                error=error,
+            )
+            current.conflict_recovery_attempts = next_attempts
+            current.conflict_base_branch = base_branch
+            current.conflict_pending = True
+            current.conflict_merge_pending = False
+            self.storage.save_task(current)
+            task = current
+            if task.state not in ACTIVE_STATES:
+                task = self.storage.transition(task.task_id, TaskState.REPRODUCING, error=error)
+        else:
+            task = self.storage.transition(
+                task.task_id,
+                task.state if task.state == TaskState.REPRODUCING else TaskState.REPRODUCING,
+                conflict_recovery_attempts=next_attempts,
+                conflict_base_branch=base_branch,
+                conflict_pending=True,
+                conflict_merge_pending=False,
+                error=error,
+            )
+        self.storage.append_event(
+            task.task_id,
+            TaskEvent(
+                type="publication.conflict_recovery",
+                data={
+                    "repository": repository,
+                    "base_branch": base_branch,
+                    "base_sha": base_sha_result.stdout.strip() or None,
+                    "unresolved": bool(unresolved_paths),
+                    "attempt": attempts,
+                },
+            ),
+        )
+        await self.wake(task.task_id)
+        return task
+
+    async def poll_pull_request_conflicts(self) -> None:
+        """Poll GitHub infrequently for base updates that emit no webhook."""
+        if not getattr(self.github, "api", None) or not callable(
+            getattr(self.github, "get_pull_request", None)
+        ):
+            return
+        for task in self.storage.list_tasks("pending", "active", "waiting"):
+            if task.state in TERMINAL_STATES or task.conflict_pending:
+                continue
+            targets = [task]
+            if self._is_application(task):
+                targets = [
+                    self.application.view(task, repository)
+                    for repository in self.application.repositories(task)
+                    if application_value(task, repository, "pr_number")
+                    and not application_value(task, repository, "merged", False)
+                ]
+            for target in targets:
+                if not target.pr_number:
+                    continue
+                try:
+                    pull = await self.github.get_pull_request(target)
+                except (
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    subprocess.SubprocessError,
+                    TimeoutError,
+                ):
+                    logging.getLogger(__name__).warning(
+                        "GitHub conflict poll failed for %s#%s", target.repository, target.pr_number
+                    )
+                    continue
+                if pull.get("state") == "closed":
+                    continue
+                payload = {
+                    "action": "synchronize",
+                    "repository": {"full_name": target.repository},
+                    "pull_request": pull,
+                }
+                if self._is_conflicted_pull_request(payload):
+                    await self.handle_github_event("pull_request", payload)
+
     async def recover(self) -> None:
         for task in self.storage.list_tasks("pending", "active", "waiting"):
             if task.task_id in self._running_task_ids:
@@ -1687,6 +2004,42 @@ class WorkflowEngine:
                 and (task.pending_review_comments or application_comments)
             ):
                 await self.wake(task.task_id)
+            member_merge_pending = self._is_application(task) and any(
+                application_value(task, repository, "conflict_merge_pending", False)
+                for repository in self.application.repositories(task)
+            )
+            if task.conflict_merge_pending or member_merge_pending:
+                await self._resume_pending_conflict_merge(task)
+
+    async def _resume_pending_conflict_merge(self, task: TaskRecord) -> None:
+        """Resume a merge intent recorded before a process interruption."""
+        targets = [task]
+        if self._is_application(task):
+            targets = [
+                self.application.view(task, repository)
+                for repository in self.application.repositories(task)
+                if application_value(task, repository, "conflict_merge_pending", False)
+            ]
+        for target in targets:
+            if not target.pr_number:
+                continue
+            payload = {
+                "action": "synchronize",
+                "repository": {"full_name": target.repository},
+                "pull_request": {
+                    "number": target.pr_number,
+                    "head": {"sha": target.pr_head_sha or ""},
+                    "base": {
+                        "ref": target.conflict_base_branch
+                        or self.config.repository(target.repository).base_branch,
+                        "repo": {"full_name": target.repository},
+                    },
+                    "mergeable_state": "dirty",
+                },
+            }
+            await self._recover_pull_request_conflict(
+                task, (target.repository, target.pr_number), payload
+            )
 
     async def run_worker(self) -> None:
         await self.recover()
@@ -1712,6 +2065,12 @@ class WorkflowEngine:
         next_recovery = asyncio.get_running_loop().time() + self.config.poll_interval_seconds
         try:
             while not self._stopping.is_set():
+                now = asyncio.get_running_loop().time()
+                if now >= self._next_conflict_poll:
+                    await self.poll_pull_request_conflicts()
+                    self._next_conflict_poll = (
+                        now + self.config.github.conflict_poll_interval_seconds
+                    )
                 if asyncio.get_running_loop().time() >= next_recovery:
                     await self.recover()
                     next_recovery = (
