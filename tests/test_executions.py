@@ -17,6 +17,7 @@ from src.executions import (
     _clip,
     _date,
     _render_item,
+    _style_transcript,
     execution_transcript,
     find_execution,
     format_execution_list,
@@ -26,6 +27,7 @@ from src.executions import (
 from src.file_session import FileSession
 from src.models import Incident, TaskRecord
 from src.storage import Storage
+from src.tui_theme import GROKNIGHT
 
 
 def _setup(tmp_path: Path) -> tuple[Path, Storage]:
@@ -207,8 +209,11 @@ def test_inspect_session_id_without_action_prints(
 async def test_inspect_app_renders_transcript() -> None:
     app = ExecutionInspectApp("task:ABC", "", "assistant: hello from the model")
     async with app.run_test():
+        assert app.theme == GROKNIGHT.name
         assert app.sub_title == "task:ABC"
-        assert "hello from the model" in app.query_one("#transcript", Static).render().plain
+        transcript = app.query_one("#transcript", Static).render().plain
+        assert "hello from the model" in transcript
+        assert "◆" in transcript
         assert "incident-agent executions task:ABC inspect" in app.query_one(
             "#cli-hint", Static
         ).render().plain
@@ -336,4 +341,42 @@ async def test_list_tui_shows_summary_date_and_inspects(tmp_path: Path) -> None:
         app.open_row(99)
     empty = ExecutionListApp(storage, [])
     async with empty.run_test():
+        assert empty.theme == GROKNIGHT.name
         assert "no agent runs" in empty.query_one("#empty", Static).render().plain
+        assert empty.query_one("#cli-hint", Static).render().plain == "q quit"
+
+
+def test_style_transcript_roles() -> None:
+    styled = _style_transcript(
+        "\n".join(
+            [
+                "session: task:ABC",
+                "task: ABC",
+                "",
+                "user: fix checkout",
+                "",
+                "assistant: cookie missing",
+                "",
+                "tool read_file: app.py",
+                "",
+                "tool output: def handle():",
+                "    pass",
+                "",
+                "thinking: consider the cookie",
+                "",
+                "## Research",
+                "root cause",
+            ]
+        )
+    )
+    plain = styled.plain
+    assert "› " in plain
+    assert "◆ " in plain
+    assert "fix checkout" in plain
+    assert "cookie missing" in plain
+    assert "read_file: app.py" in plain
+    assert "def handle():" in plain
+    assert "consider the cookie" in plain
+    assert "## Research" in plain
+    assert any("#bb9af7" in str(span.style) for span in styled.spans)
+    assert any("#6c6c6c" in str(span.style) for span in styled.spans)
