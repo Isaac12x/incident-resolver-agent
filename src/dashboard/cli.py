@@ -21,9 +21,37 @@ def _listen_port(value: str) -> int:
 
 
 def add_dashboard_parser(commands: argparse._SubParsersAction) -> argparse.ArgumentParser:
-    parser = commands.add_parser("dashboard", help="serve the read-only incident dashboard")
-    parser.add_argument("action", nargs="?")
-    parser.add_argument("target", nargs="?")
+    parser = commands.add_parser(
+        "dashboard",
+        help="serve the read-only incident dashboard",
+        description=(
+            "Live read-only view of the selected runtime. Does not start repair workers. "
+            "Omit ACTION to start in the foreground."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "actions:\n"
+            "  (default)     start in the foreground and print the loopback URL\n"
+            "  -d            start detached; survives terminal exit\n"
+            "  status        process, URL, public route, snapshot check time\n"
+            "  stop          stop the dashboard only\n"
+            "  logs          recent dashboard logs\n"
+            "  port PORT     publish through the host reverse proxy\n"
+            "  port close    revoke the public route\n"
+            "\n"
+            "examples:\n"
+            "  incident-agent dashboard\n"
+            "  incident-agent dashboard -d\n"
+            "  incident-agent dashboard status\n"
+            "  incident-agent dashboard port 8443 --host incidents.example.com\n"
+        ),
+    )
+    parser.add_argument(
+        "action",
+        nargs="?",
+        help="status, stop, logs, port, or omit to start",
+    )
+    parser.add_argument("target", nargs="?", help="PORT for 'port', or 'close'")
     parser.add_argument("-d", "--detached", "--dettached", action="store_true", dest="detached")
     parser.add_argument("--listen-port", type=_listen_port, default=8766)
     parser.add_argument("--host")

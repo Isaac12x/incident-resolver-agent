@@ -14,22 +14,27 @@
       <h1>Runtime dashboard</h1>
       <p id="runtime-meta" class="muted">Read-only operational view</p>
     </div>
-    <div class="topbar-actions">
+    <div class="topbar-actions" id="session-actions" hidden>
       <span id="status" class="pill" role="status" aria-live="polite">Connecting…</span>
-      <button id="logout" type="button">Log out</button>
+      <button id="logout" type="button" class="secondary">Log out</button>
     </div>
   </header>
   <main>
     <section id="login" class="panel login-panel" aria-labelledby="login-title">
+      <p class="eyebrow">INCIDENT HARNESS</p>
       <h2 id="login-title">Sign in</h2>
+      <p class="muted">Read-only view of the selected runtime. Repair workers are separate.</p>
       <label for="token">Dashboard token</label>
       <input id="token" type="password" autocomplete="current-password" spellcheck="false">
       <button id="sign-in" type="button">Open dashboard</button>
       <p id="login-error" class="error" role="alert"></p>
+      <p class="cli-hint">Token file: runtime <code>dashboard/token</code>. Start with
+        <code>incident-agent dashboard</code></p>
     </section>
 
     <section id="app" hidden>
       <section id="cards" class="cards" aria-label="Overview metrics"></section>
+      <div id="mix" class="mix" aria-label="Task mix"></div>
       <div id="secondary" class="secondary-strip" aria-label="Current task states"></div>
       <section class="panel metrics-panel" aria-labelledby="metrics-title">
         <div class="section-heading"><h2 id="metrics-title">Operational metrics</h2><span class="muted">Global lifetime totals</span></div>

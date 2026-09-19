@@ -36,6 +36,7 @@ def legacy_database(path: Path, session_id: str, items: list[object]) -> bytes:
 async def test_sqlite_round_trip_limits_and_index_order(tmp_path: Path) -> None:
     session = FileSession("task/one", tmp_path / "sessions")
     await session.add_items([{"index": i} for i in range(4)])
+    assert session.load_items() == [{"index": i} for i in range(4)]
     assert await session.get_items() == [{"index": i} for i in range(4)]
     assert await session.get_items(2) == [{"index": 2}, {"index": 3}]
     assert await session.pop_item() == {"index": 3}

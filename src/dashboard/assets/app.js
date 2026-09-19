@@ -40,7 +40,9 @@ function localTime(value) {
 
 async function api(url, options) {
   const response = await fetch(url, options);
-  if (response.status === 401) showLogin("Your dashboard session has expired.");
+  if (response.status === 401) {
+    showLogin($("#app").hidden ? "" : "Your dashboard session has expired.");
+  }
   if (!response.ok) {
     let detail = "Request failed";
     try { detail = (await response.json()).detail || detail; } catch (_) { /* text is optional */ }
@@ -53,7 +55,14 @@ function showLogin(message) {
   if (source) { source.close(); source = null; }
   $("#login").hidden = false;
   $("#app").hidden = true;
-  if (message) $("#login-error").textContent = message;
+  $("#session-actions").hidden = true;
+  $("#login-error").textContent = message || "";
+}
+
+function showApp() {
+  $("#login").hidden = true;
+  $("#app").hidden = false;
+  $("#session-actions").hidden = false;
 }
 
 function card(label, value, className = "", detail = "") {
@@ -76,12 +85,40 @@ function renderCards(summary) {
     card("Resolution median", readableDuration(summary.resolution_seconds_median), "", samples === null ? "timing samples unknown" : `${samples} timing samples`),
     card("PRs opened", summary.prs_opened ?? 0)
   ].join("");
+  renderMix(summary);
   $("#secondary").innerHTML = [
     `<span>Active: <strong>${esc(summary.active ?? 0)}</strong></span>`,
     `<span>Waiting: <strong>${esc(summary.waiting ?? 0)}</strong></span>`,
     `<span>Waiting for deployment: <strong>${esc(summary.waiting_for_deployment ?? 0)}</strong></span>`,
     `<span>Waiting for review: <strong>${esc(summary.waiting_for_review ?? 0)}</strong></span>`
   ].join("");
+}
+
+function renderMix(summary) {
+  const el = $("#mix");
+  if (!el) return;
+  const parts = [
+    ["Active", "active", summary.active],
+    ["Waiting", "waiting", summary.waiting],
+    ["Blocked", "blocked", summary.blocked],
+    ["Failed", "failed", summary.failed],
+    ["Resolved", "completed", summary.resolved ?? summary.completed],
+    ["Cancelled", "cancelled", summary.cancelled]
+  ];
+  const total = parts.reduce((sum, item) => sum + Number(item[2] || 0), 0);
+  if (!total) {
+    el.innerHTML = '<span class="muted">No tasks in this range.</span>';
+    return;
+  }
+  const bar = parts.map(([, cls, n]) => {
+    const count = Number(n || 0);
+    if (!count) return "";
+    return `<span class="mix-seg mix-${cls}" style="width:${(count / total) * 100}%" title="${cls}: ${count}"></span>`;
+  }).join("");
+  const legend = parts.map(([label, cls, n]) =>
+    `<span class="mix-key"><i class="mix-${cls}"></i>${esc(label)} ${esc(n ?? 0)}</span>`
+  ).join("");
+  el.innerHTML = `<div class="mix-bar" role="img" aria-label="Task mix">${bar}</div><div class="mix-legend">${legend}</div>`;
 }
 
 function renderMetrics(metrics) {
@@ -119,11 +156,14 @@ function renderTasks(snapshot) {
 function render(snapshot) {
   if (!snapshot || !snapshot.available) {
     $("#status").textContent = "Data unavailable";
+    $("#status").className = "pill down";
     $("#runtime-meta").textContent = snapshot?.error || "Runtime database is unavailable; historical data is retained when it returns.";
+    renderCards(snapshot?.summary || {});
     renderTasks(snapshot || {});
     return;
   }
   $("#status").textContent = `Live · refreshed ${new Date().toLocaleTimeString()}`;
+  $("#status").className = "pill live";
   $("#runtime-meta").textContent = "Worker health is independent of dashboard health · read-only";
   renderCards(snapshot.summary || {});
   renderMetrics(snapshot.metrics || []);
@@ -132,7 +172,11 @@ function render(snapshot) {
 
 async function refresh() {
   try { render(await api(`/api/snapshot?${filterQuery()}`)); }
-  catch (error) { $("#status").textContent = "Disconnected"; $("#runtime-meta").textContent = error.message; }
+  catch (error) {
+    $("#status").textContent = "Disconnected";
+    $("#status").className = "pill down";
+    $("#runtime-meta").textContent = error.message;
+  }
 }
 
 function renderStatusRecord(name, record) {
@@ -179,14 +223,17 @@ function connect() {
   if (source) source.close();
   source = new EventSource("/api/events");
   source.addEventListener("snapshot", () => { refresh(); if (currentTaskId) openDetail(currentTaskId, false); });
-  source.onerror = () => { $("#status").textContent = "Disconnected · reconnecting"; };
+  source.onerror = () => {
+    $("#status").textContent = "Disconnected · reconnecting";
+    $("#status").className = "pill down";
+  };
 }
 
 async function signIn() {
   $("#login-error").textContent = "";
   try {
     await api("/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: $("#token").value }) });
-    $("#token").value = ""; $("#login").hidden = true; $("#app").hidden = false; page = 1;
+    $("#token").value = ""; showApp(); page = 1;
     await refresh(); connect();
   } catch (error) { $("#login-error").textContent = error.message || "Unable to sign in"; }
 }
@@ -204,6 +251,6 @@ $("#next").addEventListener("click", () => { if (!$("#next").disabled) { page +=
 (async () => {
   try {
     const snapshot = await api(`/api/snapshot?${filterQuery()}`);
-    $("#login").hidden = true; $("#app").hidden = false; render(snapshot); connect();
+    showApp(); render(snapshot); connect();
   } catch (_) { /* unauthenticated browsers stay on the login panel */ }
 })();
