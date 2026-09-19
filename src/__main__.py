@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
 import sys
 import time
 import urllib.request
@@ -34,6 +35,7 @@ from .lifecycle import (
     update_installation,
 )
 from .models import Incident, TaskState
+from .plugins import connect_source, connector_from_plugin, plugin_catalog
 from .server import create_server
 from .systemd_env import export_systemd_environment, local_service_base_url, service_base_url
 from .tooling import (
@@ -49,6 +51,27 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="incident-agent")
     parser.add_argument("--config", type=Path, default=None)
     commands = parser.add_subparsers(dest="command", required=True)
+    plugins = commands.add_parser("plugins", help="list built-in source adapters")
+    plugins.add_argument("action", nargs="?", choices=("list",), default="list")
+    plugins.add_argument("--json", action="store_true", dest="as_json")
+    connect = commands.add_parser("connect", help="configure a named source adapter")
+    connect.add_argument("plugin", nargs="?", help="built-in adapter name")
+    connect.add_argument("--list", action="store_true", dest="list_sources")
+    connect.add_argument("--name")
+    connect.add_argument("--url")
+    connect.add_argument("--log-path")
+    connect.add_argument("--transport", choices=("stdio", "streamable-http", "sse"))
+    connect.add_argument("--auth-token-env")
+    connect.add_argument("--tenant-id")
+    connect.add_argument("--datasource-uid")
+    connect.add_argument("--purpose", choices=("incident", "output", "observability", "other"))
+    connect.add_argument("--capability", action="append", default=[])
+    connect.add_argument(
+        "--command",
+        dest="source_command",
+        nargs=argparse.REMAINDER,
+        help="stdio executable and arguments (must be last)",
+    )
     commands.add_parser("init", help="create or repair the local .agent runtime tree")
     serve = commands.add_parser("serve", help="start the HTTP server")
     serve.add_argument("--no-worker", action="store_true")
@@ -162,6 +185,178 @@ def _load_eval_records(path: Path) -> list[dict[str, object]]:
     return [item for item in values if isinstance(item, dict)]
 
 
+def _print_plugins(*, as_json: bool = False) -> None:
+    catalog = plugin_catalog()
+    if as_json:
+        print(json.dumps(catalog, indent=2))
+        return
+    for item in catalog:
+        capabilities = ", ".join(item.get("capabilities", []))
+        suffix = f" [{capabilities}]" if capabilities else ""
+        print(f"{item['name']}: {item['description']}{suffix}")
+
+
+def _interactive_connect(catalog: list[dict[str, object]]) -> tuple[str, str, dict[str, object]]:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise SystemExit("connect requires PLUGIN and --name NAME in a non-interactive terminal")
+    if not catalog:
+        raise SystemExit("no source adapters are available")
+    print("Available source adapters:")
+    for index, item in enumerate(catalog, 1):
+        print(f"{index}. {item['name']} - {item['description']}")
+    selection = input("Adapter number: ").strip()
+    try:
+        selected = int(selection)
+        if selected < 1:
+            raise ValueError
+        item = catalog[selected - 1]
+    except (ValueError, IndexError) as error:
+        raise SystemExit("invalid adapter selection") from error
+    plugin = str(item["name"])
+    name = input(f"Source name [{plugin}]: ").strip() or plugin
+    options: dict[str, object] = {}
+    if plugin == "mcp":
+        transport = input("Transport (streamable-http/sse/stdio) [streamable-http]: ").strip()
+        options["transport"] = transport or "streamable-http"
+        if options["transport"] == "stdio":
+            options["command"] = shlex.split(input("Command: "))
+        else:
+            options["url"] = input("URL: ").strip()
+    elif plugin == "local-logs":
+        options["log_path"] = input("Absolute log path: ").strip()
+    elif plugin in {"loki", "grafana"}:
+        options["url"] = input("URL: ").strip()
+        if plugin == "grafana":
+            options["datasource_uid"] = input("Loki datasource UID: ").strip()
+    if plugin in {"loki", "grafana"} or (
+        plugin == "mcp" and options.get("transport") != "stdio"
+    ):
+        auth_env = input("Auth token environment variable (optional): ").strip()
+        if auth_env:
+            options["auth_token_env"] = auth_env
+    capability_prompt = (
+        "Capabilities (comma separated, required): "
+        if plugin == "mcp"
+        else "Capabilities (comma separated, optional): "
+    )
+    capabilities = input(capability_prompt).strip()
+    if capabilities:
+        options["capabilities"] = [
+            value.strip() for value in capabilities.split(",") if value.strip()
+        ]
+    if plugin == "mcp" and not options.get("capabilities"):
+        raise SystemExit("MCP connectors require at least one capability")
+    return plugin, name, options
+
+
+def _configuration_error(error: Exception) -> str:
+    """Render validation locations and messages without including supplied values."""
+    details = getattr(error, "errors", None)
+    if callable(details):
+        messages = []
+        for item in details():
+            location = ".".join(str(part) for part in item.get("loc", ())) or "connector"
+            messages.append(f"{location}: {item.get('msg', 'invalid value')}")
+        if messages:
+            return "; ".join(messages)
+    return str(error).splitlines()[0]
+
+
+def _connect_command(args: argparse.Namespace) -> None:
+    if args.list_sources:
+        if (
+            args.plugin
+            or args.name
+            or any(
+                getattr(args, field) is not None
+                for field in (
+                    "url",
+                    "log_path",
+                    "transport",
+                    "auth_token_env",
+                    "tenant_id",
+                    "datasource_uid",
+                    "purpose",
+                    "source_command",
+                )
+            )
+            or args.capability
+        ):
+            raise SystemExit("connect --list cannot be combined with connection options")
+        config_path = args.config or default_config_path()
+        try:
+            config = load_config(config_path, create=False)
+        except (OSError, ValueError) as error:
+            raise SystemExit(
+                f"could not read configuration: {_configuration_error(error)}"
+            ) from error
+        for connector in config.connectors:
+            capabilities = ",".join(connector.capabilities)
+            print(f"{connector.name}\t{connector.type}\t{capabilities}".rstrip("\t"))
+        return
+
+    catalog = plugin_catalog()
+    known = {str(item["name"]) for item in catalog}
+    if args.plugin is None:
+        supplied = any(
+            getattr(args, field) is not None
+            for field in (
+                "name",
+                "url",
+                "log_path",
+                "transport",
+                "auth_token_env",
+                "tenant_id",
+                "datasource_uid",
+                "purpose",
+                "source_command",
+            )
+        ) or bool(args.capability)
+        if supplied:
+            raise SystemExit("connect requires PLUGIN before connection options")
+        try:
+            plugin, name, options = _interactive_connect(catalog)
+        except (EOFError, KeyboardInterrupt) as error:
+            raise SystemExit("connect cancelled") from error
+        except ValueError as error:
+            raise SystemExit(f"invalid stdio command: {error}") from error
+    else:
+        plugin = args.plugin
+        if plugin not in known:
+            raise SystemExit(f"unknown source adapter: {plugin}")
+        if not args.name:
+            raise SystemExit("connect requires --name NAME in a non-interactive terminal")
+        name = args.name
+        options = {
+            key: value
+            for key, value in {
+                "url": args.url,
+                "log_path": args.log_path,
+                "transport": args.transport,
+                "auth_token_env": args.auth_token_env,
+                "tenant_id": args.tenant_id,
+                "datasource_uid": args.datasource_uid,
+                "purpose": args.purpose,
+                "capabilities": args.capability,
+                "command": args.source_command,
+            }.items()
+            if value is not None and value != []
+        }
+    try:
+        connector = connector_from_plugin(plugin, name, **options)
+        config_path = args.config or default_config_path()
+        config = load_config(config_path, create=False)
+        if not config_path.exists() and config_path == default_config_path():
+            config.runtime_root = default_runtime_path()
+            config.server.require_api_auth = True
+        connect_source(config, connector)
+        save_config(config, config_path)
+    except (ValueError, TypeError, OSError) as error:
+        raise SystemExit(f"could not configure source: {_configuration_error(error)}") from error
+    print(f"Configured source {name!r} using {plugin}.")
+    print("Restart the incident agent; rebuild and activate the runtime bundle if one is in use.")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
     using_default_config = args.config is None
@@ -173,6 +368,12 @@ def main(argv: list[str] | None = None) -> None:
             if args.command == "init" and source_checkout and not configured_path
             else default_config_path()
         )
+    if args.command == "plugins":
+        _print_plugins(as_json=args.as_json)
+        return
+    if args.command == "connect":
+        _connect_command(args)
+        return
     if args.command == "eval":
         from .evals import (
             run_evaluations,
