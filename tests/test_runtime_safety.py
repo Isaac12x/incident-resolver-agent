@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ async def test_agent_run_manifest_fingerprints_prompt_skills_and_connectors(tmp_
     _skill(skills, "code-review-graph")
     _skill(skills, "incident-investigation")
     _skill(skills, "show-me")
+    _skill(skills, "code-review")
     storage = Storage(tmp_path / ".agent")
     task = storage.create_task(
         Incident(
@@ -68,10 +70,14 @@ async def test_agent_run_manifest_fingerprints_prompt_skills_and_connectors(tmp_
         "code-review-graph",
         "incident-investigation",
         "show-me",
+        "code-review",
     ]
     assert manifest.data["connectors_sha256"]
     from src.tooling import stable_hash
 
+    assert manifest.data["skills"][-1]["sha256"] == hashlib.sha256(
+        (skills / "code-review" / "SKILL.md").read_bytes()
+    ).hexdigest()
     assert manifest.data["instructions_sha256"] == stable_hash(seen["instructions"])
     assert manifest.data["prompt_sha256"] == stable_hash(seen["prompt"])
 
