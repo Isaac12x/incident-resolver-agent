@@ -208,6 +208,37 @@ def test_nightly_update_preserves_explicit_source(monkeypatch) -> None:
     assert commands[0][-2:] == ["git+https://example.test/fork.git", "incident-harness"]
 
 
+def test_nightly_update_uses_explicit_repository(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setenv("INCIDENT_HARNESS_REPOSITORY", "example/nightly-fork")
+    commands = []
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert "git+https://github.com/example/nightly-fork.git" in commands[0]
+
+
+def test_update_rejects_unknown_channel(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    with pytest.raises(ValueError, match="unsupported update channel"):
+        update_installation(channel="preview")
+
+
+def test_nightly_failure_skips_managed_tool_upgrades(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    commands = []
+    result = update_installation(
+        channel="nightly",
+        managed_tools=("seed",),
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 7, "", "failed"),
+    )
+    assert result.returncode == 7
+    assert len(commands) == 1
+
+
 def test_release_asset_url_selects_project_wheel() -> None:
     import io
 
@@ -302,6 +333,26 @@ def test_installed_git_repository_reads_github_source(monkeypatch) -> None:
 
     monkeypatch.setattr("src.lifecycle.distribution", lambda _: Metadata())
     assert installed_git_repository() == "example/fork"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [None, "", "not-json", '{"url":"https://github.com/example/fork/releases/latest/wheel.whl"}',
+     '{"url":"https://example.test/fork.git"}'],
+)
+def test_installed_git_repository_rejects_missing_or_non_github_metadata(
+    monkeypatch, metadata
+) -> None:
+    from src.lifecycle import installed_git_repository
+
+    class Metadata:
+        def read_text(self, _):
+            if metadata is None:
+                raise OSError("metadata unavailable")
+            return metadata
+
+    monkeypatch.setattr("src.lifecycle.distribution", lambda _: Metadata())
+    assert installed_git_repository() is None
 
 
 def test_update_requires_uv(monkeypatch) -> None:
