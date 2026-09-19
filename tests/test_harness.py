@@ -2027,6 +2027,10 @@ async def test_tui_overview_and_empty_collection_states(tmp_path: Path) -> None:
         titles = [widget.render().plain for widget in app.query("#runtime-tab .section-title")]
         assert "HTTP server" in titles
         assert "Workspace permissions" in titles
+        assert "Sources" in app.query_one("#runtime-lead", Static).render().plain
+        app.query_one(TabbedContent).active = "connections-tab"
+        await pilot.pause()
+        assert "Runtime" in app.query_one("#sources-lead", Static).render().plain
 
         app.query_one("#save", Button).press()
         await pilot.pause()
@@ -2161,6 +2165,14 @@ async def test_tui_add_connector_does_not_validate_incomplete_draft(tmp_path: Pa
         await pilot.pause()
 
         app.query_one("#connector-connector-0-name").value = "logs"
+        assert app.query_one("#connector-connector-0-log-path-field").display is False
+        assert app.query_one("#connector-connector-0-url-field").display is True
+        app.query_one("#connector-connector-0-type", Select).value = "local-logs"
+        await pilot.pause()
+        assert app.query_one("#connector-connector-0-log-path-field").display is True
+        assert app.query_one("#connector-connector-0-url-field").display is False
+        app.query_one("#connector-connector-0-type", Select).value = "mcp"
+        await pilot.pause()
         app.query_one("#connector-connector-0-url").value = "https://mcp.example.test"
         app.query_one("#save", Button).press()
         await pilot.pause()
@@ -2432,6 +2444,18 @@ def test_cli_tree_index_output_and_failures(tmp_path: Path, capsys) -> None:
         pytest.raises(SystemExit, match="7"),
     ):
         main(["index", str(tmp_path)])
+
+
+def test_connector_fields_follow_type() -> None:
+    visible = ConfigurationApp._connector_visible  # noqa: SLF001
+    logs = visible("local-logs", "stdio")
+    assert logs["log-path"] and not logs["url"] and not logs["auth"]
+    stdio = visible("mcp", "stdio")
+    assert stdio["command"] and stdio["transport"] and not stdio["url"]
+    http = visible("mcp", "sse")
+    assert http["url"] and not http["command"]
+    assert visible("loki", "stdio")["tenant"]
+    assert visible("grafana", "sse")["datasource"]
 
 
 def test_tui_helpers_and_runner(tmp_path: Path) -> None:
