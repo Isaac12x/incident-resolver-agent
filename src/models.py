@@ -154,6 +154,10 @@ class RepositoryTaskState(BaseModel):
     pending_review_comments: list[ReviewComment] = Field(default_factory=list)
     verification_progress: dict[str, Any] = Field(default_factory=dict)
     attempts: int = 0
+    conflict_recovery_attempts: int = 0
+    conflict_base_branch: str | None = None
+    conflict_pending: bool = False
+    conflict_merge_pending: bool = False
     error: str | None = None
 
 
@@ -189,6 +193,10 @@ class TaskRecord(BaseModel):
     playwright_status: str | None = None
     code_review_sha: str | None = None
     attempts: int = 0
+    conflict_recovery_attempts: int = 0
+    conflict_base_branch: str | None = None
+    conflict_pending: bool = False
+    conflict_merge_pending: bool = False
     error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -224,6 +232,10 @@ class TaskRecord(BaseModel):
             code_review_sha=self.code_review_sha,
             pending_review_comments=list(self.pending_review_comments),
             attempts=self.attempts,
+            conflict_recovery_attempts=self.conflict_recovery_attempts,
+            conflict_base_branch=self.conflict_base_branch,
+            conflict_pending=self.conflict_pending,
+            conflict_merge_pending=self.conflict_merge_pending,
             error=self.error,
         )
 

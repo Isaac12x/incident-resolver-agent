@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-19
+
+- Add repository vision and architecture context handling, including optional architecture
+  documentation and `VISION.md` guidance during incident repair.
+- Add Matt Pocock engineering skills for codebase design, code review, and merge-conflict
+  resolution, with bounded pull-request conflict recovery and mergeability polling.
+- Add a versioned release wheel installer served through the GitHub release `install.sh` asset,
+  with pinned release, fork, source, checksum, and isolated update behavior.
+
 - Add a native read-only `local-logs` connector configurable and testable in the TUI, with
   bounded tail/filter tools for both agent runtimes and file readiness checks. Local log evidence
   requires no Grafana/Loki service. Start connector sessions for manual incident-file runs too.

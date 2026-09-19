@@ -127,6 +127,7 @@ TOML header: `[github]`.
 | `agent_login` | string | `"incident-agent[bot]"` | Bot login used to avoid responding to the agent’s own comments. |
 | `agent_mention` | string | `"@incident-agent"` | Mention string used for review routing. |
 | `allowed_author_associations` | array of string | `["OWNER", "MEMBER", "COLLABORATOR"]` | GitHub author associations authorized to request review changes. |
+| `conflict_poll_interval_seconds` | number | `300` | Delay between mergeability checks while an open pull request has a conflict. Bounds: > 0. |
 
 ## server
 
@@ -304,7 +305,10 @@ These variables are read directly rather than stored as TOML options. Credential
 | `INCIDENT_AGENT_CONFIG` | Automatic discovery | Select a config file unless `--config` is supplied. |
 | `XDG_CONFIG_HOME` | `~/.config` | Parent directory for the per-user `incident-harness/config.toml`. |
 | `XDG_STATE_HOME` | `~/.local/state` | Parent directory used for new per-user runtime state. Existing `runtime_root` values are retained. |
-| `INCIDENT_HARNESS_SOURCE` | `git+https://github.com/Isaac12x/incident-resolver-agent.git` | Source passed to `uv tool install --from` by `install.sh`, such as a pinned revision or fork. |
+| `INCIDENT_HARNESS_SOURCE` | Release wheel | Explicit Git revision, fork, local path, or wheel URL for installation and update. |
+| `INCIDENT_HARNESS_REPOSITORY` | `Isaac12x/incident-resolver-agent` | GitHub repository whose release API supplies the wheel. |
+| `INCIDENT_HARNESS_VERSION` | `latest` | GitHub release tag to install, such as `v0.2.0`. |
+| `INCIDENT_HARNESS_RELEASE_ASSET` | First `incident_harness-*.whl` asset | Exact wheel asset name to select from the release. |
 | `INCIDENT_HARNESS_PACKAGE` | `incident-harness` | Package name installed by `install.sh`. |
 | `INTELLIGENCE_ENABLE_DOWNLOAD` | Unset | Any nonempty value allows automatic vector-index builds to download sentence-transformer weights; even `"0"` enables it. Unset it to require cached weights for automatic builds. Explicit rebuilds can allow downloads independently. Optional vector dependencies are still required. |
 

@@ -225,6 +225,18 @@ class GitHubCLIAdapter:
                     task, f"Fix incident {task.external_id}: {task.summary}"
                 )
         sha = self._git(worktree, "rev-parse", "HEAD")
+        if getattr(task, "conflict_base_branch", None):
+            base_branch = str(task.conflict_base_branch)
+            self._git(worktree, "fetch", "origin", f"refs/heads/{base_branch}")
+            base_check = subprocess.run(
+                ["git", "-C", str(worktree), "merge-base", "--is-ancestor", "FETCH_HEAD", sha],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            if base_check.returncode:
+                raise RuntimeError("resolved pull request does not contain its actual base branch")
         # A managed mirror has remote.origin.mirror=true; an incident must push only its branch.
         self._git(
             worktree,
@@ -278,6 +290,11 @@ class GitHubCLIAdapter:
         return reference.model_dump(mode="json")
 
     def _operate(self, operation: str, payload: dict[str, Any]) -> Any:
+        if operation == "get_pull_request":
+            task = TaskRecord.model_validate(payload)
+            if not task.pr_number:
+                raise ValueError("cannot poll a pull request without its number")
+            return self._api(f"repos/{task.repository}/pulls/{task.pr_number}")
         if operation == "sync_application_pull_requests":
             task = TaskRecord.model_validate(payload)
             self._sync_application(task)
@@ -383,6 +400,9 @@ class GitHubService:
     async def get_review_threads(self, task: TaskRecord) -> list[ReviewComment]:
         result = await self._call("get_review_threads", task.model_dump(mode="json"))
         return [ReviewComment.model_validate(comment) for comment in result]
+
+    async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]:
+        return dict(await self._call("get_pull_request", task.model_dump(mode="json")))
 
     async def publish_verification(self, task: TaskRecord, result: VerificationResult) -> None:
         await self._call(

@@ -85,6 +85,10 @@ def _view(task: TaskRecord, repository: str) -> TaskRecord:
         "playwright_status",
         "code_review_sha",
         "pending_review_comments",
+        "conflict_recovery_attempts",
+        "conflict_base_branch",
+        "conflict_pending",
+        "conflict_merge_pending",
     ):
         updates[name] = _value(task, repository, name, getattr(task, name, None))
     return task.model_copy(update=updates)
@@ -413,6 +417,9 @@ class ApplicationWorkflow:
                     "deployment_url": None,
                     "playwright_status": None,
                     "merged": False,
+                    "conflict_pending": False,
+                    "conflict_merge_pending": False,
+                    "conflict_base_branch": None,
                 }
                 if sha_changed
                 else {}

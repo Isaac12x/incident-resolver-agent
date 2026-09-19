@@ -36,29 +36,22 @@ GitHub Pages; publishing instructions are included on the documentation home pag
 
 ### Install the CLI (no checkout required)
 
-Requires Git and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+The curl installer requires `curl` and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
+Git is required later when configured repositories are cloned or repaired.
 The package requires Python 3.12 or newer; uv can provision a compatible Python.
-This implementation is currently on `feat/todo-platform` in
-[PR #15](https://github.com/Isaac12x/incident-resolver-agent/pull/15), so the `master`
-README and installer do not include it until that PR is merged. Install the branch now:
+The release installer resolves the latest published wheel without requiring a checkout:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/feat/todo-platform/install.sh | \
-  INCIDENT_HARNESS_SOURCE='git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' sh
+curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | sh
 uv tool update-shell
 ```
 
 Restart your shell after `uv tool update-shell` if `incident-agent` is not on `PATH`.
-Alternatively, install directly with uv:
+To pin a release tag:
 
 ```bash
-uv tool install --from 'git+https://github.com/Isaac12x/incident-resolver-agent.git@feat/todo-platform' incident-harness
-```
-
-After PR #15 is merged, the default-branch installer can be used:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
+curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | \
+  INCIDENT_HARNESS_VERSION=v0.2.0 sh
 ```
 
 ### Configure and start
@@ -80,13 +73,16 @@ incident-agent doctor
 incident-agent run
 ```
 
-`incident-agent update` upgrades the isolated uv tool installation, its dependencies, and managed
-repository tools when repositories are configured. It retains the source selected at installation;
-rerun the default-branch installer after merge to switch from the feature branch.
+`incident-agent update` refreshes release installations from their recorded GitHub release
+repository. Git, local, and other custom source installations retain their uv source and use
+uv's normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE`, `INCIDENT_HARNESS_REPOSITORY`,
+`INCIDENT_HARNESS_VERSION`, or `INCIDENT_HARNESS_RELEASE_ASSET` to deliberately change the
+update source.
 `incident-agent doctor` reports executable, credential, repository, and container
 readiness. `run` installs missing managed tools when dependency installation is enabled, then
 checks readiness before starting. The TUI Overview shows those checks.
-The installer accepts `INCIDENT_HARNESS_SOURCE` to select a Git revision or fork.
+The installer accepts `INCIDENT_HARNESS_SOURCE` for a Git revision, fork, local path, or wheel;
+`INCIDENT_HARNESS_REPOSITORY` selects a fork that publishes GitHub release wheels.
 `config` and `tui` open the same
 editor; `run FILE.json` continues to submit a single incident. `run` without a file starts the
 HTTP server and worker in the foreground.
@@ -443,6 +439,10 @@ The bundled [Ponytail adaptation](skills/ponytail/SKILL.md) runs before implemen
 review changes: reuse existing code, standard libraries, and platform features before adding
 code. The simplify-and-verify loop lives in skills and uses the existing lifecycle tools and
 retry budget. It adds no model router, dependency, or second orchestration loop.
+
+Repository architecture and vision context are loaded when available; see the
+[repair context guide](docs/repair-context.md). Pull-request conflicts are polled, classified,
+and repaired through the bounded [conflict recovery workflow](docs/pr-conflicts.md).
 
 The Ponytail adaptation includes its upstream [MIT notice](skills/ponytail/LICENSE).
 Skills are shipped with the wheel and work offline. Repository-specific policies belong in
