@@ -100,3 +100,17 @@ uv wheel install exposes nightly help. Real uv same-version Git update smoke adv
 across multiple commits. Full-suite verification, PR review monitoring and publication
 results are recorded in the follow-up below. No static type checker or hosted preview
 is configured. Restart running services after updating.
+
+Pre-publication verification: full suite passed (642 tests, 94.25% coverage; all
+per-file gates passed) with a test-process-only `ulimit -n 4096`. macOS's default
+256 descriptors caused the earlier deletion/rename failure after accumulated SQLite
+connections; the unchanged isolated test and module passed. Separate coverage output
+avoided collisions with parallel reviewer runs. After eight additional updater
+failure/metadata regression cases, all 60 focused tests passed; production code was
+unchanged. Ruff and diff checks passed. Both Luna review axes found no blocking code
+issues; two old release examples were corrected. The installed wheel successfully
+self-updated to the remote PR branch at the same version.
+
+PR #30: https://github.com/Isaac12x/incident-resolver-agent/pull/30
+Initial check at 16:04:16 UTC: open, clean and mergeable, with no comments, reviews
+or configured CI checks. Five-minute follow-up, merge and publication follow.
