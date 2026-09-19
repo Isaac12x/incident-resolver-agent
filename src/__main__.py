@@ -22,8 +22,10 @@ from .bundles import (
     load_active_bundle,
     rollback_bundle,
 )
+from .cli_help import DESCRIPTION, HELP, AgentParser, HelpFormatter, format_cli_help
 from .config import ConnectorConfig, load_config, save_config
 from .dashboard.cli import add_dashboard_parser, run_dashboard_command
+from .executions import run_executions_command
 from .lifecycle import (
     bootstrap,
     default_config_path,
@@ -47,14 +49,29 @@ from .tooling import (
 from .tui import run_tui
 
 
-def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="incident-agent")
-    parser.add_argument("--config", type=Path, default=None)
-    commands = parser.add_subparsers(dest="command", required=True)
-    plugins = commands.add_parser("plugins", help="list built-in source adapters")
+def build_parser() -> argparse.ArgumentParser:
+    parser = AgentParser(
+        prog="incident-agent",
+        description=DESCRIPTION,
+        epilog=format_cli_help(),
+        formatter_class=HelpFormatter,
+    )
+    parser.add_argument("--config", type=Path, default=None, metavar="PATH")
+    commands = parser.add_subparsers(
+        dest="command", metavar="COMMAND", required=False, parser_class=AgentParser
+    )
+    plugins = commands.add_parser("plugins", help=HELP["plugins"])
     plugins.add_argument("action", nargs="?", choices=("list",), default="list")
     plugins.add_argument("--json", action="store_true", dest="as_json")
-    connect = commands.add_parser("connect", help="configure a named source adapter")
+    connect = commands.add_parser(
+        "connect",
+        help=HELP["connect"],
+        description=(
+            "Add a named source adapter. Omit PLUGIN to set one up interactively. "
+            "Use --list to print configured sources without endpoints or secrets."
+        ),
+        formatter_class=HelpFormatter,
+    )
     connect.add_argument("plugin", nargs="?", help="built-in adapter name")
     connect.add_argument("--list", action="store_true", dest="list_sources")
     connect.add_argument("--name")
@@ -72,34 +89,30 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         nargs=argparse.REMAINDER,
         help="stdio executable and arguments (must be last)",
     )
-    commands.add_parser("init", help="create or repair the local .agent runtime tree")
-    serve = commands.add_parser("serve", help="start the HTTP server")
+    commands.add_parser("init", help=HELP["init"])
+    serve = commands.add_parser("serve", help=HELP["serve"])
     serve.add_argument("--no-worker", action="store_true")
-    commands.add_parser("worker", help="run only the durable task worker")
-    commands.add_parser("tui", aliases=["config"], help="configure the harness")
-    commands.add_parser("update", help="update the isolated installation through uv")
-    doctor_command = commands.add_parser(
-        "doctor", help="validate runtime tools, credentials, and repositories"
-    )
+    commands.add_parser("worker", help=HELP["worker"])
+    commands.add_parser("tui", aliases=["config"], help=HELP["config"])
+    commands.add_parser("update", help=HELP["update"])
+    doctor_command = commands.add_parser("doctor", help=HELP["doctor"])
     doctor_command.add_argument(
         "--install", action="store_true", help="install missing helper CLIs with uv"
     )
-    commands.add_parser("status", help="show readiness and active runtime bundle")
-    bundle = commands.add_parser(
-        "bundle", help="build, list, activate, or roll back runtime bundles"
-    )
+    commands.add_parser("status", help=HELP["status"])
+    bundle = commands.add_parser("bundle", help=HELP["bundle"])
     bundle.add_argument("action", choices=("build", "list", "activate", "rollback"))
     bundle.add_argument("version", nargs="?")
-    commands.add_parser("mcp", help="serve MCP-compatible HTTP endpoints")
+    commands.add_parser("mcp", help=HELP["mcp"])
     install_repositories = commands.add_parser(
         "install-repositories",
-        help="seed configured local repositories into a deployment runtime",
+        help=HELP["install-repositories"],
     )
     install_repositories.add_argument("--source-root", type=Path, required=True)
     install_repositories.add_argument("--destination-root", type=Path, required=True)
     export_env = commands.add_parser(
         "export-systemd-env",
-        help="write a systemd EnvironmentFile from TUI config and secret stores",
+        help=HELP["export-systemd-env"],
     )
     export_env.add_argument(
         "--output",
@@ -112,18 +125,20 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
         action="append",
         help="secret store to read (default: /etc/incident-harness/environment and .env)",
     )
-    commands.add_parser(
-        "service-url",
-        help="print the health-check URL from server settings in config",
-    )
-    healthcheck = commands.add_parser(
-        "healthcheck",
-        help="wait for the configured HTTP service to become ready",
-    )
+    commands.add_parser("service-url", help=HELP["service-url"])
+    healthcheck = commands.add_parser("healthcheck", help=HELP["healthcheck"])
     healthcheck.add_argument("--timeout", type=float, default=30.0)
-    run = commands.add_parser("run", help="submit an incident JSON file, or start the server")
-    run.add_argument("incident", type=Path, nargs="?")
-    eval_command = commands.add_parser("eval", help="run the packaged evaluation dataset")
+    run = commands.add_parser(
+        "run",
+        help=HELP["run"],
+        description=(
+            "Submit an incident JSON file and print the resulting task. "
+            "Omit FILE to start the HTTP server and worker in the foreground."
+        ),
+        formatter_class=HelpFormatter,
+    )
+    run.add_argument("incident", type=Path, nargs="?", metavar="FILE")
+    eval_command = commands.add_parser("eval", help=HELP["eval"])
     eval_command.add_argument(
         "--suite",
         choices=("contracts", "repair", "root-cause", "retrieval"),
@@ -131,13 +146,50 @@ def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
     )
     eval_command.add_argument("dataset", type=Path, nargs="?")
     eval_command.add_argument("--output", type=Path)
-    index = commands.add_parser("index", help="build the code-review-graph index")
+    index = commands.add_parser("index", help=HELP["index"])
     index.add_argument("path", type=Path, nargs="?", default=Path("."))
-    tree = commands.add_parser("tree", help="capture a structured tree with seed-cli")
+    tree = commands.add_parser("tree", help=HELP["tree"])
     tree.add_argument("path", type=Path, nargs="?", default=Path("."))
     tree.add_argument("--out", type=Path, default=Path("structure.seed"))
     add_dashboard_parser(commands)
-    return parser.parse_args(argv)
+    executions = commands.add_parser(
+        "executions",
+        help=HELP["executions"],
+        description=(
+            "List previous task sessions, or inspect the stored model conversation. "
+            "SESSION_ID is the agent's durable id: task:<task-id>."
+        ),
+        formatter_class=HelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  incident-agent executions\n"
+            "  incident-agent executions list\n"
+            "  incident-agent executions task:ID inspect\n"
+        ),
+    )
+    executions.add_argument(
+        "target",
+        nargs="?",
+        default="list",
+        metavar="SESSION_ID",
+        help="list, or a task session id (task:<task-id>)",
+    )
+    executions.add_argument(
+        "action",
+        nargs="?",
+        choices=("inspect",),
+        help="open or print the stored model conversation",
+    )
+    return parser
+
+
+def parse_arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.command:
+        parser.print_help()
+        raise SystemExit(0)
+    return args
 
 
 async def _worker(application: Application) -> None:
@@ -404,8 +456,10 @@ def main(argv: list[str] | None = None) -> None:
         if report.get("failed", 0):
             raise SystemExit(1)
         return
-    # Dashboard startup is deliberately before bootstrap, readiness checks, and
-    # Application.build: it is a read-only process over an existing runtime.
+    # Dashboard and execution inspection are read-only over an existing runtime.
+    if args.command == "executions":
+        run_executions_command(args)
+        return
     if args.command == "dashboard":
         config_path = args.config or default_config_path()
         result = run_dashboard_command(args, config_path)

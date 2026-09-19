@@ -113,25 +113,26 @@ class FileSession:
         except (TypeError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid stored session item: {session_id}") from error
 
-    async def get_items(self, limit: int | None = None) -> list[Any]:
-        def read() -> list[Any]:
-            with connect(self.database) as db:
-                if limit == 0:
-                    return []
-                if limit is None or limit < 0:
-                    rows = db.execute(
-                        "SELECT item_json FROM sdk_items WHERE session_id=? ORDER BY id",
-                        (self.session_id,),
-                    ).fetchall()
-                else:
-                    rows = db.execute(
-                        "SELECT item_json FROM (SELECT item_json,id FROM sdk_items "
-                        "WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id",
-                        (self.session_id, limit),
-                    ).fetchall()
-            return self._decode(rows, self.session_id)
+    def load_items(self, limit: int | None = None) -> list[Any]:
+        """Read stored session items without requiring an event loop."""
+        with connect(self.database) as db:
+            if limit == 0:
+                return []
+            if limit is None or limit < 0:
+                rows = db.execute(
+                    "SELECT item_json FROM sdk_items WHERE session_id=? ORDER BY id",
+                    (self.session_id,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT item_json FROM (SELECT item_json,id FROM sdk_items "
+                    "WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id",
+                    (self.session_id, limit),
+                ).fetchall()
+        return self._decode(rows, self.session_id)
 
-        return await asyncio.to_thread(read)
+    async def get_items(self, limit: int | None = None) -> list[Any]:
+        return await asyncio.to_thread(self.load_items, limit)
 
     async def add_items(self, items: list[Any]) -> None:
         if not items:

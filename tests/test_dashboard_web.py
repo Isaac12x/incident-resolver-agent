@@ -326,7 +326,11 @@ def test_asset_allowlist_and_mime_types(tmp_path: Path):
     client = local_client(root)
     assert client.get("/assets/app.js").headers["content-type"].startswith("text/javascript")
     assert client.get("/assets/style.css").headers["content-type"].startswith("text/css")
-    assert client.get("/assets/index.html").headers["content-type"].startswith("text/html")
+    html = client.get("/assets/index.html")
+    assert html.headers["content-type"].startswith("text/html")
+    assert 'id="mix"' in html.text
+    assert "incident-agent dashboard" in html.text
+    assert 'id="session-actions" hidden' in html.text
     assert client.get("/assets/../web.py").status_code == 404
     assert client.get("/assets/missing.js").status_code == 404
 
