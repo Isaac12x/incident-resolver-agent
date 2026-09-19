@@ -51,7 +51,7 @@ To pin a release tag:
 
 ```bash
 curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | \
-  INCIDENT_HARNESS_VERSION=v0.2.0 sh
+  INCIDENT_HARNESS_VERSION=v0.3.0 sh
 ```
 
 ### Configure and start
@@ -89,11 +89,13 @@ Each connection has a unique name, so multiple sources can use the same plugin. 
 credential configuration. Restart the service after changing connections; if a runtime bundle
 is active, build and activate a new bundle first.
 
-`incident-agent update` refreshes release installations from their recorded GitHub release
-repository. Git, local, and other custom source installations retain their uv source and use
-uv's normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE`, `INCIDENT_HARNESS_REPOSITORY`,
-`INCIDENT_HARNESS_VERSION`, or `INCIDENT_HARNESS_RELEASE_ASSET` to deliberately change the
-update source.
+`incident-agent update` refreshes the latest stable release wheel. `incident-agent update nightly`
+follows the default branch from GitHub and refreshes the source on every run, so repeated nightly
+updates pick up new commits. A nightly install can return to the latest stable release with the
+default `incident-agent update` command, including installs from a GitHub fork with a release.
+Non-GitHub Git, local, and other custom source installations retain their uv source and use uv's
+normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE` or `INCIDENT_HARNESS_REPOSITORY` to
+deliberately change the nightly source; release version and asset overrides apply to stable updates.
 `incident-agent doctor` reports executable, credential, repository, and container
 readiness. `run` installs missing managed tools when dependency installation is enabled, then
 checks readiness before starting. The TUI Overview shows those checks.

@@ -307,7 +307,7 @@ These variables are read directly rather than stored as TOML options. Credential
 | `XDG_STATE_HOME` | `~/.local/state` | Parent directory used for new per-user runtime state. Existing `runtime_root` values are retained. |
 | `INCIDENT_HARNESS_SOURCE` | Release wheel | Explicit Git revision, fork, local path, or wheel URL for installation and update. |
 | `INCIDENT_HARNESS_REPOSITORY` | `Isaac12x/incident-resolver-agent` | GitHub repository whose release API supplies the wheel. |
-| `INCIDENT_HARNESS_VERSION` | `latest` | GitHub release tag to install, such as `v0.2.0`. |
+| `INCIDENT_HARNESS_VERSION` | `latest` | GitHub release tag to install, such as `v0.3.0`. |
 | `INCIDENT_HARNESS_RELEASE_ASSET` | First `incident_harness-*.whl` asset | Exact wheel asset name to select from the release. |
 | `INCIDENT_HARNESS_PACKAGE` | `incident-harness` | Package name installed by `install.sh`. |
 | `INTELLIGENCE_ENABLE_DOWNLOAD` | Unset | Any nonempty value allows automatic vector-index builds to download sentence-transformer weights; even `"0"` enables it. Unset it to require cached weights for automatic builds. Explicit rebuilds can allow downloads independently. Optional vector dependencies are still required. |

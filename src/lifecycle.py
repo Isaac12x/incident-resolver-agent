@@ -83,6 +83,27 @@ def installed_release_repository() -> str | None:
     return "/".join(parts[:2])
 
 
+def installed_git_repository() -> str | None:
+    """Return the GitHub repository recorded for a Git source install."""
+    try:
+        metadata = distribution(PACKAGE_NAME).read_text("direct_url.json")
+    except Exception:
+        return None
+    if not metadata:
+        return None
+    try:
+        url = json.loads(metadata).get("url", "")
+        if url.startswith("git+"):
+            url = url[4:]
+        parsed = urlparse(url)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    parts = [part.removesuffix(".git") for part in parsed.path.split("/") if part]
+    if parsed.hostname != "github.com" or len(parts) != 2:
+        return None
+    return "/".join(parts)
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -280,9 +301,15 @@ def ensure_user_config(path: Path) -> None:
 
 
 def update_installation(
-    *, runner=subprocess.run, managed_tools: tuple[str, ...] = ()
+    *, channel: str = "stable", runner=subprocess.run, managed_tools: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess[str]:
-    """Update the isolated uv tool installation and return the real command result."""
+    """Update the isolated uv tool installation and return the real command result.
+
+    Stable follows the latest release wheel. Nightly follows the default branch of
+    the recorded GitHub repository and refreshes uv's source cache on every run.
+    """
+    if channel not in {"stable", "nightly"}:
+        raise ValueError(f"unsupported update channel: {channel}")
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("uv is required for updates; install it from https://docs.astral.sh/uv/")
@@ -295,9 +322,39 @@ def update_installation(
             "INCIDENT_HARNESS_RELEASE_ASSET",
         )
     )
-    if explicit_source:
+    if channel == "nightly":
+        if os.environ.get("INCIDENT_HARNESS_VERSION") or os.environ.get(
+            "INCIDENT_HARNESS_RELEASE_ASSET"
+        ):
+            raise RuntimeError(
+                "INCIDENT_HARNESS_VERSION and INCIDENT_HARNESS_RELEASE_ASSET only apply "
+                "to stable updates"
+            )
+        source = os.environ.get("INCIDENT_HARNESS_SOURCE")
+        if not source:
+            repository = os.environ.get("INCIDENT_HARNESS_REPOSITORY")
+            if not repository:
+                repository = (
+                    installed_git_repository()
+                    or installed_release_repository()
+                    or DEFAULT_RELEASE_REPOSITORY
+                )
+            source = f"git+https://github.com/{repository}.git"
+        command = [
+            uv,
+            "tool",
+            "install",
+            "--refresh",
+            "--upgrade",
+            "--from",
+            source,
+            PACKAGE_NAME,
+        ]
+    elif explicit_source:
         command = [uv, "tool", "install", "--force", "--from", installation_source(), PACKAGE_NAME]
-    elif repository := installed_release_repository():
+    elif (repository := installed_release_repository()) or (
+        repository := installed_git_repository()
+    ):
         command = [
             uv,
             "tool",
