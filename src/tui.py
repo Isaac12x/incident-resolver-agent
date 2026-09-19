@@ -76,16 +76,38 @@ class ConfigurationApp(App[None]):
 
     CSS = """
     Screen { background: $background; }
-    Header { background: $panel; }
+    Header { background: $panel; color: $text; }
     HeaderIcon { display: none; }
+    Footer { background: $panel; }
+    Tabs { background: $panel; }
+    Tab { padding: 0 2; color: $foreground 60%; }
+    Tab.-active { color: $primary; text-style: bold; }
+    Underline > .underline--bar { color: $primary; }
     #content { height: 1fr; }
     .page { padding: 1 2; }
-    .page > Static { height: auto; margin-bottom: 1; color: $text-muted; }
-    .section, .card {
-        height: auto; border-left: thick $primary; padding: 0 1; margin-bottom: 1;
+    .page > Static { height: auto; margin-bottom: 1; }
+    .page-lead { color: $text-muted; }
+    .headline { text-style: bold; color: $success; }
+    .headline.fail { color: $error; }
+    .checks, .summary {
+        height: auto; background: $surface; border-left: thick $primary;
+        padding: 1; margin-bottom: 1; color: $text;
     }
-    .section-title { text-style: bold; color: $primary; margin-bottom: 1; }
-    Collapsible { padding: 0; margin-bottom: 1; }
+    .section {
+        height: auto; background: $surface; border-left: thick $primary;
+        padding: 1 1 0 1; margin-bottom: 1;
+    }
+    .section-title { text-style: bold; color: $primary; margin-bottom: 1; height: auto; }
+    .card {
+        height: auto; background: $surface; border: round $primary;
+        padding: 1; margin-bottom: 1;
+    }
+    .card-title { text-style: bold; color: $accent; margin-bottom: 1; height: auto; }
+    .empty {
+        height: auto; color: $text-muted; background: $surface;
+        border: dashed $panel; padding: 1; margin-bottom: 1;
+    }
+    Collapsible { padding: 0; margin-bottom: 1; height: auto; }
     .row { height: auto; }
     .row Input, .row Select { width: 1fr; margin-right: 1; }
     Input, Select, TextArea { margin-bottom: 1; }
@@ -95,8 +117,12 @@ class ConfigurationApp(App[None]):
     Button { margin-right: 1; margin-bottom: 1; }
     #repositories-list, #connectors-list, #applications-list { height: auto; }
     .inline-status { height: auto; min-height: 1; color: $text-muted; margin-bottom: 1; }
-    #status { height: auto; max-height: 5; overflow-y: auto; padding: 0 2; }
+    #status {
+        height: auto; max-height: 5; overflow-y: auto; padding: 0 2;
+        background: $panel; color: $text-muted;
+    }
     #status.error { color: $error; }
+    #status.success { color: $success; }
     #actions { height: 3; padding: 0 2; background: $panel; }
     #actions Button { min-width: 8; margin-bottom: 0; }
     .narrow .page { padding: 1 0; }
@@ -130,6 +156,7 @@ class ConfigurationApp(App[None]):
         )
         self.theme = "incident-graphite"
         self.path = path
+        self.sub_title = str(path)
         self.command_runner = command_runner
         self.config = load_config(path)
         self._next_collection_id = 0
@@ -163,29 +190,78 @@ class ConfigurationApp(App[None]):
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
         yield Static(str(self.path), id="status", markup=False)
         yield Horizontal(
-            Button("Save", id="save", variant="primary"),
-            Button("Quit", id="quit"),
+            Button("Save", id="save", variant="primary", tooltip="Ctrl+S"),
+            Button("Quit", id="quit", tooltip="Ctrl+Q"),
             id="actions",
         )
         yield Footer()
 
     def _overview_page(self) -> list[Any]:
-        checks = doctor(self.path, runner=self.command_runner)
-        failed = [check for check in checks if not check.ok]
-        message = (
-            "Ready for incident intake"
-            if not failed
-            else "\n".join(f"{check.name}: {check.message}" for check in failed)
-        )
+        headline, checks, summary, failed = self._overview_content()
         return [
-            Static("Readiness", classes="section-title"),
-            Static(message, id="readiness", markup=False),
             Static(
-                "Use Runtime, Repos, and Sources tabs to resolve failed checks. "
-                "Save validates the complete configuration.",
+                headline,
+                id="overview-headline",
+                classes="headline fail" if failed else "headline",
+                markup=False,
+            ),
+            Static(checks, id="readiness", classes="checks", markup=False),
+            Static(summary, id="overview-summary", classes="summary", markup=False),
+            Static(
+                "Save rechecks readiness. Use Runtime, Repos, and Sources to fix failures.",
+                classes="page-lead",
                 markup=False,
             ),
         ]
+
+    def _overview_content(self) -> tuple[str, str, str, bool]:
+        checks = doctor(self.path, runner=self.command_runner)
+        failed = [check for check in checks if not check.ok]
+        headline = (
+            "Ready for incident intake"
+            if not failed
+            else f"{len(failed)} of {len(checks)} checks failed"
+        )
+        width = max((len(check.name) for check in checks), default=0)
+        body = (
+            "\n".join(
+                f"{'OK  ' if check.ok else 'FAIL'}  {check.name:<{width}}  {check.message}"
+                for check in checks
+            )
+            or "No readiness checks ran."
+        )
+        return headline, body, self._config_snapshot(), bool(failed)
+
+    def _config_snapshot(self) -> str:
+        model = self.config.model
+        if model.runtime == "subscription-cli":
+            model_line = f"Model      {shlex.join(model.subscription_command)} (subscription CLI)"
+        else:
+            model_line = f"Model      {model.provider}/{model.name} ({model.runtime}, {model.mode})"
+        repos = ", ".join(repository.name for repository in self.config.repositories) or "none"
+        apps = ", ".join(application.name for application in self.config.applications) or "none"
+        sources = ", ".join(connector.name for connector in self.config.connectors) or "none"
+        return "\n".join(
+            [
+                model_line,
+                (
+                    f"Runtime    {self.config.runtime_root} · {self.config.execution.mode} · "
+                    f"{self.config.max_concurrent_tasks} concurrent"
+                ),
+                f"HTTP       {self.config.server.host}:{self.config.server.port}",
+                f"Repos      {repos}",
+                f"Apps       {apps}",
+                f"Sources    {sources}",
+            ]
+        )
+
+    def _refresh_overview(self) -> None:
+        headline, checks, summary, failed = self._overview_content()
+        widget = self.query_one("#overview-headline", Static)
+        widget.update(headline)
+        widget.set_class(failed, "fail")
+        self.query_one("#readiness", Static).update(checks)
+        self.query_one("#overview-summary", Static).update(summary)
 
     @staticmethod
     def _field(label: str, widget: Any) -> Vertical:
@@ -237,23 +313,32 @@ class ConfigurationApp(App[None]):
             Static(
                 "Configure Open Code Review before installing it. Findings return to the "
                 "fix agent before Playwright verification. Enter an environment variable "
-                "name for the API key; provide its value in the worker environment."
+                "name for the API key; provide its value in the worker environment.",
+                classes="page-lead",
             ),
-            Checkbox("Enable Open Code Review", value=settings.enabled, id="ocr-enabled"),
-            Label("Model protocol"),
-            self._select(
-                settings.protocol, "ocr-protocol", ("openai", "openai-responses", "anthropic")
+            Vertical(
+                Label("Open Code Review", classes="section-title"),
+                Checkbox("Enable Open Code Review", value=settings.enabled, id="ocr-enabled"),
+                Label("Model protocol"),
+                self._select(
+                    settings.protocol, "ocr-protocol", ("openai", "openai-responses", "anthropic")
+                ),
+                Label("Model endpoint"),
+                self._input(settings.base_url, "ocr-base-url"),
+                Label("Model name"),
+                self._input(settings.model, "ocr-model"),
+                Label("API key environment variable"),
+                self._input(settings.api_key_env, "ocr-api-key-env"),
+                Label("Review timeout (seconds)"),
+                self._input(settings.timeout_seconds, "ocr-timeout"),
+                Button(
+                    "Save configuration and install / test OCR",
+                    id="setup-ocr",
+                    variant="primary",
+                ),
+                Static("Not tested", id="ocr-status", classes="inline-status", markup=False),
+                classes="section",
             ),
-            Label("Model endpoint"),
-            self._input(settings.base_url, "ocr-base-url"),
-            Label("Model name"),
-            self._input(settings.model, "ocr-model"),
-            Label("API key environment variable"),
-            self._input(settings.api_key_env, "ocr-api-key-env"),
-            Label("Review timeout (seconds)"),
-            self._input(settings.timeout_seconds, "ocr-timeout"),
-            Button("Save configuration and install / test OCR", id="setup-ocr", variant="primary"),
-            Static("Not tested", id="ocr-status", markup=False),
         ]
 
     def _collect_code_review(self) -> CodeReviewConfig:
@@ -284,9 +369,12 @@ class ConfigurationApp(App[None]):
     def _model_page(self) -> list[Any]:
         model = self.config.model
         return [
-            Static("Choose the model for incident investigation, repair, and review."),
+            Static(
+                "Choose the model for incident investigation, repair, and review.",
+                classes="page-lead",
+            ),
             Vertical(
-                Label("Agent runtime"),
+                Label("Agent runtime", classes="section-title"),
                 self._select(
                     model.runtime,
                     "model-runtime",
@@ -305,6 +393,7 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("Subscription CLI", classes="section-title"),
                 Static("", id="subscription-host-status", classes="inline-status", markup=False),
                 Label("Subscription CLI command"),
                 self._input(shlex.join(model.subscription_command), "subscription-command"),
@@ -316,13 +405,14 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
-                Label("Execution location"),
+                Label("Execution location", classes="section-title"),
                 self._select(model.mode, "model-mode", ("local", "remote")),
                 Static(self._model_help(model.mode), id="model-help"),
                 id="agents-sdk-mode-section",
                 classes="section",
             ),
             Vertical(
+                Label("Provider endpoint", classes="section-title"),
                 Label("Provider label (for your records)"),
                 self._input(model.provider, "provider", placeholder="ollama, vllm, openai, ..."),
                 Label("OpenAI-compatible base URL (include /v1 when required)"),
@@ -395,7 +485,8 @@ class ConfigurationApp(App[None]):
         execution = self.config.execution
         return [
             Vertical(
-                Label("How incidents trigger the harness"),
+                Label("Incident trigger", classes="section-title"),
+                Label("Mode"),
                 self._select(trigger.mode, "trigger-mode", ("hook", "workflow", "agent-call")),
                 Label("Incident hook path"),
                 self._input(trigger.hook_path, "trigger-hook-path"),
@@ -411,6 +502,7 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("Worker", classes="section-title"),
                 Label("Runtime root"),
                 self._input(self.config.runtime_root, "runtime-root"),
                 Label("Maximum concurrent tasks"),
@@ -420,6 +512,7 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("HTTP server", classes="section-title"),
                 Label("HTTP host"),
                 self._input(server.host, "host"),
                 Label("HTTP port"),
@@ -438,10 +531,12 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("GitHub publishing", classes="section-title"),
                 Static(
                     "GitHub publishing uses the account from ‘Log in to GitHub’. "
                     "The installer provisions that login for the service; "
-                    "the agent login below identifies review comments, not credentials."
+                    "the agent login below identifies review comments, not credentials.",
+                    classes="page-lead",
                 ),
                 Label("GitHub webhook secret environment variable"),
                 self._input(github.webhook_secret_env, "github-webhook-secret-env"),
@@ -461,6 +556,7 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("Deployment verification", classes="section-title"),
                 Label("Deployment reachability timeout in seconds"),
                 self._input(deployment.reachability_timeout_seconds, "deployment-timeout"),
                 Label("Deployment poll interval in seconds"),
@@ -468,6 +564,7 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
+                Label("Command execution", classes="section-title"),
                 Label("Execution mode"),
                 self._select(execution.mode, "execution-mode", ("host", "container")),
                 Label("Container image"),
@@ -484,7 +581,8 @@ class ConfigurationApp(App[None]):
                 classes="section",
             ),
             Vertical(
-                Label("Workspace permission mode"),
+                Label("Workspace permissions", classes="section-title"),
+                Label("Permission mode"),
                 self._select(permissions.mode, "permissions-mode", ("read-only", "workspace")),
                 Checkbox(
                     "Allow dependency installation",
@@ -522,11 +620,19 @@ class ConfigurationApp(App[None]):
             self._repository_keys.append(key)
             forms.append(self._repository_form(key, repository))
         container = Vertical(*forms, id="repositories-list")
+        empty = Static(
+            "No repositories yet. Add one to clone, index, and publish incident repairs.",
+            id="repositories-empty",
+            classes="empty",
+        )
+        empty.display = not forms
         return [
             Static(
                 "Repositories define local/remote source, publishing, incident environments, "
-                "and deployment verification."
+                "and deployment verification.",
+                classes="page-lead",
             ),
+            empty,
             container,
             Button("Add repository", id="add-repository"),
         ]
@@ -538,25 +644,33 @@ class ConfigurationApp(App[None]):
             key = self._new_key("application")
             self._application_keys.append(key)
             forms.append(self._application_form(key, application))
+        empty = Static(
+            "No applications yet. Add one to group services and repositories into a single "
+            "incident session.",
+            id="applications-empty",
+            classes="empty",
+        )
+        empty.display = not forms
         return [
             Static(
                 "Applications group explicitly configured services and repositories into one "
                 "durable incident session. Membership is an authorization boundary; leave it "
-                "empty when using repository-only incidents."
+                "empty when using repository-only incidents.",
+                classes="page-lead",
             ),
+            empty,
             Vertical(*forms, id="applications-list"),
             Button("Add application", id="add-application"),
         ]
 
-    def _application_form(
-        self, key: str, application: ApplicationConfig | None = None
-    ) -> Vertical:
+    def _application_form(self, key: str, application: ApplicationConfig | None = None) -> Vertical:
         if application is None:
             application = ApplicationConfig.model_construct(
                 name="", services=[], repositories=[], integration_command=""
             )
         prefix = f"application-{key}"
         return Vertical(
+            Label(application.name or "New application", classes="card-title"),
             Label("Application name"),
             self._input(application.name, f"{prefix}-name", placeholder="checkout"),
             Label("Services (comma-separated)"),
@@ -565,7 +679,7 @@ class ConfigurationApp(App[None]):
             self._input(", ".join(application.repositories), f"{prefix}-repositories"),
             Label("Integration command (optional; runs in application session workspace)"),
             self._input(application.integration_command, f"{prefix}-integration-command"),
-            Button("Remove application", id=f"remove-{key}"),
+            Button("Remove application", id=f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -577,11 +691,20 @@ class ConfigurationApp(App[None]):
             self._connector_keys.append(key)
             forms.append(self._connector_form(key, connector))
         container = Vertical(*forms, id="connectors-list")
+        empty = Static(
+            "No connections yet. Add Grafana, Loki, webhook, or MCP sources for intake and "
+            "observability.",
+            id="connectors-empty",
+            classes="empty",
+        )
+        empty.display = not forms
         return [
             Static(
                 "Use purpose to distinguish incident intake, PR output, and "
-                "observability/logging MCP connections."
+                "observability/logging MCP connections.",
+                classes="page-lead",
             ),
+            empty,
             container,
             Button("Add connection", id="add-connector"),
         ]
@@ -591,9 +714,11 @@ class ConfigurationApp(App[None]):
         return [
             Static(
                 "The system prompt and safety contract below are included in every agent run. "
-                "Keep them concrete and operational."
+                "Keep them concrete and operational.",
+                classes="page-lead",
             ),
             Vertical(
+                Label("Safety contract", classes="section-title"),
                 Label("System prompt"),
                 TextArea(self.config.agent.system_prompt, id="system-prompt"),
                 Label("Positive goals — one per line"),
@@ -632,6 +757,7 @@ class ConfigurationApp(App[None]):
             "github" if repository.clone_url and "github.com" in repository.clone_url else "url"
         )
         return Vertical(
+            Label(repository.name or "New repository", classes="card-title"),
             Label("Repository"),
             self._input(repository.name, f"{prefix}-name", placeholder="owner/repository"),
             Label("Get repository from"),
@@ -664,15 +790,20 @@ class ConfigurationApp(App[None]):
             self._input(repository.verification_environment, f"{prefix}-verification-environment"),
             Label("Project instructions filename"),
             self._input(repository.project_instructions, f"{prefix}-project-instructions"),
-            Label("Playwright command (blank disables deployment browser checks)"),
-            self._input(playwright.command, f"{prefix}-playwright-command"),
-            Label("Playwright base URL environment variable"),
-            self._input(playwright.base_url_env, f"{prefix}-playwright-base-url-env"),
-            Label("Playwright timeout seconds"),
-            self._input(playwright.timeout_seconds, f"{prefix}-playwright-timeout"),
-            Label("Playwright retries"),
-            self._input(playwright.retries, f"{prefix}-playwright-retries"),
-            Button("Remove repository", id=f"remove-{key}"),
+            Collapsible(
+                Label("Playwright command (blank disables deployment browser checks)"),
+                self._input(playwright.command, f"{prefix}-playwright-command"),
+                Label("Playwright base URL environment variable"),
+                self._input(playwright.base_url_env, f"{prefix}-playwright-base-url-env"),
+                Label("Playwright timeout seconds"),
+                self._input(playwright.timeout_seconds, f"{prefix}-playwright-timeout"),
+                Label("Playwright retries"),
+                self._input(playwright.retries, f"{prefix}-playwright-retries"),
+                title="Playwright deployment checks",
+                collapsed=True,
+                id=f"{prefix}-playwright",
+            ),
+            Button("Remove repository", id=f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -694,6 +825,7 @@ class ConfigurationApp(App[None]):
             )
         prefix = f"connector-{key}"
         return Vertical(
+            Label(connector.name or "New connection", classes="card-title"),
             Label("Connection name"),
             self._input(connector.name, f"{prefix}-name"),
             Label("Purpose"),
@@ -727,7 +859,7 @@ class ConfigurationApp(App[None]):
             self._input(", ".join(connector.capabilities), f"{prefix}-capabilities"),
             Button("Test connection", id=f"test-{key}"),
             Static("", id=f"connector-status-{key}", classes="inline-status", markup=False),
-            Button("Remove connection", id=f"remove-{key}"),
+            Button("Remove connection", id=f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -947,13 +1079,26 @@ class ConfigurationApp(App[None]):
             capabilities=self._split(self._value(f"{prefix}-capabilities")),
         )
 
-    def _set_status(self, message: str) -> None:
-        self.query_one("#status", Static).update(message)
+    def _set_status(self, message: str, *, error: bool = False) -> None:
+        status = self.query_one("#status", Static)
+        status.update(message)
+        status.set_class(error, "error")
+        status.set_class(not error, "success")
+
+    def _sync_collection_empty(self, kind: str) -> None:
+        keys = {
+            "repositories": self._repository_keys,
+            "applications": self._application_keys,
+            "connectors": self._connector_keys,
+        }[kind]
+        self.query_one(f"#{kind}-empty").display = not keys
 
     def on_mount(self) -> None:
         for key in self._repository_keys:
             self._set_repository_source(key)
         self._set_model_runtime(self.config.model.runtime)
+        for kind in ("repositories", "applications", "connectors"):
+            self._sync_collection_empty(kind)
         self.call_later(self._refresh_subscription_status)
 
     def _set_model_runtime(self, runtime: str) -> None:
@@ -1106,6 +1251,7 @@ class ConfigurationApp(App[None]):
             save_config(self.config, self.path)
             status.update(f"Ready: pulled, indexed, and saved {name}.")
             self._set_status(f"Saved {self.path}")
+            self._refresh_overview()
         except (TypeError, ValueError) as error:
             status.update(f"Repository is indexed; correct the remaining form error: {error}")
 
@@ -1164,16 +1310,19 @@ class ConfigurationApp(App[None]):
             self._repository_keys.append(key)
             await self.query_one("#repositories-list", Vertical).mount(self._repository_form(key))
             self._set_repository_source(key)
+            self._sync_collection_empty("repositories")
             return
         if button_id == "add-connector":
             key = self._new_key("connector")
             self._connector_keys.append(key)
             await self.query_one("#connectors-list", Vertical).mount(self._connector_form(key))
+            self._sync_collection_empty("connectors")
             return
         if button_id == "add-application":
             key = self._new_key("application")
             self._application_keys.append(key)
             await self.query_one("#applications-list", Vertical).mount(self._application_form(key))
+            self._sync_collection_empty("applications")
             return
         if button_id.startswith("github-login-repository-"):
             await self._load_github_repositories(button_id.removeprefix("github-login-"))
@@ -1195,26 +1344,28 @@ class ConfigurationApp(App[None]):
             key = button_id.removeprefix("remove-")
             if key.startswith("repository-"):
                 self._repository_keys.remove(key)
+                kind = "repositories"
             elif key.startswith("connector-"):
                 self._connector_keys.remove(key)
+                kind = "connectors"
             else:
                 self._application_keys.remove(key)
+                kind = "applications"
             await self.query_one(f"#{key}").remove()
+            self._sync_collection_empty(kind)
             return
         if button_id != "save":
             return
         self.action_save()
 
     def action_save(self) -> None:
-        status = self.query_one("#status", Static)
         try:
             draft = self._collect()
             save_config(draft, self.path)
             self.config = draft
-            status.remove_class("error")
             self._set_status(f"Saved {self.path}")
+            self._refresh_overview()
         except (OSError, TypeError, ValueError) as error:
-            status.add_class("error")
             message = (
                 "; ".join(
                     f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
@@ -1223,7 +1374,7 @@ class ConfigurationApp(App[None]):
                 if isinstance(error, ValidationError)
                 else str(error)
             )
-            self._set_status(f"Could not save: {message}")
+            self._set_status(f"Could not save: {message}", error=True)
 
 
 def run_tui(path: Path = Path(".agent/config.toml")) -> None:

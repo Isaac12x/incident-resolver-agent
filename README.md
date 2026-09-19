@@ -73,6 +73,21 @@ incident-agent doctor
 incident-agent run
 ```
 
+Source connections can also be configured from the CLI:
+
+```bash
+incident-agent plugins
+incident-agent connect
+incident-agent connect local-logs --name api-logs --log-path /var/log/myapp/api.log
+incident-agent connect local-logs --name worker-logs --log-path /var/log/myapp/worker.log
+incident-agent connect --list
+```
+
+Each connection has a unique name, so multiple sources can use the same plugin. See
+[source plugins and connections](docs/plugins.md) for scripted setup, MCP servers, and
+credential configuration. Restart the service after changing connections; if a runtime bundle
+is active, build and activate a new bundle first.
+
 `incident-agent update` refreshes release installations from their recorded GitHub release
 repository. Git, local, and other custom source installations retain their uv source and use
 uv's normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE`, `INCIDENT_HARNESS_REPOSITORY`,

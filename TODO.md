@@ -40,3 +40,24 @@ repository shell and lifecycle test execution, not native subscription CLI, MCP,
 processes. Synthetic evaluation results do not establish production root-cause or model repair
 quality. Summaries depend on the evidence available in generated artifacts and persisted incident
 records; an extractive fallback is used until generated artifacts exist.
+
+
+
+
+(not done)
+## KEY changes
+* FIX: Scope limits: the tool learner is an online contextual bandit, not a pretrained general repair policy. Discovery/installation is confined to the operator-approved catalog. Container mode covers repository shell and lifecycle test execution, not native subscription CLI, MCP, or trusted plugin processes. Synthetic evaluation results do not establish production root-cause or model repair quality. Summaries depend on the evidence available in generated artifacts and persisted incident records; an extractive fallback is used until generated artifacts exist.
+* Add security: https://github.com/cloudflare/security-audit-skill and run it before marking the PR as ready.
+* PR annotations.
+* Add Matt Pockock's skills for what they are useful.
+* Replace looping for graphing  
+See how the graph improves as opposed to a simpler looping mode.
+* Real-time Analytics: Interactive dashboard with charts and incident statistics - visualize resolutions.
+* replace chatpgpt with jev (new parallel model)
+
+## Extras
+
+* Plugins to AzureDevOps (and other ticketting SW) as tickets 
+(move them on the right column) 
+Incident -> TODO -> executing -> DOING -> completed and PR -> READY FOR REVIEW (and replace the incident prefaced with FIX:)
+* Add idea to match to the code style used in the repository.

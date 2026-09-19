@@ -15,7 +15,7 @@ import httpx
 import pytest
 from agents import ModelSettings
 from fastapi.testclient import TestClient
-from textual.widgets import Button, Input, Select, Static, TabbedContent, TextArea
+from textual.widgets import Button, Collapsible, Input, Select, Static, TabbedContent, TextArea
 
 from src.__main__ import _run_direct, _worker, main, parse_arguments
 from src.agent import IncidentAgent, OpenAIAgentsBackend, _ConsoleProgress
@@ -1964,6 +1964,9 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
         app.query_one("#system-prompt", TextArea).text = "Use the configured incident policy."
         app.query_one("#save", Button).press()
         await pilot.pause()
+        assert app.query_one("#status").has_class("success")
+        assert "OK" in app.query_one("#readiness", Static).render().plain
+        assert "Repos" in app.query_one("#overview-summary", Static).render().plain
     saved = load_config(path)
     assert saved.model.name == "new-model"
     assert saved.model.mode == "local"
@@ -1983,6 +1986,46 @@ async def test_tui_save(config: Config, tmp_path: Path) -> None:
     assert saved.server.port == 9876
     assert saved.safety.positive_goals == ["restore service", "pass tests"]
     assert saved.agent.system_prompt == "Use the configured incident policy."
+
+
+@pytest.mark.asyncio
+async def test_tui_overview_and_empty_collection_states(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / "runtime"), path)
+    app = ConfigurationApp(path)
+    async with app.run_test() as pilot:
+        headline = app.query_one("#overview-headline", Static).render().plain
+        assert "Ready for incident intake" in headline or "checks failed" in headline
+        readiness = app.query_one("#readiness", Static).render().plain
+        assert "config" in readiness
+        assert "OK" in readiness or "FAIL" in readiness
+        summary = app.query_one("#overview-summary", Static).render().plain
+        assert "Repos      none" in summary
+        assert "Apps       none" in summary
+        assert app.query_one("#repositories-empty").display is True
+        assert app.query_one("#applications-empty").display is True
+        assert app.query_one("#connectors-empty").display is True
+
+        app.query_one(TabbedContent).active = "repositories-tab"
+        await pilot.pause()
+        app.query_one("#add-repository", Button).press()
+        await pilot.pause()
+        assert app.query_one("#repositories-empty").display is False
+        assert app.query_one("#repo-repository-0-playwright", Collapsible).collapsed is True
+        app.query_one("#remove-repository-0", Button).press()
+        await pilot.pause()
+        assert app.query_one("#repositories-empty").display is True
+
+        app.query_one(TabbedContent).active = "runtime-tab"
+        await pilot.pause()
+        titles = [widget.render().plain for widget in app.query("#runtime-tab .section-title")]
+        assert "HTTP server" in titles
+        assert "Workspace permissions" in titles
+
+        app.query_one("#save", Button).press()
+        await pilot.pause()
+        assert app.query_one("#status").has_class("success")
+        assert "none" in app.query_one("#overview-summary", Static).render().plain
 
 
 @pytest.mark.asyncio
