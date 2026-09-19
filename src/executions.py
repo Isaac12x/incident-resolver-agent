@@ -15,13 +15,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.theme import Theme
 from textual.widgets import DataTable, Footer, Header, Static
 
 from .config import load_config
 from .file_session import FileSession
 from .models import TaskRecord
 from .storage import Storage
+from .tui_theme import CHROME_CSS, apply_theme
 
 _CHILD_SESSIONS = (":research", ":implementation")
 _TOOL_OUTPUT_LIMIT = 8_000
@@ -132,31 +132,16 @@ def run_executions_command(args: Namespace) -> None:
     print(transcript.rstrip("\n"))
 
 
-_GRAPHITE = Theme(
-    name="incident-graphite",
-    primary="#66d9c3",
-    secondary="#a8b8c4",
-    accent="#e9b96e",
-    foreground="#e4edf2",
-    background="#10181f",
-    surface="#17232c",
-    panel="#20313b",
-    success="#66d9a0",
-    warning="#e9b96e",
-    error="#ff8c82",
-    dark=True,
-)
-_EXECUTIONS_CSS = """
-Screen { background: $background; }
-Header { background: $panel; color: $text; }
-HeaderIcon { display: none; }
-Footer { background: $panel; }
-#transcript { padding: 1 2; height: auto; color: $text; }
-#cli-hint { height: auto; color: $text-muted; padding: 0 2 1 2; }
-#executions { height: 1fr; }
-#empty { height: 1fr; padding: 1 2; color: $text-muted; content-align: center middle; }
+_EXECUTIONS_CSS = (
+    CHROME_CSS
+    + """
+#transcript { padding: 1 2 1 1; height: auto; color: $text; }
+#cli-hint { height: auto; color: #6c6c6c; padding: 1 2 0 2; }
+#executions { height: 1fr; background: $background; }
+#empty { height: 1fr; padding: 1 2; color: #6c6c6c; content-align: center middle; }
 DataTable { height: 1fr; }
 """
+)
 
 
 class ExecutionInspectScreen(Screen[None]):
@@ -175,7 +160,7 @@ class ExecutionInspectScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield VerticalScroll(Static(self._transcript, markup=False, id="transcript"))
+        yield VerticalScroll(Static(_style_transcript(self._transcript), id="transcript"))
         yield Footer()
 
     def on_mount(self) -> None:
@@ -201,8 +186,7 @@ class ExecutionInspectApp(App[None]):
 
     def __init__(self, session_id: str, summary: str, transcript: str) -> None:
         super().__init__()
-        self.register_theme(_GRAPHITE)
-        self.theme = "incident-graphite"
+        apply_theme(self)
         self.sub_title = summary or session_id
         self._transcript = transcript
         self._session_id = session_id
@@ -214,7 +198,7 @@ class ExecutionInspectApp(App[None]):
             id="cli-hint",
             markup=False,
         )
-        yield VerticalScroll(Static(self._transcript, markup=False, id="transcript"))
+        yield VerticalScroll(Static(_style_transcript(self._transcript), id="transcript"))
         yield Footer()
 
 
@@ -231,18 +215,23 @@ class ExecutionListApp(App[None]):
 
     def __init__(self, storage: Storage, tasks: list[TaskRecord]) -> None:
         super().__init__()
-        self.register_theme(_GRAPHITE)
-        self.theme = "incident-graphite"
+        apply_theme(self)
         self._storage = storage
         self._tasks = tasks
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static(
+            "enter inspect  ·  q quit" if self._tasks else "q quit",
+            id="cli-hint",
+            markup=False,
+        )
         if self._tasks:
             yield DataTable(
                 id="executions",
                 cursor_type="row",
-                zebra_stripes=True,
+                zebra_stripes=False,
+                show_header=False,
                 show_row_labels=False,
             )
         else:
@@ -253,12 +242,17 @@ class ExecutionListApp(App[None]):
         if not self._tasks:
             return
         table = self.query_one("#executions", DataTable)
-        table.add_column("Summary", key="summary")
-        table.add_column("Date", key="date", width=16)
+        date_width = 18
+        table.add_column("Summary", key="summary", width=max(20, self.size.width - date_width - 2))
+        table.add_column("Date", key="date", width=date_width)
         for index, task in enumerate(self._tasks):
             title = " ".join((task.summary or "").split()) or "(no summary)"
             date = _date(task.updated_at or task.created_at)
-            table.add_row(title, Text(date, justify="right"), key=str(index))
+            table.add_row(
+                title,
+                Text(date, style="#6c6c6c", justify="right"),
+                key=str(index),
+            )
         table.focus()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -308,6 +302,56 @@ def _show_list(storage: Storage) -> None:
 def _date(value: datetime) -> str:
     when = value if value.tzinfo else value.replace(tzinfo=UTC)
     return when.astimezone(UTC).strftime("%Y-%m-%d %H:%M")
+
+
+def _style_transcript(plain: str) -> Text:
+    """Color a stored transcript the way Grok styles scrollback."""
+    rendered = Text()
+    continuation: str | None = None
+    for line in plain.splitlines(keepends=True):
+        newline = line.endswith("\n")
+        body = line[:-1] if newline else line
+        styled, continuation = _style_transcript_line(body, continuation)
+        rendered.append_text(styled)
+        if newline:
+            rendered.append("\n")
+    return rendered
+
+
+def _style_transcript_line(line: str, continuation: str | None) -> tuple[Text, str | None]:
+    text = Text()
+    if not line.strip():
+        return text, None
+    if line.startswith("user:"):
+        text.append("› ", style="bold #bb9af7")
+        text.append(line[5:].lstrip(), style="#e1e1e1")
+        return text, "user"
+    if line.startswith("assistant:"):
+        text.append("◆ ", style="#bb9af7")
+        text.append(line[10:].lstrip())
+        return text, "assistant"
+    if line.startswith("tool output:"):
+        text.append("  ", style="#6c6c6c")
+        text.append(line, style="#6c6c6c")
+        return text, "tool"
+    if line.startswith("tool "):
+        text.append("◆ ", style="#e0af68")
+        text.append(line[5:], style="#c8c8c8")
+        return text, "tool"
+    if line.startswith("thinking:"):
+        text.append(line[9:].lstrip(), style="italic #6c6c6c")
+        return text, "thinking"
+    if line.startswith("## "):
+        text.append(line, style="bold #bb9af7")
+        return text, None
+    if line.startswith(("session:", "task:", "summary:", "state:", "updated:")):
+        text.append(line, style="#6c6c6c")
+        return text, "meta"
+    if continuation in {"tool", "thinking", "meta"}:
+        text.append(line, style="#6c6c6c")
+        return text, continuation
+    text.append(line)
+    return text, continuation
 
 
 def _session_items(storage: Storage, session_id: str) -> list[Any]:

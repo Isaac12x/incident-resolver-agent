@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.theme import Theme
 from textual.widgets import (
     Button,
     Checkbox,
@@ -54,6 +54,7 @@ from .tooling import (
     repository_name_from_url,
     repository_slug,
 )
+from .tui_theme import CHROME_CSS, apply_theme
 
 
 def _options(*values: str) -> list[tuple[str, str]]:
@@ -76,63 +77,74 @@ class ConfigurationApp(App[None]):
     ]
     HORIZONTAL_BREAKPOINTS = [(0, "narrow"), (70, "wide")]
 
-    CSS = """
-    Screen { background: $background; }
-    Header { background: $panel; color: $text; }
-    HeaderIcon { display: none; }
-    Footer { background: $panel; }
-    Tabs { background: $panel; }
-    Tab { padding: 0 2; color: $foreground 60%; }
-    Tab.-active { color: $primary; text-style: bold; }
-    Underline > .underline--bar { color: $primary; }
+    CSS = (
+        CHROME_CSS
+        + """
     #content { height: 1fr; }
     .page { padding: 1 2; }
     .page > Static { height: auto; margin-bottom: 1; }
-    .page-lead { color: $text-muted; }
+    .page-lead { color: #6c6c6c; }
     .headline { text-style: bold; color: $success; }
     .headline.fail { color: $error; }
     .checks, .summary, .commands {
-        height: auto; background: $surface; border-left: thick $primary;
-        padding: 1; margin-bottom: 1; color: $text;
+        height: auto; background: $surface; border-left: tall $primary;
+        padding: 1 2; margin-bottom: 1; color: $text;
     }
-    .commands { border-left: thick $accent; }
+    .commands { border-left: tall $accent; }
     .section {
-        height: auto; background: $surface; border-left: thick $primary;
-        padding: 1 1 0 1; margin-bottom: 1;
+        height: auto; background: $surface; border: solid #414141;
+        padding: 1 2 0 2; margin-bottom: 1;
     }
     .section-title { text-style: bold; color: $primary; margin-bottom: 1; height: auto; }
     .card {
-        height: auto; background: $surface; border: round $primary;
-        padding: 1; margin-bottom: 1;
+        height: auto; background: $surface; border: solid #414141;
+        padding: 1 2; margin-bottom: 1;
     }
     .card-title { text-style: bold; color: $accent; margin-bottom: 1; height: auto; }
     .empty {
-        height: auto; color: $text-muted; background: $surface;
-        border: dashed $panel; padding: 1; margin-bottom: 1;
+        height: auto; color: #6c6c6c; background: $background;
+        border: dashed #414141; padding: 1 2; margin-bottom: 1;
     }
-    Collapsible { padding: 0; margin-bottom: 1; height: auto; }
+    Collapsible {
+        padding: 0 1; margin-bottom: 1; height: auto;
+        background: $surface; border: solid #414141;
+    }
     .row { height: auto; }
     .row Input, .row Select { width: 1fr; margin-right: 1; }
     Input, Select, TextArea { margin-bottom: 1; }
-    TextArea { height: 7; }
-    Checkbox { margin-bottom: 1; }
-    Label { color: $text; width: 1fr; height: auto; }
-    Button { margin-right: 1; margin-bottom: 1; }
+    Input {
+        height: 1; border: none !important; background: $boost; padding: 0 1;
+    }
+    Input:focus {
+        border: none !important; background: $boost; border-left: vkey $primary !important;
+    }
+    SelectCurrent {
+        height: 1; border: none !important; background: $boost; padding: 0 1;
+    }
+    Select:focus > SelectCurrent {
+        border: none !important; background: $boost; border-left: vkey $primary !important;
+    }
+    Checkbox { border: none !important; background: transparent; height: auto; padding: 0 1; }
+    TextArea { height: 7; border: tall #414141; }
+    Checkbox { margin-bottom: 1; color: $text; }
+    Label { color: #c8c8c8; width: 1fr; height: auto; }
     #repositories-list, #connectors-list, #applications-list { height: auto; }
-    .inline-status { height: auto; min-height: 1; color: $text-muted; margin-bottom: 1; }
+    .inline-status { height: auto; min-height: 1; color: #6c6c6c; margin-bottom: 1; }
     #status {
         height: auto; max-height: 5; overflow-y: auto; padding: 0 2;
-        background: $panel; color: $text-muted;
+        background: $background; color: #6c6c6c;
+        border-top: hkey #414141;
     }
     #status.error { color: $error; }
     #status.success { color: $success; }
-    #actions { height: 3; padding: 0 2; background: $panel; }
+    #actions { height: 3; padding: 0 2; background: $background; }
     #actions Button { min-width: 8; margin-bottom: 0; }
     .narrow .page { padding: 1 0; }
     .narrow #actions { padding: 0; }
     .narrow HeaderClock { display: none; }
-    #model-help { height: auto; color: $text-muted; margin-bottom: 1; }
+    #model-help { height: auto; color: #6c6c6c; margin-bottom: 1; }
     """
+    )
 
     def __init__(
         self,
@@ -141,23 +153,7 @@ class ConfigurationApp(App[None]):
         command_runner: CommandRunner = subprocess.run,
     ) -> None:
         super().__init__()
-        self.register_theme(
-            Theme(
-                name="incident-graphite",
-                primary="#66d9c3",
-                secondary="#a8b8c4",
-                accent="#e9b96e",
-                foreground="#e4edf2",
-                background="#10181f",
-                surface="#17232c",
-                panel="#20313b",
-                success="#66d9a0",
-                warning="#e9b96e",
-                error="#ff8c82",
-                dark=True,
-            )
-        )
-        self.theme = "incident-graphite"
+        apply_theme(self)
         self.path = path
         self.sub_title = str(path)
         self.command_runner = command_runner
@@ -210,7 +206,7 @@ class ConfigurationApp(App[None]):
                 classes="headline fail" if failed else "headline",
                 markup=False,
             ),
-            Static(checks, id="readiness", classes="checks", markup=False),
+            Static(checks, id="readiness", classes="checks"),
             Static(summary, id="overview-summary", classes="summary", markup=False),
             Static(
                 self._next_steps(failed),
@@ -243,7 +239,7 @@ class ConfigurationApp(App[None]):
     def action_show_cli(self) -> None:
         self.query_one(TabbedContent).active = "cli-tab"
 
-    def _overview_content(self) -> tuple[str, str, str, bool]:
+    def _overview_content(self) -> tuple[str, Text, str, bool]:
         checks = doctor(self.path, runner=self.command_runner)
         failed = [check for check in checks if not check.ok]
         headline = (
@@ -251,15 +247,20 @@ class ConfigurationApp(App[None]):
             if not failed
             else f"{len(failed)} of {len(checks)} checks failed"
         )
-        width = max((len(check.name) for check in checks), default=0)
-        body = (
-            "\n".join(
-                f"{'OK  ' if check.ok else 'FAIL'}  {check.name:<{width}}  {check.message}"
-                for check in checks
-            )
-            or "No readiness checks ran."
-        )
-        return headline, body, self._config_snapshot(), bool(failed)
+        return headline, self._readiness_text(checks), self._config_snapshot(), bool(failed)
+
+    @staticmethod
+    def _readiness_text(checks: list[Any]) -> Text:
+        if not checks:
+            return Text("No readiness checks ran.")
+        width = max(len(check.name) for check in checks)
+        body = Text()
+        for index, check in enumerate(checks):
+            if index:
+                body.append("\n")
+            line = f"{'OK  ' if check.ok else 'FAIL'}  {check.name:<{width}}  {check.message}"
+            body.append(line, style="bold #9ece6a" if check.ok else "bold #f7768e")
+        return body
 
     def _config_snapshot(self) -> str:
         model = self.config.model
@@ -300,14 +301,24 @@ class ConfigurationApp(App[None]):
     @staticmethod
     def _input(value: Any, field_id: str, *, placeholder: str = "") -> Input:
         return Input(
-            value="" if value is None else str(value), id=field_id, placeholder=placeholder
+            value="" if value is None else str(value),
+            id=field_id,
+            placeholder=placeholder,
+            compact=True,
         )
 
     @staticmethod
     def _select(
         value: str, field_id: str, values: tuple[str, ...], *, prompt: str = "Select"
     ) -> Select:
-        return Select(_options(*values), value=value, allow_blank=False, prompt=prompt, id=field_id)
+        return Select(
+            _options(*values),
+            value=value,
+            allow_blank=False,
+            prompt=prompt,
+            id=field_id,
+            compact=True,
+        )
 
     def _triage_page(self) -> list[Any]:
         settings = self.config.triage
@@ -799,6 +810,7 @@ class ConfigurationApp(App[None]):
                 allow_blank=True,
                 prompt="Log in to GitHub to load repositories",
                 id=f"{prefix}-github-repository",
+                compact=True,
             ),
             Button("Log in to GitHub and load repositories", id=f"github-login-{key}"),
             Label("Clone URL"),
