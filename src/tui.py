@@ -800,6 +800,12 @@ class ConfigurationApp(App[None]):
         empty.display = not forms
         return [
             Static(
+                "Connect to your logs to get the agent access to investigation evidence "
+                "needed to fix the bug",
+                id="sources-guidance",
+                classes="page-lead",
+            ),
+            Static(
                 "Incident intake, PR output, and observability feeds. "
                 "Host process settings are on Runtime.",
                 id="sources-lead",
