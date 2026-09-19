@@ -25,7 +25,7 @@ HELP = {
     "mcp": "serve MCP-compatible HTTP endpoints",
     "dashboard": "serve the read-only incident dashboard",
     "executions": "list or inspect previous agent runs",
-    "update": "update the isolated installation",
+    "update": "update the isolated installation (stable or nightly)",
     "bundle": "build, list, activate, or roll back runtime bundles",
     "healthcheck": "wait for the HTTP service to become ready",
     "service-url": "print the configured health-check URL",
@@ -54,6 +54,7 @@ EXAMPLES = (
     "incident-agent dashboard",
     "incident-agent executions list",
     "incident-agent connect --list",
+    "incident-agent update nightly",
     "incident-agent COMMAND --help",
 )
 
