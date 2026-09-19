@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from .adaptive import AdaptiveToolRouter, ToolPolicy
 from .config import Config
+from .context import discover_documentation, render_documentation_context
 from .extensions import TrustedToolRegistry
 from .file_session import FileSession
 from .models import (
@@ -1372,7 +1373,11 @@ class IncidentAgent:
         return {"": Path(worktree).resolve()}
 
     def _instructions(
-        self, task: TaskRecord, worktree: Path | Mapping[str, Path], skills: tuple[Skill, ...]
+        self,
+        task: TaskRecord,
+        worktree: Path | Mapping[str, Path],
+        skills: tuple[Skill, ...],
+        application_root: Path | None = None,
     ) -> str:
         worktrees = self._worktree_map(worktree)
         parts = [
@@ -1398,6 +1403,44 @@ class IncidentAgent:
                     f"# Repository instructions · {label}\n\n"
                     + project_instructions.read_text(encoding="utf-8")
                 )
+        documentation = [
+            discover_documentation(root, repository or task.repository or "repository")
+            for repository, root in worktrees.items()
+        ]
+        if application_root is not None:
+            documentation.insert(
+                0,
+                discover_documentation(
+                    application_root,
+                    task.application or "application",
+                    excluded_roots=tuple(worktrees.values()),
+                ),
+            )
+        parts.append(render_documentation_context(tuple(documentation)))
+        parts.append(
+            "# Architecture Change Decision\n\n"
+            "Classify the repair before editing: a normal fix preserves the existing architecture; "
+            "an architecture change is allowed only when the demonstrated defect cannot be fixed "
+            "within the existing design. For an architecture change, state the causal reason, "
+            "scope, trade-offs, and verification in the investigation and pull request summary. "
+            "Update the relevant architecture document when one exists. If none exists, add a "
+            "small ADR only when the change creates a durable architectural decision; otherwise "
+            "record the rationale "
+            "in the fix summary. Never manufacture constraints because documentation is absent."
+        )
+        if task.conflict_pending or any(
+            state.conflict_pending for state in task.repositories.values()
+        ):
+            parts.append(
+                "# Pull Request Conflict Recovery\n\n"
+                "The pull request is conflicted with its base branch. Load the bundled "
+                "`resolving-merge-conflicts` skill and resolve the conflict automatically in the "
+                "checked-out repository. Inspect both sides' primary sources and history, preserve "
+                "both intents where possible, never abort the merge, run the required checks, and "
+                "finish the merge or rebase before publishing the resolved head. If repository "
+                "rules or vision conflict and cannot be reconciled from evidence, stop and report "
+                "the ambiguity with the affected files."
+            )
         safety = self.config.safety
         if self.config.code_review.enabled:
             parts.append(
@@ -1592,9 +1635,19 @@ class IncidentAgent:
             requested_parent = requested_parent or application_parent
         worktrees = self._worktree_map(worktree)
         query = f"{operation}\n{task.summary}\n{prompt}"
+        conflict_pending = task.conflict_pending or any(
+            state.conflict_pending for state in task.repositories.values()
+        )
+        required_skills = list(skills)
+        if operation in {"implement_fix", "resolve"}:
+            required_skills.append("codebase-design")
+        if operation in {"investigate", "implement_fix", "address_review", "resolve"}:
+            required_skills.append("code-review")
+        if conflict_pending:
+            required_skills.append("resolving-merge-conflicts")
         resolution = SkillResolver(
             [self.skills_root], max_auto_skills=self.config.agent.max_auto_skills
-        ).resolve(skills, query)
+        ).resolve(required_skills, query)
         # Resolve each member independently.  A checkout's SKILL.md is scoped to that checkout,
         # so same-named skills from two repositories remain distinct and their paths stay visible
         # in the run manifest and instructions.
@@ -1632,7 +1685,7 @@ class IncidentAgent:
         if resolution.missing_required:
             missing = ", ".join(resolution.missing_required)
             raise RuntimeError(f"required agent skills were not found: {missing}")
-        instructions = self._instructions(task, worktree, resolution.selected)
+        instructions = self._instructions(task, worktree, resolution.selected, requested_parent)
         tools = WorkspaceTools(
             worktrees,
             default_repository=(task.repository if task.repository in worktrees else None),
@@ -1759,12 +1812,20 @@ class IncidentAgent:
             base_branch = "main"
         if isinstance(worktree, Mapping):
             for repository, root in worktree.items():
+                member_state = task.repositories.get(repository)
+                if task.conflict_pending or (
+                    member_state is not None and member_state.conflict_pending
+                ):
+                    # Conflict recovery has already fetched and merged the PR base. Refreshing
+                    # here would attempt the configured default merge again before the agent can
+                    # inspect and resolve the existing conflict.
+                    continue
                 try:
                     branch = self.config.repository(repository).base_branch
                 except KeyError:
                     branch = base_branch
                 await asyncio.to_thread(self.storage.refresh_worktree, root, branch)
-        elif not task.repositories:
+        elif not task.repositories and not task.conflict_pending:
             await asyncio.to_thread(self.storage.refresh_worktree, worktree, base_branch)
         session_worktree: Path | Mapping[str, Path] = worktree
         parent_workspace: Path | None = None

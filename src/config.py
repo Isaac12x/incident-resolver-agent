@@ -233,6 +233,7 @@ class GitHubConfig(BaseModel):
     allowed_author_associations: list[str] = Field(
         default_factory=lambda: ["OWNER", "MEMBER", "COLLABORATOR"]
     )
+    conflict_poll_interval_seconds: float = Field(300, gt=0)
 
 
 class ServerConfig(BaseModel):
