@@ -59,6 +59,7 @@ curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/d
 Run these from outside a repository containing `.agent` to use the per-user configuration:
 
 ```bash
+incident-agent
 incident-agent --help
 incident-agent init
 incident-agent config
