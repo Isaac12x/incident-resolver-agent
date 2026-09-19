@@ -2002,6 +2002,11 @@ async def test_tui_overview_and_empty_collection_states(tmp_path: Path) -> None:
         summary = app.query_one("#overview-summary", Static).render().plain
         assert "Repos      none" in summary
         assert "Apps       none" in summary
+        commands = app.query_one("#overview-commands", Static).render().plain
+        assert "incident-agent" in commands
+        assert "Setup" in app.query_one("#cli-reference", Static).render().plain
+        await pilot.press("f1")
+        assert app.query_one(TabbedContent).active == "cli-tab"
         assert app.query_one("#repositories-empty").display is True
         assert app.query_one("#applications-empty").display is True
         assert app.query_one("#connectors-empty").display is True

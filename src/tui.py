@@ -28,6 +28,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from .cli_help import format_cli_help, overview_next_steps
 from .code_review import provision
 from .config import (
     ApplicationConfig,
@@ -71,6 +72,7 @@ class ConfigurationApp(App[None]):
     BINDINGS = [
         Binding("ctrl+s", "save", "Save", priority=True),
         Binding("ctrl+q", "quit", "Quit"),
+        Binding("f1", "show_cli", "CLI"),
     ]
     HORIZONTAL_BREAKPOINTS = [(0, "narrow"), (70, "wide")]
 
@@ -89,10 +91,11 @@ class ConfigurationApp(App[None]):
     .page-lead { color: $text-muted; }
     .headline { text-style: bold; color: $success; }
     .headline.fail { color: $error; }
-    .checks, .summary {
+    .checks, .summary, .commands {
         height: auto; background: $surface; border-left: thick $primary;
         padding: 1; margin-bottom: 1; color: $text;
     }
+    .commands { border-left: thick $accent; }
     .section {
         height: auto; background: $surface; border-left: thick $primary;
         padding: 1 1 0 1; margin-bottom: 1;
@@ -186,6 +189,8 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._connections_page(), classes="page")
             with TabPane("Safety", id="safety-tab"):
                 yield VerticalScroll(*self._safety_page(), classes="page")
+            with TabPane("CLI", id="cli-tab"):
+                yield VerticalScroll(*self._cli_page(), classes="page")
         # Validation errors can contain Pydantic markup such as ``[type=...]``. Render the
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
         yield Static(str(self.path), id="status", markup=False)
@@ -208,11 +213,35 @@ class ConfigurationApp(App[None]):
             Static(checks, id="readiness", classes="checks", markup=False),
             Static(summary, id="overview-summary", classes="summary", markup=False),
             Static(
-                "Save rechecks readiness. Use Runtime, Repos, and Sources to fix failures.",
+                self._next_steps(failed),
+                id="overview-commands",
+                classes="commands",
+                markup=False,
+            ),
+            Static(
+                "Save rechecks readiness. Use Runtime, Repos, and Sources to fix failures. "
+                "F1 opens CLI help.",
                 classes="page-lead",
                 markup=False,
             ),
         ]
+
+    def _cli_page(self) -> list[Any]:
+        return [
+            Static(
+                "Commands for this harness. Global --config PATH selects the runtime.",
+                classes="page-lead",
+                markup=False,
+            ),
+            Static(format_cli_help(), id="cli-reference", classes="checks", markup=False),
+        ]
+
+    @staticmethod
+    def _next_steps(failed: bool) -> str:
+        return overview_next_steps(ready=not failed)
+
+    def action_show_cli(self) -> None:
+        self.query_one(TabbedContent).active = "cli-tab"
 
     def _overview_content(self) -> tuple[str, str, str, bool]:
         checks = doctor(self.path, runner=self.command_runner)
@@ -262,6 +291,7 @@ class ConfigurationApp(App[None]):
         widget.set_class(failed, "fail")
         self.query_one("#readiness", Static).update(checks)
         self.query_one("#overview-summary", Static).update(summary)
+        self.query_one("#overview-commands", Static).update(self._next_steps(failed))
 
     @staticmethod
     def _field(label: str, widget: Any) -> Vertical:
@@ -621,7 +651,8 @@ class ConfigurationApp(App[None]):
             forms.append(self._repository_form(key, repository))
         container = Vertical(*forms, id="repositories-list")
         empty = Static(
-            "No repositories yet. Add one to clone, index, and publish incident repairs.",
+            "No repositories yet. Add one to clone, index, and publish incident repairs. "
+            "CLI: incident-agent index PATH",
             id="repositories-empty",
             classes="empty",
         )
@@ -693,7 +724,7 @@ class ConfigurationApp(App[None]):
         container = Vertical(*forms, id="connectors-list")
         empty = Static(
             "No connections yet. Add Grafana, Loki, webhook, or MCP sources for intake and "
-            "observability.",
+            "observability. CLI: incident-agent connect",
             id="connectors-empty",
             classes="empty",
         )

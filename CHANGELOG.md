@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+<<<<<<< Updated upstream
+=======
+- Add `incident-agent executions list` and `incident-agent executions SESSION_ID
+  inspect` so operators can browse previous task sessions (`task:<task-id>`)
+  and read the stored model conversation. The list TUI shows the summary title with
+  the date on the right; enter inspects. Non-TTY list/inspect still print.
+- Show grouped CLI help for a bare `incident-agent` invocation instead of a
+  required-command error, with close-match hints for unknown commands.
+- Add a TUI CLI tab and overview next-step commands; restyle the dashboard login,
+  live status, and task-mix view to match the configuration editor.
+
+- Add `incident-agent plugins` and `incident-agent connect` for discovering and
+  configuring named MCP, webhook, Loki, Grafana, and local-log sources, including
+  JSON catalog output, interactive setup, repeated capabilities, and environment-only
+  bearer-token references.
+- Improve the configuration TUI with a readiness checklist, saved-config snapshot,
+  named sections, collection empty states, and collapsed Playwright fields.
+
+>>>>>>> Stashed changes
 ## 0.2.0 - 2026-09-19
 
 - Add repository vision and architecture context handling, including optional architecture
