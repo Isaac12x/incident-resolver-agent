@@ -6,7 +6,7 @@ import asyncio
 import shlex
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import ValidationError
 from rich.text import Text
@@ -97,7 +97,7 @@ class ConfigurationApp(App[None]):
     }
     .section-title { text-style: bold; color: $primary; margin-bottom: 1; height: auto; }
     .card {
-        height: auto; background: $surface; border: solid #414141;
+        height: auto; background: $surface; border-left: tall $accent;
         padding: 1 2; margin-bottom: 1;
     }
     .card-title { text-style: bold; color: $accent; margin-bottom: 1; height: auto; }
@@ -109,25 +109,16 @@ class ConfigurationApp(App[None]):
         padding: 0 1; margin-bottom: 1; height: auto;
         background: $surface; border: solid #414141;
     }
-    .row { height: auto; }
+    .field { height: auto; width: 1fr; margin-bottom: 1; }
+    .row { height: auto; width: 100%; }
+    .row > .field { margin-right: 1; }
     .row Input, .row Select { width: 1fr; margin-right: 1; }
     Input, Select, TextArea { margin-bottom: 1; }
-    Input {
-        height: 1; border: none !important; background: $boost; padding: 0 1;
-    }
-    Input:focus {
-        border: none !important; background: $boost; border-left: vkey $primary !important;
-    }
-    SelectCurrent {
-        height: 1; border: none !important; background: $boost; padding: 0 1;
-    }
-    Select:focus > SelectCurrent {
-        border: none !important; background: $boost; border-left: vkey $primary !important;
-    }
-    Checkbox { border: none !important; background: transparent; height: auto; padding: 0 1; }
-    TextArea { height: 7; border: tall #414141; }
+    TextArea { height: 7; border: solid #414141; }
     Checkbox { margin-bottom: 1; color: $text; }
-    Label { color: #c8c8c8; width: 1fr; height: auto; }
+    Label { color: #6c6c6c; width: 1fr; height: auto; }
+    .actions-row { height: auto; }
+    .actions-row Button { margin-bottom: 0; }
     #repositories-list, #connectors-list, #applications-list { height: auto; }
     .inline-status { height: auto; min-height: 1; color: #6c6c6c; margin-bottom: 1; }
     #status {
@@ -137,7 +128,7 @@ class ConfigurationApp(App[None]):
     }
     #status.error { color: $error; }
     #status.success { color: $success; }
-    #actions { height: 3; padding: 0 2; background: $background; }
+    #actions { height: auto; padding: 0 2 1 2; background: $background; }
     #actions Button { min-width: 8; margin-bottom: 0; }
     .narrow .page { padding: 1 0; }
     .narrow #actions { padding: 0; }
@@ -191,8 +182,8 @@ class ConfigurationApp(App[None]):
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
         yield Static(str(self.path), id="status", markup=False)
         yield Horizontal(
-            Button("Save", id="save", variant="primary", tooltip="Ctrl+S"),
-            Button("Quit", id="quit", tooltip="Ctrl+Q"),
+            self._button("Save", "save", variant="primary", tooltip="Ctrl+S"),
+            self._button("Quit", "quit", tooltip="Ctrl+Q"),
             id="actions",
         )
         yield Footer()
@@ -295,8 +286,34 @@ class ConfigurationApp(App[None]):
         self.query_one("#overview-commands", Static).update(self._next_steps(failed))
 
     @staticmethod
-    def _field(label: str, widget: Any) -> Vertical:
-        return Vertical(Label(label), widget, classes="section")
+    def _field(label: str, widget: Any, field_id: str | None = None) -> Vertical:
+        return Vertical(Label(label), widget, id=field_id, classes="field")
+
+    @staticmethod
+    def _pair(
+        left_label: str, left: Any, right_label: str, right: Any
+    ) -> Horizontal:
+        return Horizontal(
+            ConfigurationApp._field(left_label, left),
+            ConfigurationApp._field(right_label, right),
+            classes="row",
+        )
+
+    @staticmethod
+    def _button(
+        label: str,
+        button_id: str,
+        *,
+        variant: Literal["default", "primary", "success", "warning", "error"] = "default",
+        tooltip: str = "",
+    ) -> Button:
+        return Button(
+            label, id=button_id, variant=variant, compact=True, tooltip=tooltip or None
+        )
+
+    @staticmethod
+    def _checkbox(label: str, *, value: bool, field_id: str) -> Checkbox:
+        return Checkbox(label, value=value, id=field_id, compact=True)
 
     @staticmethod
     def _input(value: Any, field_id: str, *, placeholder: str = "") -> Input:
@@ -325,7 +342,9 @@ class ConfigurationApp(App[None]):
         return [
             Static("TypeSafe assesses incident evidence before worktree creation. Shadow mode "
                    "records recommendations; enforce mode can hold non-code incidents for review."),
-            Checkbox("Enable TypeSafe triage", value=settings.enabled, id="triage-enabled"),
+            self._checkbox(
+                "Enable TypeSafe triage", value=settings.enabled, field_id="triage-enabled"
+            ),
             Label("Mode"),
             self._select(settings.mode, "triage-mode", ("shadow", "enforce")),
             Label("Model version"),
@@ -359,7 +378,9 @@ class ConfigurationApp(App[None]):
             ),
             Vertical(
                 Label("Open Code Review", classes="section-title"),
-                Checkbox("Enable Open Code Review", value=settings.enabled, id="ocr-enabled"),
+                self._checkbox(
+                    "Enable Open Code Review", value=settings.enabled, field_id="ocr-enabled"
+                ),
                 Label("Model protocol"),
                 self._select(
                     settings.protocol, "ocr-protocol", ("openai", "openai-responses", "anthropic")
@@ -372,9 +393,9 @@ class ConfigurationApp(App[None]):
                 self._input(settings.api_key_env, "ocr-api-key-env"),
                 Label("Review timeout (seconds)"),
                 self._input(settings.timeout_seconds, "ocr-timeout"),
-                Button(
+                self._button(
                     "Save configuration and install / test OCR",
-                    id="setup-ocr",
+                    "setup-ocr",
                     variant="primary",
                 ),
                 Static("Not tested", id="ocr-status", classes="inline-status", markup=False),
@@ -429,7 +450,7 @@ class ConfigurationApp(App[None]):
                 self._input(model.name, "model", placeholder="Provider model identifier"),
                 Label("Reasoning effort (blank uses provider default)"),
                 self._input(model.reasoning, "model-reasoning"),
-                Button("Use OpenAI defaults", id="model-defaults"),
+                self._button("Use OpenAI defaults", "model-defaults"),
                 id="model-selection-section",
                 classes="section",
             ),
@@ -440,7 +461,7 @@ class ConfigurationApp(App[None]):
                 self._input(shlex.join(model.subscription_command), "subscription-command"),
                 Label("Subscription CLI profile (optional)"),
                 self._input(model.subscription_profile, "subscription-profile"),
-                Button("Test subscription CLI", id="test-subscription-cli"),
+                self._button("Test subscription CLI", "test-subscription-cli"),
                 Static("", id="subscription-status", classes="inline-status", markup=False),
                 id="subscription-section",
                 classes="section",
@@ -474,15 +495,15 @@ class ConfigurationApp(App[None]):
                 self._input(model.top_p, "model-top-p"),
                 Label("Maximum output tokens (blank uses provider default)"),
                 self._input(model.max_tokens, "model-max-tokens"),
-                Checkbox(
+                self._checkbox(
                     "Allow parallel tool calls",
                     value=model.parallel_tool_calls,
-                    id="model-parallel-tools",
+                    field_id="model-parallel-tools",
                 ),
-                Checkbox(
+                self._checkbox(
                     "Show concise live agent progress in the terminal",
                     value=model.show_execution_details,
-                    id="model-show-execution-details",
+                    field_id="model-show-execution-details",
                 ),
                 Label("Maximum turns per agent iteration"),
                 self._input(model.max_turns_per_iteration, "model-max-turns"),
@@ -494,10 +515,10 @@ class ConfigurationApp(App[None]):
                 self._input(model.session_history_limit, "session-history-limit"),
                 Label("Session item compaction threshold"),
                 self._input(model.compaction_threshold, "compaction-threshold"),
-                Checkbox(
+                self._checkbox(
                     "Compact long sessions into durable task memory",
                     value=model.compaction_enabled,
-                    id="compaction-enabled",
+                    field_id="compaction-enabled",
                 ),
                 Label("Maximum durable sub-agents per task"),
                 self._input(self.config.agent.max_subagents, "max-subagents"),
@@ -525,130 +546,167 @@ class ConfigurationApp(App[None]):
         permissions = self.config.permissions
         execution = self.config.execution
         return [
+            Static(
+                "Host process: worker, HTTP, sandbox, and permissions. "
+                "Intake and observability feeds are on Sources.",
+                id="runtime-lead",
+                classes="page-lead",
+            ),
             Vertical(
                 Label("Incident trigger", classes="section-title"),
-                Label("Mode"),
-                self._select(trigger.mode, "trigger-mode", ("hook", "workflow", "agent-call")),
-                Label("Incident hook path"),
-                self._input(trigger.hook_path, "trigger-hook-path"),
-                Label("Workflow name (when using workflow mode)"),
-                self._input(trigger.workflow_name, "trigger-workflow-name"),
-                Label("Agent name (when using agent-call mode)"),
-                self._input(trigger.agent_name, "trigger-agent-name"),
-                Checkbox(
+                self._field(
+                    "Mode",
+                    self._select(
+                        trigger.mode, "trigger-mode", ("hook", "workflow", "agent-call")
+                    ),
+                ),
+                self._field(
+                    "Incident hook path",
+                    self._input(trigger.hook_path, "trigger-hook-path"),
+                ),
+                self._pair(
+                    "Workflow name",
+                    self._input(trigger.workflow_name, "trigger-workflow-name"),
+                    "Agent name",
+                    self._input(trigger.agent_name, "trigger-agent-name"),
+                ),
+                self._checkbox(
                     "Require an explicit acknowledgement",
                     value=trigger.require_ack,
-                    id="trigger-require-ack",
+                    field_id="trigger-require-ack",
                 ),
                 classes="section",
             ),
             Vertical(
                 Label("Worker", classes="section-title"),
-                Label("Runtime root"),
-                self._input(self.config.runtime_root, "runtime-root"),
-                Label("Maximum concurrent tasks"),
-                self._input(self.config.max_concurrent_tasks, "max-concurrent-tasks"),
-                Label("Worker poll interval in seconds"),
-                self._input(self.config.poll_interval_seconds, "worker-poll-interval"),
+                self._field("Runtime root", self._input(self.config.runtime_root, "runtime-root")),
+                self._pair(
+                    "Maximum concurrent tasks",
+                    self._input(self.config.max_concurrent_tasks, "max-concurrent-tasks"),
+                    "Poll interval (seconds)",
+                    self._input(self.config.poll_interval_seconds, "worker-poll-interval"),
+                ),
                 classes="section",
             ),
             Vertical(
                 Label("HTTP server", classes="section-title"),
-                Label("HTTP host"),
-                self._input(server.host, "host"),
-                Label("HTTP port"),
-                self._input(server.port, "port"),
-                Label("Public URL (optional)"),
-                self._input(server.public_url, "public-url"),
-                Label("Agent webhook secret environment variable"),
-                self._input(server.webhook_secret_env, "server-webhook-secret-env"),
-                Label("API token environment variable (for external intake)"),
-                self._input(server.api_token_env, "server-api-token-env"),
-                Checkbox(
+                self._pair(
+                    "Host",
+                    self._input(server.host, "host"),
+                    "Port",
+                    self._input(server.port, "port"),
+                ),
+                self._field("Public URL (optional)", self._input(server.public_url, "public-url")),
+                self._field(
+                    "Webhook secret environment variable",
+                    self._input(server.webhook_secret_env, "server-webhook-secret-env"),
+                ),
+                self._field(
+                    "API token environment variable",
+                    self._input(server.api_token_env, "server-api-token-env"),
+                ),
+                self._checkbox(
                     "Require API authentication for intake endpoints",
                     value=server.require_api_auth,
-                    id="server-require-api-auth",
+                    field_id="server-require-api-auth",
                 ),
                 classes="section",
             ),
-            Vertical(
-                Label("GitHub publishing", classes="section-title"),
+            Collapsible(
                 Static(
-                    "GitHub publishing uses the account from ‘Log in to GitHub’. "
-                    "The installer provisions that login for the service; "
-                    "the agent login below identifies review comments, not credentials.",
+                    "Uses the account from ‘Log in to GitHub’. The agent login identifies "
+                    "review comments, not credentials.",
                     classes="page-lead",
                 ),
-                Label("GitHub webhook secret environment variable"),
-                self._input(github.webhook_secret_env, "github-webhook-secret-env"),
-                Label("Agent GitHub login"),
-                self._input(github.agent_login, "github-agent-login"),
-                Label("Agent mention"),
-                self._input(github.agent_mention, "github-agent-mention"),
-                Label("Allowed author associations (comma-separated)"),
-                self._input(
-                    ", ".join(github.allowed_author_associations), "github-author-associations"
+                self._field(
+                    "Webhook secret environment variable",
+                    self._input(github.webhook_secret_env, "github-webhook-secret-env"),
                 ),
-                Checkbox(
+                self._pair(
+                    "Agent GitHub login",
+                    self._input(github.agent_login, "github-agent-login"),
+                    "Agent mention",
+                    self._input(github.agent_mention, "github-agent-mention"),
+                ),
+                self._field(
+                    "Allowed author associations (comma-separated)",
+                    self._input(
+                        ", ".join(github.allowed_author_associations),
+                        "github-author-associations",
+                    ),
+                ),
+                self._checkbox(
                     "Create draft pull requests",
                     value=github.draft_pull_requests,
-                    id="github-draft-prs",
+                    field_id="github-draft-prs",
                 ),
+                title="GitHub publishing",
+                collapsed=True,
                 classes="section",
             ),
-            Vertical(
-                Label("Deployment verification", classes="section-title"),
-                Label("Deployment reachability timeout in seconds"),
-                self._input(deployment.reachability_timeout_seconds, "deployment-timeout"),
-                Label("Deployment poll interval in seconds"),
-                self._input(deployment.poll_interval_seconds, "deployment-poll-interval"),
+            Collapsible(
+                self._pair(
+                    "Reachability timeout (seconds)",
+                    self._input(
+                        deployment.reachability_timeout_seconds, "deployment-timeout"
+                    ),
+                    "Poll interval (seconds)",
+                    self._input(deployment.poll_interval_seconds, "deployment-poll-interval"),
+                ),
+                title="Deployment verification",
+                collapsed=True,
                 classes="section",
             ),
             Vertical(
                 Label("Command execution", classes="section-title"),
-                Label("Execution mode"),
-                self._select(execution.mode, "execution-mode", ("host", "container")),
-                Label("Container image"),
-                self._input(execution.image, "execution-image"),
-                Checkbox(
+                self._field(
+                    "Execution mode",
+                    self._select(execution.mode, "execution-mode", ("host", "container")),
+                ),
+                self._field("Container image", self._input(execution.image, "execution-image")),
+                self._pair(
+                    "Container memory (MB)",
+                    self._input(execution.memory_mb, "execution-memory"),
+                    "Process limit",
+                    self._input(execution.pids_limit, "execution-pids"),
+                ),
+                self._checkbox(
                     "Allow network access in container",
                     value=execution.network,
-                    id="execution-network",
+                    field_id="execution-network",
                 ),
-                Label("Container memory (MB)"),
-                self._input(execution.memory_mb, "execution-memory"),
-                Label("Container process limit"),
-                self._input(execution.pids_limit, "execution-pids"),
                 classes="section",
             ),
             Vertical(
                 Label("Workspace permissions", classes="section-title"),
-                Label("Permission mode"),
-                self._select(permissions.mode, "permissions-mode", ("read-only", "workspace")),
-                Checkbox(
+                self._field(
+                    "Permission mode",
+                    self._select(permissions.mode, "permissions-mode", ("read-only", "workspace")),
+                ),
+                self._checkbox(
                     "Allow dependency installation",
                     value=permissions.allow_dependency_installation,
-                    id="allow-dependency-installation",
+                    field_id="allow-dependency-installation",
                 ),
-                Checkbox(
+                self._checkbox(
                     "Allow database migrations",
                     value=permissions.allow_migrations,
-                    id="allow-migrations",
+                    field_id="allow-migrations",
                 ),
-                Checkbox(
+                self._checkbox(
                     "Allow CI modifications",
                     value=permissions.allow_ci_modification,
-                    id="allow-ci-modification",
+                    field_id="allow-ci-modification",
                 ),
-                Checkbox(
+                self._checkbox(
                     "Allow snapshot updates",
                     value=permissions.allow_snapshot_updates,
-                    id="allow-snapshot-updates",
+                    field_id="allow-snapshot-updates",
                 ),
-                Checkbox(
+                self._checkbox(
                     "Allow resolving review comments",
                     value=permissions.allow_review_resolution,
-                    id="allow-review-resolution",
+                    field_id="allow-review-resolution",
                 ),
                 classes="section",
             ),
@@ -676,7 +734,7 @@ class ConfigurationApp(App[None]):
             ),
             empty,
             container,
-            Button("Add repository", id="add-repository"),
+            self._button("Add repository", "add-repository"),
         ]
 
     def _applications_page(self) -> list[Any]:
@@ -702,7 +760,7 @@ class ConfigurationApp(App[None]):
             ),
             empty,
             Vertical(*forms, id="applications-list"),
-            Button("Add application", id="add-application"),
+            self._button("Add application", "add-application"),
         ]
 
     def _application_form(self, key: str, application: ApplicationConfig | None = None) -> Vertical:
@@ -721,7 +779,7 @@ class ConfigurationApp(App[None]):
             self._input(", ".join(application.repositories), f"{prefix}-repositories"),
             Label("Integration command (optional; runs in application session workspace)"),
             self._input(application.integration_command, f"{prefix}-integration-command"),
-            Button("Remove application", id=f"remove-{key}", variant="warning"),
+            self._button("Remove application", f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -742,13 +800,14 @@ class ConfigurationApp(App[None]):
         empty.display = not forms
         return [
             Static(
-                "Use purpose to distinguish incident intake, PR output, and "
-                "observability/logging MCP connections.",
+                "Incident intake, PR output, and observability feeds. "
+                "Host process settings are on Runtime.",
+                id="sources-lead",
                 classes="page-lead",
             ),
             empty,
             container,
-            Button("Add connection", id="add-connector"),
+            self._button("Add connection", "add-connector", variant="primary"),
         ]
 
     def _safety_page(self) -> list[Any]:
@@ -812,10 +871,10 @@ class ConfigurationApp(App[None]):
                 id=f"{prefix}-github-repository",
                 compact=True,
             ),
-            Button("Log in to GitHub and load repositories", id=f"github-login-{key}"),
+            self._button("Log in to GitHub and load repositories", f"github-login-{key}"),
             Label("Clone URL"),
             self._input(repository.clone_url, f"{prefix}-clone-url"),
-            Button("Clone/pull and build graphs", id=f"setup-{key}", variant="primary"),
+            self._button("Clone/pull and build graphs", f"setup-{key}", variant="primary"),
             Static("", id=f"repo-status-{key}", classes="inline-status", markup=False),
             Label("Managed local checkout (populated after cloning; existing paths are supported)"),
             self._input(repository.local_path, f"{prefix}-local-path"),
@@ -846,7 +905,7 @@ class ConfigurationApp(App[None]):
                 collapsed=True,
                 id=f"{prefix}-playwright",
             ),
-            Button("Remove repository", id=f"remove-{key}", variant="warning"),
+            self._button("Remove repository", f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -867,42 +926,90 @@ class ConfigurationApp(App[None]):
                 capabilities=[],
             )
         prefix = f"connector-{key}"
+        visible = self._connector_visible(connector.type, connector.transport)
+        log_field = self._field(
+            "Local log file (absolute path on the harness host)",
+            self._input(connector.log_path, f"{prefix}-log-path"),
+            f"{prefix}-log-path-field",
+        )
+        transport_field = self._field(
+            "MCP transport",
+            self._select(
+                connector.transport,
+                f"{prefix}-transport",
+                ("stdio", "streamable-http", "sse"),
+            ),
+            f"{prefix}-transport-field",
+        )
+        url_field = self._field(
+            "URL",
+            self._input(connector.url, f"{prefix}-url"),
+            f"{prefix}-url-field",
+        )
+        command_field = self._field(
+            "Command (space-separated)",
+            self._input(" ".join(connector.command), f"{prefix}-command"),
+            f"{prefix}-command-field",
+        )
+        auth_field = self._field(
+            "Auth token environment variable",
+            self._input(connector.auth_token_env, f"{prefix}-auth-token-env"),
+            f"{prefix}-auth-field",
+        )
+        tenant_field = self._field(
+            "Loki tenant ID (X-Scope-OrgID; blank for single tenant)",
+            self._input(connector.tenant_id, f"{prefix}-tenant-id"),
+            f"{prefix}-tenant-field",
+        )
+        datasource_field = self._field(
+            "Grafana Loki datasource UID",
+            self._input(connector.datasource_uid, f"{prefix}-datasource-uid"),
+            f"{prefix}-datasource-field",
+        )
+        log_field.display = visible["log-path"]
+        transport_field.display = visible["transport"]
+        url_field.display = visible["url"]
+        command_field.display = visible["command"]
+        auth_field.display = visible["auth"]
+        tenant_field.display = visible["tenant"]
+        datasource_field.display = visible["datasource"]
         return Vertical(
             Label(connector.name or "New connection", classes="card-title"),
-            Label("Connection name"),
-            self._input(connector.name, f"{prefix}-name"),
-            Label("Purpose"),
-            self._select(
-                connector.purpose,
-                f"{prefix}-purpose",
-                ("incident", "output", "observability", "other"),
+            self._pair(
+                "Name",
+                self._input(connector.name, f"{prefix}-name"),
+                "Purpose",
+                self._select(
+                    connector.purpose,
+                    f"{prefix}-purpose",
+                    ("incident", "output", "observability", "other"),
+                ),
             ),
-            Label("Type"),
-            self._select(
-                connector.type, f"{prefix}-type",
-                ("mcp", "webhook", "loki", "grafana", "local-logs"),
+            self._field(
+                "Type",
+                self._select(
+                    connector.type,
+                    f"{prefix}-type",
+                    ("mcp", "webhook", "loki", "grafana", "local-logs"),
+                ),
             ),
-            Label("Local log file (absolute path on the harness host; local-logs only)"),
-            self._input(connector.log_path, f"{prefix}-log-path"),
-            Label("MCP transport"),
-            self._select(
-                connector.transport, f"{prefix}-transport", ("stdio", "streamable-http", "sse")
+            log_field,
+            transport_field,
+            url_field,
+            command_field,
+            auth_field,
+            tenant_field,
+            datasource_field,
+            self._field(
+                "Capabilities (comma-separated)",
+                self._input(", ".join(connector.capabilities), f"{prefix}-capabilities"),
             ),
-            Label("URL (HTTP/SSE MCP or Loki/Grafana base URL)"),
-            self._input(connector.url, f"{prefix}-url"),
-            Label("Command (stdio MCP; space-separated)"),
-            self._input(" ".join(connector.command), f"{prefix}-command"),
-            Label("Auth token environment variable"),
-            self._input(connector.auth_token_env, f"{prefix}-auth-token-env"),
-            Label("Loki tenant ID (X-Scope-OrgID; blank for single tenant)"),
-            self._input(connector.tenant_id, f"{prefix}-tenant-id"),
-            Label("Grafana Loki datasource UID"),
-            self._input(connector.datasource_uid, f"{prefix}-datasource-uid"),
-            Label("Capabilities (comma-separated)"),
-            self._input(", ".join(connector.capabilities), f"{prefix}-capabilities"),
-            Button("Test connection", id=f"test-{key}"),
+            Horizontal(
+                self._button("Test connection", f"test-{key}", variant="primary"),
+                self._button("Remove", f"remove-{key}", variant="warning"),
+                classes="actions-row",
+            ),
             Static("", id=f"connector-status-{key}", classes="inline-status", markup=False),
-            Button("Remove connection", id=f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
         )
@@ -1139,10 +1246,35 @@ class ConfigurationApp(App[None]):
     def on_mount(self) -> None:
         for key in self._repository_keys:
             self._set_repository_source(key)
+        for key in self._connector_keys:
+            self._set_connector_shape(key)
         self._set_model_runtime(self.config.model.runtime)
         for kind in ("repositories", "applications", "connectors"):
             self._sync_collection_empty(kind)
         self.call_later(self._refresh_subscription_status)
+
+    @staticmethod
+    def _connector_visible(kind: str, transport: str) -> dict[str, bool]:
+        mcp = kind == "mcp"
+        stdio = mcp and transport == "stdio"
+        httpish = kind in {"webhook", "loki", "grafana"} or (mcp and not stdio)
+        return {
+            "log-path": kind == "local-logs",
+            "transport": mcp,
+            "url": httpish,
+            "command": stdio,
+            "auth": kind != "local-logs",
+            "tenant": kind == "loki",
+            "datasource": kind == "grafana",
+        }
+
+    def _set_connector_shape(self, key: str) -> None:
+        prefix = f"connector-{key}"
+        visible = self._connector_visible(
+            self._selected(f"{prefix}-type"), self._selected(f"{prefix}-transport")
+        )
+        for name, shown in visible.items():
+            self.query_one(f"#{prefix}-{name}-field").display = shown
 
     def _set_model_runtime(self, runtime: str) -> None:
         subscription = runtime == "subscription-cli"
@@ -1320,6 +1452,12 @@ class ConfigurationApp(App[None]):
             self.query_one("#model-help", Static).update(self._model_help(str(event.value)))
             return
         select_id = event.select.id or ""
+        if select_id.startswith("connector-") and select_id.endswith(("-type", "-transport")):
+            if event.value is not Select.NULL:
+                key = select_id.removeprefix("connector-")
+                key = key.removesuffix("-type").removesuffix("-transport")
+                self._set_connector_shape(key)
+            return
         if select_id.startswith("repo-") and select_id.endswith("-source"):
             key = select_id.removeprefix("repo-").removesuffix("-source")
             if event.value is not Select.NULL:
@@ -1359,6 +1497,7 @@ class ConfigurationApp(App[None]):
             key = self._new_key("connector")
             self._connector_keys.append(key)
             await self.query_one("#connectors-list", Vertical).mount(self._connector_form(key))
+            self._set_connector_shape(key)
             self._sync_collection_empty("connectors")
             return
         if button_id == "add-application":
