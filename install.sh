@@ -3,7 +3,7 @@ set -eu
 
 # Curlable installer. By default this installs the wheel published on the latest
 # GitHub release. Override INCIDENT_HARNESS_SOURCE for a fork, Git revision, or
-# directly hosted wheel. INCIDENT_HARNESS_VERSION may be a tag such as v0.2.0.
+# directly hosted wheel. INCIDENT_HARNESS_VERSION may be a tag such as v0.3.0.
 REPOSITORY=${INCIDENT_HARNESS_REPOSITORY:-Isaac12x/incident-resolver-agent}
 VERSION=${INCIDENT_HARNESS_VERSION:-latest}
 ASSET=${INCIDENT_HARNESS_RELEASE_ASSET:-}
