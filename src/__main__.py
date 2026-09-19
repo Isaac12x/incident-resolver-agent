@@ -94,7 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--no-worker", action="store_true")
     commands.add_parser("worker", help=HELP["worker"])
     commands.add_parser("tui", aliases=["config"], help=HELP["config"])
-    commands.add_parser("update", help=HELP["update"])
+    update = commands.add_parser("update", help=HELP["update"])
+    update.add_argument(
+        "channel",
+        nargs="?",
+        choices=("stable", "nightly"),
+        default="stable",
+        help="release channel to install (default: stable)",
+    )
     doctor_command = commands.add_parser("doctor", help=HELP["doctor"])
     doctor_command.add_argument(
         "--install", action="store_true", help="install missing helper CLIs with uv"
@@ -474,7 +481,7 @@ def main(argv: list[str] | None = None) -> None:
                 if load_config(args.config, create=False).repositories
                 else ()
             )
-        result = update_installation(managed_tools=managed_tools)
+        result = update_installation(channel=args.channel, managed_tools=managed_tools)
         if result.stdout:
             print(result.stdout, end="")
         if result.stderr:

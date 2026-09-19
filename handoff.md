@@ -82,3 +82,43 @@ Commit `51e30d1f607ad4eb42e397d572249a54a757ac8a`; PR #27:
 https://github.com/Isaac12x/incident-resolver-agent/pull/27
 Initial review check at 2026-09-19 13:00 UTC: open, mergeable, no general/inline comments,
 reviews, or configured CI checks. Five-minute follow-up and public release pending.
+
+
+## Stable/nightly updates and v0.3.0 — 2026-09-19
+
+Root orchestration with the requested Luna implementation agent on
+`feat/release-nightly-update`, based on `origin/master` at `6b402cb`. No VISION.md exists.
+Prepares v0.3.0 with the merged plugin, execution-browser, CLI-help and TUI changes.
+Adds `incident-agent update [stable|nightly]`: nightly refreshes Git default-branch
+source; stable resolves the latest wheel, including a return from GitHub nightly
+installs and fork provenance. Explicit custom sources remain supported, and nightly
+rejects release-only overrides. Removed existing changelog conflict markers.
+
+Validation so far: 52 targeted tests, repository Ruff, compileall, lock check, wheel
+and sdist build, 12 offline contracts and scripted repair evaluation passed. Isolated
+uv wheel install exposes nightly help. Real uv same-version Git update smoke advanced
+across multiple commits. Full-suite verification, PR review monitoring and publication
+results are recorded in the follow-up below. No static type checker or hosted preview
+is configured. Restart running services after updating.
+
+Pre-publication verification: full suite passed (642 tests, 94.25% coverage; all
+per-file gates passed) with a test-process-only `ulimit -n 4096`. macOS's default
+256 descriptors caused the earlier deletion/rename failure after accumulated SQLite
+connections; the unchanged isolated test and module passed. Separate coverage output
+avoided collisions with parallel reviewer runs. After eight additional updater
+failure/metadata regression cases, all 60 focused tests passed; production code was
+unchanged. Ruff and diff checks passed. Both Luna review axes found no blocking code
+issues; two old release examples were corrected. The installed wheel successfully
+self-updated to the remote PR branch at the same version.
+
+PR #30: https://github.com/Isaac12x/incident-resolver-agent/pull/30
+Initial check at 16:04:16 UTC: open, clean and mergeable, with no comments, reviews
+or configured CI checks. Five-minute follow-up, merge and publication follow.
+
+Five-minute follow-up at 16:09:26 UTC: PR #30 remained clean and mergeable at
+`9cb4eef`, with no general/inline comments, reviews or configured CI checks. No
+feedback needed integration. Monitoring ends after this release; no background
+monitor is installed. Publish v0.3.0 from the merged PR commit with the wheel,
+source archive, installer and SHA256SUMS, then verify public stable/nightly updates
+in the isolated uv tool environment. Release URL:
+https://github.com/Isaac12x/incident-resolver-agent/releases/tag/v0.3.0

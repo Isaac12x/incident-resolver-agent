@@ -106,6 +106,139 @@ def test_custom_installed_source_falls_back_to_uv_upgrade(monkeypatch) -> None:
     assert commands[0] == ["/usr/bin/uv", "tool", "upgrade", "incident-harness"]
 
 
+def test_nightly_update_tracks_default_branch_and_refreshes(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    commands = []
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert commands[0] == [
+        "/usr/bin/uv",
+        "tool",
+        "install",
+        "--refresh",
+        "--upgrade",
+        "--from",
+        "git+https://github.com/Isaac12x/incident-resolver-agent.git",
+        "incident-harness",
+    ]
+
+
+def test_stable_update_returns_default_nightly_install_to_release(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr("src.lifecycle.installed_release_repository", lambda: None)
+    monkeypatch.setattr(
+        "src.lifecycle.installed_git_repository",
+        lambda: "Isaac12x/incident-resolver-agent",
+    )
+    monkeypatch.setattr(
+        "src.lifecycle.release_asset_url", lambda **_: "https://example/release.whl"
+    )
+    commands = []
+    update_installation(
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert commands[0] == [
+        "/usr/bin/uv",
+        "tool",
+        "install",
+        "--force",
+        "--from",
+        "https://example/release.whl",
+        "incident-harness",
+    ]
+
+
+def test_fork_nightly_preserves_repository_and_returns_to_fork_release(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr("src.lifecycle.installed_git_repository", lambda: "example/fork")
+    monkeypatch.setattr("src.lifecycle.installed_release_repository", lambda: None)
+    monkeypatch.setattr(
+        "src.lifecycle.release_asset_url", lambda **kwargs: f"https://example/{kwargs['repository']}.whl"
+    )
+    commands = []
+    update_installation(
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert commands[0][-2:] == ["https://example/example/fork.whl", "incident-harness"]
+    commands.clear()
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert "git+https://github.com/example/fork.git" in commands[0]
+
+
+def test_nightly_from_fork_release_uses_release_provenance(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setattr("src.lifecycle.installed_git_repository", lambda: None)
+    monkeypatch.setattr(
+        "src.lifecycle.installed_release_repository", lambda: "example/fork"
+    )
+    commands = []
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert "git+https://github.com/example/fork.git" in commands[0]
+
+
+def test_nightly_rejects_release_only_overrides(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setenv("INCIDENT_HARNESS_VERSION", "v0.3.0")
+    with pytest.raises(RuntimeError, match="only apply to stable"):
+        update_installation(channel="nightly")
+
+
+def test_nightly_update_preserves_explicit_source(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setenv("INCIDENT_HARNESS_SOURCE", "git+https://example.test/fork.git")
+    commands = []
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert commands[0][-2:] == ["git+https://example.test/fork.git", "incident-harness"]
+
+
+def test_nightly_update_uses_explicit_repository(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    monkeypatch.setenv("INCIDENT_HARNESS_REPOSITORY", "example/nightly-fork")
+    commands = []
+    update_installation(
+        channel="nightly",
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 0, "updated", ""),
+    )
+    assert "git+https://github.com/example/nightly-fork.git" in commands[0]
+
+
+def test_update_rejects_unknown_channel(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    with pytest.raises(ValueError, match="unsupported update channel"):
+        update_installation(channel="preview")
+
+
+def test_nightly_failure_skips_managed_tool_upgrades(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    commands = []
+    result = update_installation(
+        channel="nightly",
+        managed_tools=("seed",),
+        runner=lambda command, **kwargs: commands.append(command)
+        or CompletedProcess(command, 7, "", "failed"),
+    )
+    assert result.returncode == 7
+    assert len(commands) == 1
+
+
 def test_release_asset_url_selects_project_wheel() -> None:
     import io
 
@@ -191,6 +324,37 @@ def test_installed_release_repository_rejects_non_release_sources(monkeypatch) -
         assert installed_release_repository() is None
 
 
+def test_installed_git_repository_reads_github_source(monkeypatch) -> None:
+    from src.lifecycle import installed_git_repository
+
+    class Metadata:
+        def read_text(self, _):
+            return '{"url":"git+https://github.com/example/fork.git","vcs_info":{"vcs":"git"}}'
+
+    monkeypatch.setattr("src.lifecycle.distribution", lambda _: Metadata())
+    assert installed_git_repository() == "example/fork"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [None, "", "not-json", '{"url":"https://github.com/example/fork/releases/latest/wheel.whl"}',
+     '{"url":"https://example.test/fork.git"}'],
+)
+def test_installed_git_repository_rejects_missing_or_non_github_metadata(
+    monkeypatch, metadata
+) -> None:
+    from src.lifecycle import installed_git_repository
+
+    class Metadata:
+        def read_text(self, _):
+            if metadata is None:
+                raise OSError("metadata unavailable")
+            return metadata
+
+    monkeypatch.setattr("src.lifecycle.distribution", lambda _: Metadata())
+    assert installed_git_repository() is None
+
+
 def test_update_requires_uv(monkeypatch) -> None:
     monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: None)
     try:
@@ -219,6 +383,9 @@ def test_cli_eval_update_and_argument_free_run(tmp_path: Path, capsys) -> None:
     with patch("src.__main__.update_installation", return_value=completed):
         main(["update"])
     assert "updated" in capsys.readouterr().out
+    with patch("src.__main__.update_installation", return_value=completed) as update:
+        main(["update", "nightly"])
+    assert update.call_args.kwargs["channel"] == "nightly"
     config = Config(runtime_root=tmp_path / "runtime")
     application = Mock(config=config)
     with (
