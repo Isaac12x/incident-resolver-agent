@@ -21,6 +21,8 @@ def test_groknight_palette() -> None:
     assert "block-cursor-background" in GROKNIGHT.variables
     assert "HeaderIcon" in CHROME_CSS
     assert "Tab.-active" in CHROME_CSS
+    assert "Button.-primary" in CHROME_CSS
+    assert "SelectOverlay" in CHROME_CSS
 
 
 def test_apply_theme_selects_groknight() -> None:
