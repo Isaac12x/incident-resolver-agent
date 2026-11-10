@@ -135,6 +135,7 @@ def run_executions_command(args: Namespace) -> None:
 _EXECUTIONS_CSS = (
     CHROME_CSS
     + """
+Header, Header.-tall { height: 1; }
 #transcript { padding: 1 2 1 1; height: auto; color: $text; }
 #cli-hint { height: auto; color: #6c6c6c; padding: 1 2 0 2; }
 #executions { height: 1fr; background: $background; }
@@ -159,7 +160,6 @@ class ExecutionInspectScreen(Screen[None]):
         self._previous_sub_title = ""
 
     def compose(self) -> ComposeResult:
-        yield Header()
         yield VerticalScroll(Static(_style_transcript(self._transcript), id="transcript"))
         yield Footer()
 
