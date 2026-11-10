@@ -122,3 +122,25 @@ monitor is installed. Publish v0.3.0 from the merged PR commit with the wheel,
 source archive, installer and SHA256SUMS, then verify public stable/nightly updates
 in the isolated uv tool environment. Release URL:
 https://github.com/Isaac12x/incident-resolver-agent/releases/tag/v0.3.0
+
+## 2026-09-19 — Runtime versus Sources investigation
+
+User requested Luna subagents to explain why Plugins/Connect and Sources exist after runtime setup. Two subagents traced the runtime intake path and TUI/CLI configuration path. No application code changed; existing src/tui.py and src/tui_theme.py edits were left untouched.
+
+Findings: Runtime config defines the listener/execution settings. Named webhook intake requires a configured connector for /hooks/incidents/{connector}; direct normalized submit_incident intake does not. Sources edits Config.connectors; CLI connect writes that same list, while plugins only lists static adapter metadata. Existing configured sources do not require a second connection step. Evidence sources (Loki/Grafana/local logs/MCP) remain distinct from receiving alert metadata. Active bundles may override live config and require rebuild/activation plus restart.
+
+Suggested UX: one Sources management view populated from existing configuration, separating incident intake from evidence/tools; plugins/connect remain CLI alternatives, not additional setup requirements. Runtime trigger preferences include currently inert fields. Webhook Test connection currently reports no runtime adapter configured despite webhook intake being server-managed. This was an explanation/research request, so no implementation, tests, commit, or PR was performed.
+
+## 2026-09-19 — Sources investigation guidance
+
+Added the exact requested sentence as the first element of the TUI Sources page:
+"Connect to your logs to get the agent access to investigation evidence needed to fix the bug".
+Updated the Unreleased changelog. Verified the exact first-element text, the focused
+Sources test, all 15 selected TUI/theme tests, Ruff, diff checks, and wheel/sdist build.
+No type checker is configured. No deployment verification applies to this local TUI copy change.
+Changes isolated on fix/sources-evidence-guidance; other workspace edits preserved.
+
+PR: https://github.com/Isaac12x/incident-resolver-agent/pull/33
+Five-minute review follow-up: no general comments, inline comments, reviews, or
+configured CI checks; merge state CLEAN. No feedback required changes. Monitoring
+completed for this turn; no background monitor remains active.

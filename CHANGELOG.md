@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Explain at the top of Sources that connecting logs gives the agent investigation evidence.
+
 ## 0.3.0 - 2026-09-19
 
 - Add `incident-agent update nightly` to install the latest default-branch changes,
