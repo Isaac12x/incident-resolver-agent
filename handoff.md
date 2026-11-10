@@ -123,6 +123,14 @@ source archive, installer and SHA256SUMS, then verify public stable/nightly upda
 in the isolated uv tool environment. Release URL:
 https://github.com/Isaac12x/incident-resolver-agent/releases/tag/v0.3.0
 
+## 2026-09-20 — Runtime versus Sources investigation
+
+User requested Luna subagents to explain why Plugins/Connect and Sources exist after runtime setup. Two subagents traced the runtime intake path and TUI/CLI configuration path. No application code changed; existing src/tui.py and src/tui_theme.py edits were left untouched.
+
+Findings: Runtime config defines the listener/execution settings. Named webhook intake requires a configured connector for /hooks/incidents/{connector}; direct normalized submit_incident intake does not. Sources edits Config.connectors; CLI connect writes that same list, while plugins only lists static adapter metadata. Existing configured sources do not require a second connection step. Evidence sources (Loki/Grafana/local logs/MCP) remain distinct from receiving alert metadata. Active bundles may override live config and require rebuild/activation plus restart.
+
+Suggested UX: one Sources management view populated from existing configuration, separating incident intake from evidence/tools; plugins/connect remain CLI alternatives, not additional setup requirements. Runtime trigger preferences include currently inert fields. Webhook Test connection currently reports no runtime adapter configured despite webhook intake being server-managed. This was an explanation/research request, so no implementation, tests, commit, or PR was performed.
+
 ## 2026-09-19 — Sources investigation guidance
 
 Added the exact requested sentence as the first element of the TUI Sources page:

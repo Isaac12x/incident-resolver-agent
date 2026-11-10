@@ -18,7 +18,6 @@ from textual.widgets import (
     Checkbox,
     Collapsible,
     Footer,
-    Header,
     Input,
     Label,
     Select,
@@ -28,7 +27,7 @@ from textual.widgets import (
     TextArea,
 )
 
-from .cli_help import format_cli_help, overview_next_steps
+from .cli_help import GROUPS, format_cli_help, overview_next_steps
 from .code_review import provision
 from .config import (
     ApplicationConfig,
@@ -56,13 +55,47 @@ from .tooling import (
 )
 from .tui_theme import CHROME_CSS, apply_theme
 
+_OPTION_LABELS = {
+    "agent-call": "Agent call",
+    "agents-sdk": "Agents SDK",
+    "anthropic": "Anthropic",
+    "github": "GitHub",
+    "local-logs": "Local logs",
+    "mcp": "MCP",
+    "openai": "OpenAI",
+    "openai-responses": "OpenAI Responses",
+    "read-only": "Read-only",
+    "sse": "SSE",
+    "stdio": "stdio",
+    "streamable-http": "Streamable HTTP",
+    "subscription-cli": "Subscription CLI",
+    "url": "URL",
+}
+
 
 def _options(*values: str) -> list[tuple[str, str]]:
-    return [(value.replace("-", " ").title(), value) for value in values]
+    return [
+        (_OPTION_LABELS.get(value, value.replace("-", " ").capitalize()), value) for value in values
+    ]
 
 
 def _lines(value: list[str]) -> str:
     return "\n".join(value)
+
+
+def _style_cli_help(plain: str) -> Text:
+    headings = {title for title, _ in GROUPS} | {"Examples"}
+    rendered = Text()
+    for line in plain.splitlines(keepends=True):
+        newline = line.endswith("\n")
+        body = line[:-1] if newline else line
+        if body in headings:
+            rendered.append(body, style="bold #bb9af7")
+        else:
+            rendered.append(body, style="#c8c8c8")
+        if newline:
+            rendered.append("\n")
+    return rendered
 
 
 class ConfigurationApp(App[None]):
@@ -80,20 +113,28 @@ class ConfigurationApp(App[None]):
     CSS = (
         CHROME_CSS
         + """
+    Header { display: none; }
+    Footer { display: none; }
     #content { height: 1fr; }
     .page { padding: 1 2; }
     .page > Static { height: auto; margin-bottom: 1; }
-    .page-lead { color: #6c6c6c; }
+    .page-lead { color: #787878; }
     .headline { text-style: bold; color: $success; }
     .headline.fail { color: $error; }
-    .checks, .summary, .commands {
+    .checks {
         height: auto; background: $surface; border-left: tall $primary;
         padding: 1 2; margin-bottom: 1; color: $text;
     }
-    .commands { border-left: tall $accent; }
+    .summary {
+        height: auto; padding: 0 2 1 2; margin-bottom: 1; color: #c8c8c8;
+    }
+    .commands {
+        height: auto; background: $surface; border-left: tall $accent;
+        padding: 1 2; margin-bottom: 1; color: $text;
+    }
     .section {
         height: auto; background: $surface; border: solid #414141;
-        padding: 1 2 0 2; margin-bottom: 1;
+        padding: 1 2; margin-bottom: 1;
     }
     .section-title { text-style: bold; color: $primary; margin-bottom: 1; height: auto; }
     .card {
@@ -102,7 +143,7 @@ class ConfigurationApp(App[None]):
     }
     .card-title { text-style: bold; color: $accent; margin-bottom: 1; height: auto; }
     .empty {
-        height: auto; color: #6c6c6c; background: $background;
+        height: auto; color: #787878; background: $background;
         border: dashed #414141; padding: 1 2; margin-bottom: 1;
     }
     Collapsible {
@@ -110,30 +151,30 @@ class ConfigurationApp(App[None]):
         background: $surface; border: solid #414141;
     }
     .field { height: auto; width: 1fr; margin-bottom: 1; }
-    .row { height: auto; width: 100%; }
+    .row { height: auto; width: 100%; margin-bottom: 0; }
     .row > .field { margin-right: 1; }
-    .row Input, .row Select { width: 1fr; margin-right: 1; }
-    Input, Select, TextArea { margin-bottom: 1; }
-    TextArea { height: 7; border: solid #414141; }
+    Input, Select { margin-bottom: 0; }
+    TextArea { height: 5; margin-bottom: 0; border: solid #414141; background: $boost; }
     Checkbox { margin-bottom: 1; color: $text; }
-    Label { color: #6c6c6c; width: 1fr; height: auto; }
+    Label { color: #c8c8c8; width: 1fr; height: auto; }
     .actions-row { height: auto; }
     .actions-row Button { margin-bottom: 0; }
     #repositories-list, #connectors-list, #applications-list { height: auto; }
-    .inline-status { height: auto; min-height: 1; color: #6c6c6c; margin-bottom: 1; }
+    .inline-status { height: auto; min-height: 0; color: #787878; margin-bottom: 0; }
     #status {
-        height: auto; max-height: 5; overflow-y: auto; padding: 0 2;
-        background: $background; color: #6c6c6c;
-        border-top: hkey #414141;
+        width: 1fr; height: auto; max-height: 3; overflow-y: auto; padding: 0 1;
+        background: $background; color: #787878; border-top: none;
     }
     #status.error { color: $error; }
     #status.success { color: $success; }
-    #actions { height: auto; padding: 0 2 1 2; background: $background; }
+    #actions {
+        height: auto; padding: 0 1; background: $background;
+        border-top: hkey #414141;
+    }
     #actions Button { min-width: 8; margin-bottom: 0; }
     .narrow .page { padding: 1 0; }
     .narrow #actions { padding: 0; }
-    .narrow HeaderClock { display: none; }
-    #model-help { height: auto; color: #6c6c6c; margin-bottom: 1; }
+    #model-help { height: auto; color: #787878; margin-bottom: 1; }
     """
     )
 
@@ -156,7 +197,6 @@ class ConfigurationApp(App[None]):
         self._github_repositories: dict[str, dict[str, GitHubRepository]] = {}
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
         with TabbedContent(id="content", initial="overview-tab"):
             with TabPane("Overview", id="overview-tab"):
                 yield VerticalScroll(*self._overview_page(), classes="page")
@@ -166,11 +206,11 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._runtime_page(), classes="page")
             with TabPane("Repos", id="repositories-tab"):
                 yield VerticalScroll(*self._repositories_page(), classes="page")
-            with TabPane("Applications", id="applications-tab"):
+            with TabPane("Apps", id="applications-tab"):
                 yield VerticalScroll(*self._applications_page(), classes="page")
             with TabPane("Triage", id="triage-tab"):
                 yield VerticalScroll(*self._triage_page(), classes="page")
-            with TabPane("Code review", id="code-review-tab"):
+            with TabPane("Review", id="code-review-tab"):
                 yield VerticalScroll(*self._code_review_page(), classes="page")
             with TabPane("Sources", id="connections-tab"):
                 yield VerticalScroll(*self._connections_page(), classes="page")
@@ -180,8 +220,8 @@ class ConfigurationApp(App[None]):
                 yield VerticalScroll(*self._cli_page(), classes="page")
         # Validation errors can contain Pydantic markup such as ``[type=...]``. Render the
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
-        yield Static(str(self.path), id="status", markup=False)
         yield Horizontal(
+            Static(str(self.path), id="status", markup=False),
             self._button("Save", "save", variant="primary", tooltip="Ctrl+S"),
             self._button("Quit", "quit", tooltip="Ctrl+Q"),
             id="actions",
@@ -205,12 +245,6 @@ class ConfigurationApp(App[None]):
                 classes="commands",
                 markup=False,
             ),
-            Static(
-                "Save rechecks readiness. Use Runtime, Repos, and Sources to fix failures. "
-                "F1 opens CLI help.",
-                classes="page-lead",
-                markup=False,
-            ),
         ]
 
     def _cli_page(self) -> list[Any]:
@@ -220,7 +254,7 @@ class ConfigurationApp(App[None]):
                 classes="page-lead",
                 markup=False,
             ),
-            Static(format_cli_help(), id="cli-reference", classes="checks", markup=False),
+            Static(_style_cli_help(format_cli_help()), id="cli-reference", classes="commands"),
         ]
 
     @staticmethod
@@ -340,21 +374,35 @@ class ConfigurationApp(App[None]):
     def _triage_page(self) -> list[Any]:
         settings = self.config.triage
         return [
-            Static("TypeSafe assesses incident evidence before worktree creation. Shadow mode "
-                   "records recommendations; enforce mode can hold non-code incidents for review."),
-            self._checkbox(
-                "Enable TypeSafe triage", value=settings.enabled, field_id="triage-enabled"
+            Static(
+                "TypeSafe assesses incident evidence before worktree creation. "
+                "Shadow records recommendations; enforce can hold non-code incidents.",
+                classes="page-lead",
             ),
-            Label("Mode"),
-            self._select(settings.mode, "triage-mode", ("shadow", "enforce")),
-            Label("Model version"),
-            self._input(settings.model, "triage-model"),
-            Label("API key environment variable"),
-            self._input(settings.api_key_env, "triage-key-env"),
-            Label("Total timeout (seconds)"),
-            self._input(settings.timeout_seconds, "triage-timeout"),
-            Label("Operator review confidence threshold"),
-            self._input(settings.review_threshold, "triage-threshold"),
+            Vertical(
+                self._checkbox(
+                    "Enable TypeSafe triage",
+                    value=settings.enabled,
+                    field_id="triage-enabled",
+                ),
+                self._pair(
+                    "Mode",
+                    self._select(settings.mode, "triage-mode", ("shadow", "enforce")),
+                    "Model version",
+                    self._input(settings.model, "triage-model"),
+                ),
+                self._field(
+                    "API key environment variable",
+                    self._input(settings.api_key_env, "triage-key-env"),
+                ),
+                self._pair(
+                    "Timeout (seconds)",
+                    self._input(settings.timeout_seconds, "triage-timeout"),
+                    "Review confidence threshold",
+                    self._input(settings.review_threshold, "triage-threshold"),
+                ),
+                classes="section",
+            ),
         ]
 
     def _collect_triage(self) -> TriageConfig:
@@ -381,23 +429,24 @@ class ConfigurationApp(App[None]):
                 self._checkbox(
                     "Enable Open Code Review", value=settings.enabled, field_id="ocr-enabled"
                 ),
-                Label("Model protocol"),
-                self._select(
-                    settings.protocol, "ocr-protocol", ("openai", "openai-responses", "anthropic")
+                self._pair(
+                    "Protocol",
+                    self._select(
+                        settings.protocol,
+                        "ocr-protocol",
+                        ("openai", "openai-responses", "anthropic"),
+                    ),
+                    "Timeout (seconds)",
+                    self._input(settings.timeout_seconds, "ocr-timeout"),
                 ),
-                Label("Model endpoint"),
-                self._input(settings.base_url, "ocr-base-url"),
-                Label("Model name"),
-                self._input(settings.model, "ocr-model"),
-                Label("API key environment variable"),
-                self._input(settings.api_key_env, "ocr-api-key-env"),
-                Label("Review timeout (seconds)"),
-                self._input(settings.timeout_seconds, "ocr-timeout"),
-                self._button(
-                    "Save configuration and install / test OCR",
-                    "setup-ocr",
-                    variant="primary",
+                self._field("Endpoint", self._input(settings.base_url, "ocr-base-url")),
+                self._pair(
+                    "Model",
+                    self._input(settings.model, "ocr-model"),
+                    "API key environment variable",
+                    self._input(settings.api_key_env, "ocr-api-key-env"),
                 ),
+                self._button("Save and install / test OCR", "setup-ocr", variant="primary"),
                 Static("Not tested", id="ocr-status", classes="inline-status", markup=False),
                 classes="section",
             ),
@@ -436,20 +485,19 @@ class ConfigurationApp(App[None]):
                 classes="page-lead",
             ),
             Vertical(
-                Label("Agent runtime", classes="section-title"),
-                self._select(
-                    model.runtime,
-                    "model-runtime",
-                    ("agents-sdk", "subscription-cli"),
-                ),
-                classes="section",
-            ),
-            Vertical(
                 Label("Incident model", classes="section-title"),
-                Label("Model name"),
-                self._input(model.name, "model", placeholder="Provider model identifier"),
-                Label("Reasoning effort (blank uses provider default)"),
-                self._input(model.reasoning, "model-reasoning"),
+                self._pair(
+                    "Runtime",
+                    self._select(
+                        model.runtime, "model-runtime", ("agents-sdk", "subscription-cli")
+                    ),
+                    "Model name",
+                    self._input(model.name, "model", placeholder="Provider model identifier"),
+                ),
+                self._field(
+                    "Reasoning effort (blank uses provider default)",
+                    self._input(model.reasoning, "model-reasoning"),
+                ),
                 self._button("Use OpenAI defaults", "model-defaults"),
                 id="model-selection-section",
                 classes="section",
@@ -457,44 +505,81 @@ class ConfigurationApp(App[None]):
             Vertical(
                 Label("Subscription CLI", classes="section-title"),
                 Static("", id="subscription-host-status", classes="inline-status", markup=False),
-                Label("Subscription CLI command"),
-                self._input(shlex.join(model.subscription_command), "subscription-command"),
-                Label("Subscription CLI profile (optional)"),
-                self._input(model.subscription_profile, "subscription-profile"),
+                self._field(
+                    "Command",
+                    self._input(shlex.join(model.subscription_command), "subscription-command"),
+                ),
+                self._field(
+                    "Profile (optional)",
+                    self._input(model.subscription_profile, "subscription-profile"),
+                ),
                 self._button("Test subscription CLI", "test-subscription-cli"),
                 Static("", id="subscription-status", classes="inline-status", markup=False),
                 id="subscription-section",
                 classes="section",
             ),
             Vertical(
-                Label("Execution location", classes="section-title"),
-                self._select(model.mode, "model-mode", ("local", "remote")),
-                Static(self._model_help(model.mode), id="model-help"),
-                id="agents-sdk-mode-section",
-                classes="section",
-            ),
-            Vertical(
                 Label("Provider endpoint", classes="section-title"),
-                Label("Provider label (for your records)"),
-                self._input(model.provider, "provider", placeholder="ollama, vllm, openai, ..."),
-                Label("OpenAI-compatible base URL (include /v1 when required)"),
-                self._input(
-                    model.base_url, "model-base-url", placeholder="https://api.example.com/v1"
+                Vertical(
+                    self._field(
+                        "Execution location",
+                        self._select(model.mode, "model-mode", ("local", "remote")),
+                    ),
+                    Static(self._model_help(model.mode), id="model-help"),
+                    id="agents-sdk-mode-section",
                 ),
-                Label("API key environment variable (optional for local servers)"),
-                self._input(model.api_key_env, "model-api-key-env", placeholder="OPENAI_API_KEY"),
-                Label("Organization environment variable (optional)"),
-                self._input(model.organization_env, "model-organization-env"),
+                self._field(
+                    "Provider label",
+                    self._input(
+                        model.provider, "provider", placeholder="ollama, vllm, openai, ..."
+                    ),
+                ),
+                self._field(
+                    "OpenAI-compatible base URL",
+                    self._input(
+                        model.base_url, "model-base-url", placeholder="https://api.example.com/v1"
+                    ),
+                ),
+                self._pair(
+                    "API key environment variable",
+                    self._input(
+                        model.api_key_env, "model-api-key-env", placeholder="OPENAI_API_KEY"
+                    ),
+                    "Organization environment variable",
+                    self._input(model.organization_env, "model-organization-env"),
+                ),
                 id="agents-sdk-endpoint-section",
                 classes="section",
             ),
             Collapsible(
-                Label("Temperature (blank uses provider default)"),
-                self._input(model.temperature, "model-temperature"),
-                Label("Top P (blank uses provider default)"),
-                self._input(model.top_p, "model-top-p"),
-                Label("Maximum output tokens (blank uses provider default)"),
-                self._input(model.max_tokens, "model-max-tokens"),
+                self._pair(
+                    "Temperature",
+                    self._input(model.temperature, "model-temperature"),
+                    "Top P",
+                    self._input(model.top_p, "model-top-p"),
+                ),
+                self._pair(
+                    "Max output tokens",
+                    self._input(model.max_tokens, "model-max-tokens"),
+                    "Max turns per iteration",
+                    self._input(model.max_turns_per_iteration, "model-max-turns"),
+                ),
+                self._pair(
+                    "Max retry iterations",
+                    self._input(model.max_task_iterations, "model-max-iterations"),
+                    "Tool timeout (seconds)",
+                    self._input(model.tool_timeout_seconds, "model-tool-timeout"),
+                ),
+                self._pair(
+                    "Session history limit",
+                    self._input(model.session_history_limit, "session-history-limit"),
+                    "Compaction threshold",
+                    self._input(model.compaction_threshold, "compaction-threshold"),
+                ),
+                self._field(
+                    "Max durable sub-agents",
+                    self._input(self.config.agent.max_subagents, "max-subagents"),
+                ),
                 self._checkbox(
                     "Allow parallel tool calls",
                     value=model.parallel_tool_calls,
@@ -505,23 +590,11 @@ class ConfigurationApp(App[None]):
                     value=model.show_execution_details,
                     field_id="model-show-execution-details",
                 ),
-                Label("Maximum turns per agent iteration"),
-                self._input(model.max_turns_per_iteration, "model-max-turns"),
-                Label("Maximum retry iterations per task"),
-                self._input(model.max_task_iterations, "model-max-iterations"),
-                Label("Tool timeout in seconds"),
-                self._input(model.tool_timeout_seconds, "model-tool-timeout"),
-                Label("Recent session items retained after compaction"),
-                self._input(model.session_history_limit, "session-history-limit"),
-                Label("Session item compaction threshold"),
-                self._input(model.compaction_threshold, "compaction-threshold"),
                 self._checkbox(
                     "Compact long sessions into durable task memory",
                     value=model.compaction_enabled,
                     field_id="compaction-enabled",
                 ),
-                Label("Maximum durable sub-agents per task"),
-                self._input(self.config.agent.max_subagents, "max-subagents"),
                 title="Sampling, budgets & session memory",
                 id="model-advanced",
             ),
@@ -560,16 +633,7 @@ class ConfigurationApp(App[None]):
                         trigger.mode, "trigger-mode", ("hook", "workflow", "agent-call")
                     ),
                 ),
-                self._field(
-                    "Incident hook path",
-                    self._input(trigger.hook_path, "trigger-hook-path"),
-                ),
-                self._pair(
-                    "Workflow name",
-                    self._input(trigger.workflow_name, "trigger-workflow-name"),
-                    "Agent name",
-                    self._input(trigger.agent_name, "trigger-agent-name"),
-                ),
+                *self._trigger_mode_fields(trigger),
                 self._checkbox(
                     "Require an explicit acknowledgement",
                     value=trigger.require_ack,
@@ -663,18 +727,7 @@ class ConfigurationApp(App[None]):
                     "Execution mode",
                     self._select(execution.mode, "execution-mode", ("host", "container")),
                 ),
-                self._field("Container image", self._input(execution.image, "execution-image")),
-                self._pair(
-                    "Container memory (MB)",
-                    self._input(execution.memory_mb, "execution-memory"),
-                    "Process limit",
-                    self._input(execution.pids_limit, "execution-pids"),
-                ),
-                self._checkbox(
-                    "Allow network access in container",
-                    value=execution.network,
-                    field_id="execution-network",
-                ),
+                *self._execution_mode_fields(execution),
                 classes="section",
             ),
             Vertical(
@@ -683,30 +736,34 @@ class ConfigurationApp(App[None]):
                     "Permission mode",
                     self._select(permissions.mode, "permissions-mode", ("read-only", "workspace")),
                 ),
-                self._checkbox(
-                    "Allow dependency installation",
-                    value=permissions.allow_dependency_installation,
-                    field_id="allow-dependency-installation",
-                ),
-                self._checkbox(
-                    "Allow database migrations",
-                    value=permissions.allow_migrations,
-                    field_id="allow-migrations",
-                ),
-                self._checkbox(
-                    "Allow CI modifications",
-                    value=permissions.allow_ci_modification,
-                    field_id="allow-ci-modification",
-                ),
-                self._checkbox(
-                    "Allow snapshot updates",
-                    value=permissions.allow_snapshot_updates,
-                    field_id="allow-snapshot-updates",
-                ),
-                self._checkbox(
-                    "Allow resolving review comments",
-                    value=permissions.allow_review_resolution,
-                    field_id="allow-review-resolution",
+                Collapsible(
+                    self._checkbox(
+                        "Allow dependency installation",
+                        value=permissions.allow_dependency_installation,
+                        field_id="allow-dependency-installation",
+                    ),
+                    self._checkbox(
+                        "Allow database migrations",
+                        value=permissions.allow_migrations,
+                        field_id="allow-migrations",
+                    ),
+                    self._checkbox(
+                        "Allow CI modifications",
+                        value=permissions.allow_ci_modification,
+                        field_id="allow-ci-modification",
+                    ),
+                    self._checkbox(
+                        "Allow snapshot updates",
+                        value=permissions.allow_snapshot_updates,
+                        field_id="allow-snapshot-updates",
+                    ),
+                    self._checkbox(
+                        "Allow resolving review comments",
+                        value=permissions.allow_review_resolution,
+                        field_id="allow-review-resolution",
+                    ),
+                    title="Allowances",
+                    collapsed=True,
                 ),
                 classes="section",
             ),
@@ -734,7 +791,7 @@ class ConfigurationApp(App[None]):
             ),
             empty,
             container,
-            self._button("Add repository", "add-repository"),
+            self._button("Add repository", "add-repository", variant="primary"),
         ]
 
     def _applications_page(self) -> list[Any]:
@@ -753,14 +810,13 @@ class ConfigurationApp(App[None]):
         empty.display = not forms
         return [
             Static(
-                "Applications group explicitly configured services and repositories into one "
-                "durable incident session. Membership is an authorization boundary; leave it "
-                "empty when using repository-only incidents.",
+                "Group services and repositories into one incident session. "
+                "Leave empty for repository-only incidents.",
                 classes="page-lead",
             ),
             empty,
             Vertical(*forms, id="applications-list"),
-            self._button("Add application", "add-application"),
+            self._button("Add application", "add-application", variant="primary"),
         ]
 
     def _application_form(self, key: str, application: ApplicationConfig | None = None) -> Vertical:
@@ -771,14 +827,20 @@ class ConfigurationApp(App[None]):
         prefix = f"application-{key}"
         return Vertical(
             Label(application.name or "New application", classes="card-title"),
-            Label("Application name"),
-            self._input(application.name, f"{prefix}-name", placeholder="checkout"),
-            Label("Services (comma-separated)"),
-            self._input(", ".join(application.services), f"{prefix}-services"),
-            Label("Member repositories (comma-separated)"),
-            self._input(", ".join(application.repositories), f"{prefix}-repositories"),
-            Label("Integration command (optional; runs in application session workspace)"),
-            self._input(application.integration_command, f"{prefix}-integration-command"),
+            self._field(
+                "Name",
+                self._input(application.name, f"{prefix}-name", placeholder="checkout"),
+            ),
+            self._pair(
+                "Services",
+                self._input(", ".join(application.services), f"{prefix}-services"),
+                "Member repositories",
+                self._input(", ".join(application.repositories), f"{prefix}-repositories"),
+            ),
+            self._field(
+                "Integration command",
+                self._input(application.integration_command, f"{prefix}-integration-command"),
+            ),
             self._button("Remove application", f"remove-{key}", variant="warning"),
             id=key,
             classes="card",
@@ -826,16 +888,26 @@ class ConfigurationApp(App[None]):
             ),
             Vertical(
                 Label("Safety contract", classes="section-title"),
-                Label("System prompt"),
-                TextArea(self.config.agent.system_prompt, id="system-prompt"),
-                Label("Positive goals — one per line"),
-                TextArea(_lines(safety.positive_goals), id="positive-goals"),
-                Label("Negative goals — one per line"),
-                TextArea(_lines(safety.negative_goals), id="negative-goals"),
-                Label("Guardrails — conditions the agent must not cross"),
-                TextArea(_lines(safety.guardrails), id="guardrails"),
-                Label("Safeguards — checks or approvals required before risky actions"),
-                TextArea(_lines(safety.safeguards), id="safeguards"),
+                self._field(
+                    "System prompt",
+                    TextArea(self.config.agent.system_prompt, id="system-prompt", compact=True),
+                ),
+                self._field(
+                    "Positive goals — one per line",
+                    TextArea(_lines(safety.positive_goals), id="positive-goals", compact=True),
+                ),
+                self._field(
+                    "Negative goals — one per line",
+                    TextArea(_lines(safety.negative_goals), id="negative-goals", compact=True),
+                ),
+                self._field(
+                    "Guardrails — conditions the agent must not cross",
+                    TextArea(_lines(safety.guardrails), id="guardrails", compact=True),
+                ),
+                self._field(
+                    "Safeguards — checks or approvals required before risky actions",
+                    TextArea(_lines(safety.safeguards), id="safeguards", compact=True),
+                ),
                 classes="section",
             ),
         ]
@@ -865,39 +937,47 @@ class ConfigurationApp(App[None]):
         )
         return Vertical(
             Label(repository.name or "New repository", classes="card-title"),
-            Label("Repository"),
-            self._input(repository.name, f"{prefix}-name", placeholder="owner/repository"),
-            Label("Get repository from"),
-            self._select(source, f"{prefix}-source", ("github", "url")),
-            Label("GitHub repository"),
-            Select(
-                [],
-                allow_blank=True,
-                prompt="Log in to GitHub to load repositories",
-                id=f"{prefix}-github-repository",
-                compact=True,
+            self._pair(
+                "Repository",
+                self._input(repository.name, f"{prefix}-name", placeholder="owner/repository"),
+                "Get from",
+                self._select(source, f"{prefix}-source", ("github", "url")),
             ),
-            self._button("Log in to GitHub and load repositories", f"github-login-{key}"),
-            Label("Clone URL"),
-            self._input(repository.clone_url, f"{prefix}-clone-url"),
+            *self._repository_source_fields(key, prefix, source),
+            self._field(
+                "Clone URL",
+                self._input(repository.clone_url, f"{prefix}-clone-url"),
+                f"{prefix}-clone-url-field",
+            ),
             self._button("Clone/pull and build graphs", f"setup-{key}", variant="primary"),
             Static("", id=f"repo-status-{key}", classes="inline-status", markup=False),
-            Label("Managed local checkout (populated after cloning; existing paths are supported)"),
-            self._input(repository.local_path, f"{prefix}-local-path"),
-            Label("Publish mode"),
-            self._select(
-                repository.publish_mode, f"{prefix}-publish-mode", ("auto", "github", "local")
+            self._field(
+                "Local checkout",
+                self._input(repository.local_path, f"{prefix}-local-path"),
             ),
-            Label("Base branch"),
-            self._input(repository.base_branch, f"{prefix}-base-branch"),
-            Label("Incident environments (comma-separated)"),
-            self._input(
-                ", ".join(repository.incident_environments), f"{prefix}-incident-environments"
+            self._pair(
+                "Publish mode",
+                self._select(
+                    repository.publish_mode, f"{prefix}-publish-mode", ("auto", "github", "local")
+                ),
+                "Base branch",
+                self._input(repository.base_branch, f"{prefix}-base-branch"),
             ),
-            Label("Verification environment"),
-            self._input(repository.verification_environment, f"{prefix}-verification-environment"),
-            Label("Project instructions filename"),
-            self._input(repository.project_instructions, f"{prefix}-project-instructions"),
+            self._pair(
+                "Incident environments",
+                self._input(
+                    ", ".join(repository.incident_environments),
+                    f"{prefix}-incident-environments",
+                ),
+                "Verification environment",
+                self._input(
+                    repository.verification_environment, f"{prefix}-verification-environment"
+                ),
+            ),
+            self._field(
+                "Project instructions filename",
+                self._input(repository.project_instructions, f"{prefix}-project-instructions"),
+            ),
             Collapsible(
                 Label("Playwright command (blank disables deployment browser checks)"),
                 self._input(playwright.command, f"{prefix}-playwright-command"),
@@ -1255,9 +1335,91 @@ class ConfigurationApp(App[None]):
         for key in self._connector_keys:
             self._set_connector_shape(key)
         self._set_model_runtime(self.config.model.runtime)
+        self._set_trigger_shape()
+        self._set_execution_shape()
         for kind in ("repositories", "applications", "connectors"):
             self._sync_collection_empty(kind)
         self.call_later(self._refresh_subscription_status)
+
+    def _trigger_mode_fields(self, trigger: Any) -> list[Any]:
+        hook = self._field(
+            "Incident hook path",
+            self._input(trigger.hook_path, "trigger-hook-path"),
+            "trigger-hook-path-field",
+        )
+        workflow = self._field(
+            "Workflow name",
+            self._input(trigger.workflow_name, "trigger-workflow-name"),
+            "trigger-workflow-field",
+        )
+        agent = self._field(
+            "Agent name",
+            self._input(trigger.agent_name, "trigger-agent-name"),
+            "trigger-agent-field",
+        )
+        hook.display = trigger.mode == "hook"
+        workflow.display = trigger.mode == "workflow"
+        agent.display = trigger.mode == "agent-call"
+        return [hook, workflow, agent]
+
+    def _execution_mode_fields(self, execution: Any) -> list[Any]:
+        image = self._field(
+            "Container image",
+            self._input(execution.image, "execution-image"),
+            "execution-image-field",
+        )
+        limits = Horizontal(
+            self._field(
+                "Container memory (MB)",
+                self._input(execution.memory_mb, "execution-memory"),
+            ),
+            self._field(
+                "Process limit",
+                self._input(execution.pids_limit, "execution-pids"),
+            ),
+            id="execution-limits-row",
+            classes="row",
+        )
+        network = self._checkbox(
+            "Allow network access in container",
+            value=execution.network,
+            field_id="execution-network",
+        )
+        container = execution.mode == "container"
+        image.display = container
+        limits.display = container
+        network.display = container
+        return [image, limits, network]
+
+    def _repository_source_fields(self, key: str, prefix: str, source: str) -> list[Any]:
+        github_field = self._field(
+            "GitHub repository",
+            Select(
+                [],
+                allow_blank=True,
+                prompt="Log in to GitHub to load repositories",
+                id=f"{prefix}-github-repository",
+                compact=True,
+            ),
+            f"{prefix}-github-field",
+        )
+        login = self._button("Log in to GitHub and load repositories", f"github-login-{key}")
+        github = source == "github"
+        github_field.display = github
+        login.display = github
+        return [github_field, login]
+
+    def _set_trigger_shape(self) -> None:
+        mode = self._selected("trigger-mode")
+        self.query_one("#trigger-hook-path-field").display = mode == "hook"
+        self.query_one("#trigger-workflow-field").display = mode == "workflow"
+        self.query_one("#trigger-agent-field").display = mode == "agent-call"
+
+    def _set_execution_shape(self) -> None:
+        container = self._selected("execution-mode") == "container"
+        self.query_one("#execution-image-field").display = container
+        self.query_one("#execution-limits-row").display = container
+        self.query_one("#execution-network").display = container
 
     @staticmethod
     def _connector_visible(kind: str, transport: str) -> dict[str, bool]:
@@ -1347,6 +1509,8 @@ class ConfigurationApp(App[None]):
         self.query_one(f"#{prefix}-github-repository", Select).disabled = not github
         self.query_one(f"#github-login-{key}", Button).disabled = not github
         self.query_one(f"#{prefix}-clone-url", Input).disabled = github
+        self.query_one(f"#{prefix}-github-field").display = github
+        self.query_one(f"#github-login-{key}").display = github
 
     @staticmethod
     def _result_message(stdout: str, stderr: str, fallback: str) -> str:
@@ -1456,6 +1620,12 @@ class ConfigurationApp(App[None]):
             return
         if event.select.id == "model-mode" and event.value is not Select.NULL:
             self.query_one("#model-help", Static).update(self._model_help(str(event.value)))
+            return
+        if event.select.id == "trigger-mode" and event.value is not Select.NULL:
+            self._set_trigger_shape()
+            return
+        if event.select.id == "execution-mode" and event.value is not Select.NULL:
+            self._set_execution_shape()
             return
         select_id = event.select.id or ""
         if select_id.startswith("connector-") and select_id.endswith(("-type", "-transport")):
