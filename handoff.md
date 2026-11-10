@@ -123,7 +123,7 @@ source archive, installer and SHA256SUMS, then verify public stable/nightly upda
 in the isolated uv tool environment. Release URL:
 https://github.com/Isaac12x/incident-resolver-agent/releases/tag/v0.3.0
 
-## 2026-09-19 — Runtime versus Sources investigation
+## 2026-09-20 — Runtime versus Sources investigation
 
 User requested Luna subagents to explain why Plugins/Connect and Sources exist after runtime setup. Two subagents traced the runtime intake path and TUI/CLI configuration path. No application code changed; existing src/tui.py and src/tui_theme.py edits were left untouched.
 
