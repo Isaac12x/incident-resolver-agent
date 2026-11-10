@@ -124,7 +124,7 @@ Button {
     min-width: 10;
     height: 1;
     border: none !important;
-    background: $boost;
+    background: #2a2a2a;
     color: $text;
     text-style: none;
     padding: 0 1;

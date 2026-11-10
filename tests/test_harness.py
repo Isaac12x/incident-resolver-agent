@@ -2028,6 +2028,16 @@ async def test_tui_overview_and_empty_collection_states(tmp_path: Path) -> None:
         assert "HTTP server" in titles
         assert "Workspace permissions" in titles
         assert "Sources" in app.query_one("#runtime-lead", Static).render().plain
+        assert app.query_one("#trigger-hook-path-field").display is True
+        assert app.query_one("#trigger-workflow-field").display is False
+        assert app.query_one("#execution-image-field").display is False
+        app.query_one("#trigger-mode", Select).value = "workflow"
+        await pilot.pause()
+        assert app.query_one("#trigger-hook-path-field").display is False
+        assert app.query_one("#trigger-workflow-field").display is True
+        app.query_one("#execution-mode", Select).value = "container"
+        await pilot.pause()
+        assert app.query_one("#execution-image-field").display is True
         app.query_one(TabbedContent).active = "connections-tab"
         await pilot.pause()
         assert "Runtime" in app.query_one("#sources-lead", Static).render().plain
@@ -2444,6 +2454,16 @@ def test_cli_tree_index_output_and_failures(tmp_path: Path, capsys) -> None:
         pytest.raises(SystemExit, match="7"),
     ):
         main(["index", str(tmp_path)])
+
+
+def test_select_option_labels() -> None:
+    from src.tui import _options
+
+    labels = {value: label for label, value in _options("url", "github", "agents-sdk", "mcp")}
+    assert labels["url"] == "URL"
+    assert labels["github"] == "GitHub"
+    assert labels["agents-sdk"] == "Agents SDK"
+    assert labels["mcp"] == "MCP"
 
 
 def test_connector_fields_follow_type() -> None:
