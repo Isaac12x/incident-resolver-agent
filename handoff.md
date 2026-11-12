@@ -144,3 +144,23 @@ PR: https://github.com/Isaac12x/incident-resolver-agent/pull/33
 Five-minute review follow-up: no general comments, inline comments, reviews, or
 configured CI checks; merge state CLEAN. No feedback required changes. Monitoring
 completed for this turn; no background monitor remains active.
+
+## 2026-11-12 — CLI color and tables
+
+Implemented with Luna implementation, test/spec, and standards-review agents under
+root orchestration on `feat/cli-color-tables`. No VISION.md exists.
+Doctor/status now render STATUS/CHECK/DETAILS tables with green OK and red FAIL
+labels; plugins and configured-source listings also use aligned tables. A shared
+dependency-free renderer handles ANSI-aware padding, multiline cells and wrapped
+final columns. NO_COLOR and TERM=dumb disable color; FORCE_COLOR enables redirected
+color, otherwise detection follows the output TTY. Doctor/status and connect --list
+gain JSON modes; installer chatter goes to stderr with doctor --install --json.
+Exit codes and existing plugins JSON behavior are preserved. Consumers of the old
+tab-separated connect --list output should use its new --json mode. Very narrow
+terminals or unusually wide leading columns can still exceed terminal width.
+
+Validation: 36 focused tests and the full 670-test suite pass (94.46% total coverage,
+98% formatter coverage), using a test-process descriptor limit of 4096. Repository
+Ruff, compileall, lock check, wheel/sdist build and diff checks pass. No static type
+checker or hosted preview is configured. Independent standards/spec reviews found
+no blocking issues. Publication and five-minute review follow-up recorded below.

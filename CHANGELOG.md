@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Format CLI readiness checks and source listings as readable tables, with terminal-aware
+  color and structured `doctor --json` / `status --json` output.
+
 - Explain at the top of Sources that connecting logs gives the agent investigation evidence.
 
 ## 0.3.0 - 2026-09-19

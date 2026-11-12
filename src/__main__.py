@@ -22,6 +22,7 @@ from .bundles import (
     load_active_bundle,
     rollback_bundle,
 )
+from .cli_format import color, render_table
 from .cli_help import DESCRIPTION, HELP, AgentParser, HelpFormatter, format_cli_help
 from .config import ConnectorConfig, load_config, save_config
 from .dashboard.cli import add_dashboard_parser, run_dashboard_command
@@ -74,6 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     connect.add_argument("plugin", nargs="?", help="built-in adapter name")
     connect.add_argument("--list", action="store_true", dest="list_sources")
+    connect.add_argument("--json", action="store_true", dest="as_json")
     connect.add_argument("--name")
     connect.add_argument("--url")
     connect.add_argument("--log-path")
@@ -106,7 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_command.add_argument(
         "--install", action="store_true", help="install missing helper CLIs with uv"
     )
-    commands.add_parser("status", help=HELP["status"])
+    doctor_command.add_argument("--json", action="store_true", dest="as_json")
+    status_command = commands.add_parser("status", help=HELP["status"])
+    status_command.add_argument("--json", action="store_true", dest="as_json")
     bundle = commands.add_parser("bundle", help=HELP["bundle"])
     bundle.add_argument("action", choices=("build", "list", "activate", "rollback"))
     bundle.add_argument("version", nargs="?")
@@ -249,10 +253,11 @@ def _print_plugins(*, as_json: bool = False) -> None:
     if as_json:
         print(json.dumps(catalog, indent=2))
         return
-    for item in catalog:
-        capabilities = ", ".join(item.get("capabilities", []))
-        suffix = f" [{capabilities}]" if capabilities else ""
-        print(f"{item['name']}: {item['description']}{suffix}")
+    rows = [
+        (item["name"], ", ".join(item.get("capabilities", [])), item["description"])
+        for item in catalog
+    ]
+    print(render_table(("PLUGIN", "CAPABILITIES", "DESCRIPTION"), rows))
 
 
 def _interactive_connect(catalog: list[dict[str, object]]) -> tuple[str, str, dict[str, object]]:
@@ -349,9 +354,26 @@ def _connect_command(args: argparse.Namespace) -> None:
             raise SystemExit(
                 f"could not read configuration: {_configuration_error(error)}"
             ) from error
-        for connector in config.connectors:
-            capabilities = ",".join(connector.capabilities)
-            print(f"{connector.name}\t{connector.type}\t{capabilities}".rstrip("\t"))
+        sources = [
+            {
+                "name": connector.name,
+                "type": connector.type,
+                "capabilities": list(connector.capabilities),
+            }
+            for connector in config.connectors
+        ]
+        if args.as_json:
+            print(json.dumps(sources, indent=2))
+        else:
+            print(
+                render_table(
+                    ("NAME", "TYPE", "CAPABILITIES"),
+                    [
+                        (item["name"], item["type"], ", ".join(item["capabilities"]))
+                        for item in sources
+                    ],
+                )
+            )
         return
 
     catalog = plugin_catalog()
@@ -495,18 +517,45 @@ def main(argv: list[str] | None = None) -> None:
 
             results = install_uv_tools(("seed", "code-review-graph"))
             for result in results:
-                print(result.stdout or result.stderr, end="")
+                destination = sys.stderr if args.as_json else sys.stdout
+                print(
+                    result.stdout or result.stderr,
+                    end="",
+                    file=destination,
+                )
         checks = doctor(args.config or default_config_path())
-        for check in checks:
-            print(f"{'OK' if check.ok else 'FAIL'} {check.name}: {check.message}")
+        active_version = None
+        active_error = None
         if args.command == "status":
             try:
                 active = load_active_bundle(
                     load_config(args.config or default_config_path(), create=False)
                 )
-                print(f"active bundle: {active.version if active else 'none'}")
+                active_version = active.version if active else "none"
             except Exception as error:
-                print(f"active bundle: unavailable ({error})")
+                active_error = str(error)
+                active_version = "unavailable"
+        if args.as_json:
+            output = {
+                "checks": [
+                    {"ok": check.ok, "name": check.name, "message": check.message}
+                    for check in checks
+                ]
+            }
+            if args.command == "status":
+                output["active_bundle"] = active_version
+                if active_error:
+                    output["active_bundle_error"] = active_error
+            print(json.dumps(output, indent=2))
+        else:
+            rows = [
+                (color("OK", "32") if check.ok else color("FAIL", "31"), check.name, check.message)
+                for check in checks
+            ]
+            if args.command == "status":
+                detail = active_version if active_error is None else f"unavailable ({active_error})"
+                rows.append(("INFO", "active bundle", detail))
+            print(render_table(("STATUS", "CHECK", "DETAILS"), rows))
         if any(not check.ok for check in checks):
             raise SystemExit(1)
         return
