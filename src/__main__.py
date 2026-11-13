@@ -129,8 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
         "channel",
         nargs="?",
         choices=("stable", "nightly"),
-        default="stable",
-        help="release channel to install (default: stable)",
+        default=None,
+        help="release channel to install (default: latest default-branch source)",
     )
     doctor_command = commands.add_parser("doctor", help=HELP["doctor"])
     doctor_command.add_argument(

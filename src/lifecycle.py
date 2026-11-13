@@ -301,14 +301,14 @@ def ensure_user_config(path: Path) -> None:
 
 
 def update_installation(
-    *, channel: str = "stable", runner=subprocess.run, managed_tools: tuple[str, ...] = ()
+    *, channel: str | None = None, runner=subprocess.run, managed_tools: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess[str]:
     """Update the isolated uv tool installation and return the real command result.
 
-    Stable follows the latest release wheel. Nightly follows the default branch of
-    the recorded GitHub repository and refreshes uv's source cache on every run.
+    The default and nightly channels follow the recorded GitHub repository's default
+    branch and refresh uv's source cache. Stable follows the latest release wheel.
     """
-    if channel not in {"stable", "nightly"}:
+    if channel not in {None, "stable", "nightly"}:
         raise ValueError(f"unsupported update channel: {channel}")
     uv = shutil.which("uv")
     if not uv:
@@ -322,7 +322,11 @@ def update_installation(
             "INCIDENT_HARNESS_RELEASE_ASSET",
         )
     )
-    if channel == "nightly":
+    if channel == "nightly" or (
+        channel is None
+        and not os.environ.get("INCIDENT_HARNESS_VERSION")
+        and not os.environ.get("INCIDENT_HARNESS_RELEASE_ASSET")
+    ):
         if os.environ.get("INCIDENT_HARNESS_VERSION") or os.environ.get(
             "INCIDENT_HARNESS_RELEASE_ASSET"
         ):
@@ -332,24 +336,36 @@ def update_installation(
             )
         source = os.environ.get("INCIDENT_HARNESS_SOURCE")
         if not source:
-            repository = os.environ.get("INCIDENT_HARNESS_REPOSITORY")
-            if not repository:
-                repository = (
-                    installed_git_repository()
-                    or installed_release_repository()
-                    or DEFAULT_RELEASE_REPOSITORY
-                )
-            source = f"git+https://github.com/{repository}.git"
-        command = [
-            uv,
-            "tool",
-            "install",
-            "--refresh",
-            "--upgrade",
-            "--from",
-            source,
-            PACKAGE_NAME,
-        ]
+            repository = (
+                os.environ.get("INCIDENT_HARNESS_REPOSITORY")
+                or installed_git_repository()
+                or installed_release_repository()
+            )
+            if not repository and channel is None:
+                # Keep uv's recorded source for custom/local installs. Resolving
+                # an unknown install to the upstream repository would change it.
+                command = [
+                    uv,
+                    "tool",
+                    "upgrade",
+                    "--reinstall-package",
+                    PACKAGE_NAME,
+                    PACKAGE_NAME,
+                ]
+            else:
+                repository = repository or DEFAULT_RELEASE_REPOSITORY
+                source = f"git+https://github.com/{repository}.git"
+        if source:
+            command = [
+                uv,
+                "tool",
+                "install",
+                "--refresh",
+                "--upgrade",
+                "--from",
+                source,
+                PACKAGE_NAME,
+            ]
     elif explicit_source:
         command = [uv, "tool", "install", "--force", "--from", installation_source(), PACKAGE_NAME]
     elif (repository := installed_release_repository()) or (

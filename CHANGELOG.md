@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Make default installs and updates fetch merged default-branch code with refreshed
+  source caches; keep explicit stable releases and release pins. Point README installs
+  at the current installer instead of a stale release-attached script.
+
 - Add `incident-agent version`, `--version`, and `version --json` to report the
   installed package version and recorded Git revision without runtime configuration.
 
