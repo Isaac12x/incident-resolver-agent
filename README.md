@@ -89,6 +89,13 @@ Each connection has a unique name, so multiple sources can use the same plugin. 
 credential configuration. Restart the service after changing connections; if a runtime bundle
 is active, build and activate a new bundle first.
 
+`incident-agent version` (or `incident-agent --version`) reports the installed package
+version and, for Git installs with recorded metadata, its commit revision. Use
+`incident-agent version --json` for structured output. This works offline without
+configuration; an unpackaged checkout reports `unknown` if package metadata is absent.
+Check the version before and after an update in a new CLI invocation. Nightly builds
+can share a package version, so the recorded commit distinguishes their revisions.
+
 `incident-agent update` refreshes the latest stable release wheel. `incident-agent update nightly`
 follows the default branch from GitHub and refreshes the source on every run, so repeated nightly
 updates pick up new commits. A nightly install can return to the latest stable release with the

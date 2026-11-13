@@ -48,6 +48,31 @@ from .tooling import (
     install_configured_repositories,
 )
 from .tui import run_tui
+from .version import get_version_info
+
+
+class _VersionAction(argparse.Action):
+    """Print version metadata only when the option is selected."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        del namespace, values, option_string
+        print(_format_version())
+        parser.exit()
+
+
+def _format_version(info: dict[str, str | None] | None = None) -> str:
+    if info is None:
+        info = get_version_info()
+    version = f"{info['name']} {info['version']}"
+    if info["commit"]:
+        version += f" (commit {info['commit']})"
+    return version
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=format_cli_help(),
         formatter_class=HelpFormatter,
     )
+    parser.add_argument("--version", action=_VersionAction, nargs=0, help="show version and exit")
     parser.add_argument("--config", type=Path, default=None, metavar="PATH")
     commands = parser.add_subparsers(
         dest="command", metavar="COMMAND", required=False, parser_class=AgentParser
@@ -64,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     plugins = commands.add_parser("plugins", help=HELP["plugins"])
     plugins.add_argument("action", nargs="?", choices=("list",), default="list")
     plugins.add_argument("--json", action="store_true", dest="as_json")
+    version_command = commands.add_parser("version", help=HELP["version"])
+    version_command.add_argument("--json", action="store_true", dest="as_json")
     connect = commands.add_parser(
         "connect",
         help=HELP["connect"],
@@ -440,6 +468,13 @@ def _connect_command(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_arguments(argv)
+    if args.command == "version":
+        info = get_version_info()
+        if args.as_json:
+            print(json.dumps(info, indent=2))
+        else:
+            print(_format_version(info))
+        return
     using_default_config = args.config is None
     configured_path = bool(os.environ.get("INCIDENT_AGENT_CONFIG"))
     if args.config is None:

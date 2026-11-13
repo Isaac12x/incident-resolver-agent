@@ -16,6 +16,7 @@ HELP = {
     "init": "create or repair the local runtime",
     "config": "open the configuration editor",
     "plugins": "list built-in source adapters",
+    "version": "show the installed package version and build commit",
     "connect": "configure a named source adapter",
     "doctor": "validate tools, credentials, and repositories",
     "status": "show readiness and the active runtime bundle",
@@ -37,7 +38,7 @@ HELP = {
 }
 
 GROUPS = (
-    ("Setup", ("init", "config", "plugins", "connect", "doctor", "status")),
+    ("Setup", ("init", "config", "plugins", "connect", "doctor", "status", "version")),
     ("Run", ("run", "serve", "worker", "mcp", "dashboard", "executions")),
     ("Maintain", ("update", "bundle", "healthcheck", "service-url")),
     ("Tools", ("eval", "index", "tree")),

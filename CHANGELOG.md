@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `incident-agent version`, `--version`, and `version --json` to report the
+  installed package version and recorded Git revision without runtime configuration.
+
 - Format CLI readiness checks and source listings as readable tables, with terminal-aware
   color and structured `doctor --json` / `status --json` output.
 
