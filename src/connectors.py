@@ -10,7 +10,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from .config import ConnectorConfig
+from .connector_errors import connector_error_message, connector_http_message
 from .models import Incident, IncidentEvidence
 
 
@@ -222,11 +225,43 @@ class ConnectorManager:
             return ConnectorTestResult(name, False, "unknown connector")
         if name not in self.factories:
             if self.configs[name].type == "webhook":
+                config = self.configs[name]
+                if config.url:
+                    try:
+                        status = await self._probe_webhook_url(config)
+                    except (httpx.HTTPError, OSError, TimeoutError, ValueError) as error:
+                        detail = (
+                            f"authentication variable {config.auth_token_env} is not set"
+                            if isinstance(error, ValueError) and config.auth_token_env
+                            and not os.environ.get(config.auth_token_env)
+                            else "check the URL and network connection, then try again"
+                        )
+                        return ConnectorTestResult(
+                            name, False, f"Webhook endpoint unreachable: {detail}"
+                        )
+                    if 200 <= status < 400 or status == 405:
+                        detail = "HEAD is not supported; " if status == 405 else ""
+                        return ConnectorTestResult(
+                            name, True,
+                            f"endpoint reachable; {detail}HTTP {status} to a safe HEAD request; "
+                            "delivery not verified",
+                        )
+                    if status in {401, 403, 404} or status >= 500:
+                        return ConnectorTestResult(
+                            name,
+                            False,
+                            f"{connector_http_message(status)} HEAD response; "
+                            "event delivery not verified.",
+                        )
+                    return ConnectorTestResult(
+                        name, False,
+                        f"endpoint responded HTTP {status} to a safe HEAD request; "
+                        "delivery not verified",
+                    )
                 return ConnectorTestResult(
                     name,
                     False,
-                    "webhook is inbound-only; test it by sending an event to the configured "
-                    "harness webhook path (include an HMAC signature when webhook auth is enabled)",
+                    "Enter the public webhook URL to check its connection.",
                 )
             return ConnectorTestResult(name, False, "no runtime adapter configured")
         try:
@@ -240,7 +275,21 @@ class ConnectorManager:
                     await self._close(session)
             return ConnectorTestResult(name, True, "connected")
         except Exception as error:  # connector errors are returned, not allowed to kill the TUI
-            return ConnectorTestResult(name, False, str(error))
+            return ConnectorTestResult(name, False, connector_error_message(error))
+
+    @staticmethod
+    async def _probe_webhook_url(config: ConnectorConfig) -> int:
+        """Check endpoint reachability without sending an event that could create an incident."""
+        headers = {}
+        if config.auth_token_env:
+            token = os.environ.get(config.auth_token_env)
+            if not token:
+                raise ValueError("authentication environment variable is not set")
+            headers["Authorization"] = f"Bearer {token}"
+
+        async with httpx.AsyncClient(timeout=5, follow_redirects=False) as client:
+            response = await client.head(config.url or "", headers=headers)
+            return response.status_code
 
     def normalize_incident(self, name: str, payload: dict[str, Any]) -> Incident:
         if name not in self.configs:

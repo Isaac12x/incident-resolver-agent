@@ -880,6 +880,16 @@ connections for incident input, PR output, and observability, plus positive/nega
 guardrails, and safeguards from the same TUI. The built-in GitHub publisher uses the TUI GitHub CLI login as described above.
 Optional GitHub MCP connectors authenticate separately through their configured token references.
 
+In Sources, a webhook receives incoming alerts. Its optional URL is the public receiver URL
+to check with **Test connection**; it does not configure outbound incident delivery. The test
+checks reachability without sending an incident, so it does not verify alert delivery or webhook
+signatures. Existing incoming webhooks can keep the URL blank.
+
+Select text and press **Ctrl+C** to copy it in the configuration and execution TUIs.
+Use **Ctrl+Q** to quit configuration, or **q** to leave the execution views.
+Copying to the system clipboard requires terminal clipboard support; your terminal's native
+selection shortcut (often Shift-drag or Option-drag) is also available.
+
 ### Local-only repository mode
 
 GitHub is optional. If a checkout is available at either

@@ -342,6 +342,14 @@ class ConnectorConfig(BaseModel):
 
     @model_validator(mode="after")
     def transport_has_target(self) -> ConnectorConfig:
+        if self.type == "webhook" and self.url:
+            from urllib.parse import urlsplit
+
+            parsed = urlsplit(self.url)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("webhook connectors require an HTTP(S) URL")
+            if parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ValueError("webhook URL must not contain credentials, query, or fragment")
         if self.type == "local-logs":
             if not self.log_path or not Path(self.log_path).expanduser().is_absolute():
                 raise ValueError("local-logs connectors require an absolute log_path")

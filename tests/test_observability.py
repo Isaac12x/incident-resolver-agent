@@ -246,7 +246,7 @@ def test_health_detects_outage_and_recovery(monkeypatch, tmp_path, loki):
         current_status[0] = 401
         response = client.get("/health")
         assert response.status_code == 503
-        assert response.json()["connections"]["loki"]["error"] == "loki: HTTP 401"
+        assert "Authentication failed (HTTP 401)" in response.json()["connections"]["loki"]["error"]
         current_status[0] = 200
         assert client.get("/health").status_code == 200
 

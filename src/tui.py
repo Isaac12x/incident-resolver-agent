@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import shlex
 import subprocess
 import time
@@ -11,12 +10,10 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import ValidationError
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.css.query import NoMatches
 from textual.widgets import (
     Button,
     Checkbox,
@@ -57,6 +54,8 @@ from .tooling import (
     repository_name_from_url,
     repository_slug,
 )
+from .tui_copy import copy_selection
+from .tui_errors import format_tui_error, format_tui_message
 from .tui_theme import CHROME_CSS, apply_theme
 
 _OPTION_LABELS = {
@@ -109,6 +108,8 @@ class ConfigurationApp(App[None]):
     SUB_TITLE = "Configuration"
     BINDINGS = [
         Binding("ctrl+s", "save", "Save", priority=True),
+        Binding("ctrl+c", "copy", "Copy", priority=True),
+        Binding("super+c", "copy", "Copy", priority=True),
         Binding("ctrl+q", "quit", "Quit"),
         Binding("f1", "show_cli", "CLI"),
     ]
@@ -233,7 +234,7 @@ class ConfigurationApp(App[None]):
         # Validation errors can contain Pydantic markup such as ``[type=...]``. Render the
         # status as plain text so an invalid draft reports the error instead of crashing TUI.
         yield Horizontal(
-            Static(str(self.path), id="status", markup=False),
+            Static(f"{self.path} · Ctrl+C copy", id="status", markup=False),
             self._button("Save", "save", variant="primary", tooltip="Ctrl+S"),
             self._button("Quit", "quit", tooltip="Ctrl+Q"),
             id="actions",
@@ -275,6 +276,9 @@ class ConfigurationApp(App[None]):
 
     def action_show_cli(self) -> None:
         self.query_one(TabbedContent).active = "cli-tab"
+
+    def action_copy(self) -> None:
+        copy_selection(self)
 
     def _overview_content(self) -> tuple[str, Text, str, bool]:
         checks = doctor(self.path, runner=self.command_runner)
@@ -1073,9 +1077,6 @@ class ConfigurationApp(App[None]):
         tenant_field.display = visible["tenant"]
         datasource_field.display = visible["datasource"]
         test_button = self._button("Test connection", f"test-{key}", variant="primary")
-        test_button.disabled = connector.type == "webhook"
-        if connector.type == "webhook":
-            test_button.tooltip = "Webhook is intake-only; send a signed test event to the hook."
         return Vertical(
             Label(connector.name or "New connection", classes="card-title"),
             self._pair(
@@ -1452,9 +1453,9 @@ class ConfigurationApp(App[None]):
         return {
             "log-path": kind == "local-logs",
             "transport": mcp,
-            "url": httpish,
+            "url": httpish or kind == "webhook",
             "command": stdio,
-            "auth": kind in {"loki", "grafana"} or (mcp and not stdio),
+            "auth": kind in {"webhook", "loki", "grafana"} or (mcp and not stdio),
             "tenant": kind == "loki",
             "datasource": kind == "grafana",
         }
@@ -1463,24 +1464,10 @@ class ConfigurationApp(App[None]):
         self, kind: str, key: str | None = None, connector_name: str = ""
     ) -> str:
         if kind == "webhook":
-            try:
-                hook_path = self._value("trigger-hook-path").strip()
-                secret_env = self._value("server-webhook-secret-env").strip()
-            except NoMatches:
-                hook_path = self.config.trigger.hook_path
-                secret_env = self.config.server.webhook_secret_env
-            name = connector_name
-            if key is not None:
-                with contextlib.suppress(NoMatches):
-                    name = self._value(f"connector-{key}-name").strip()
-            if not name:
-                name = "{name}"
             return (
-                f"POST incidents to {hook_path.rstrip('/')}/{name}. When {secret_env} is set, "
-                "sign the raw request body with HMAC-SHA256 and send its hex digest in "
-                "X-Agent-Signature-256. If intake authentication is required, set that "
-                "environment variable on the harness host. Set Purpose to Incident. "
-                "This intake source has no outbound connection to test."
+                "Receive alerts from a webhook. Optionally enter its public URL to check "
+                "reachability. The optional token supplies bearer authentication for this "
+                "check only. Testing sends no incident and does not verify delivery."
             )
         return {
             "mcp": (
@@ -1513,11 +1500,8 @@ class ConfigurationApp(App[None]):
             self._connector_description(kind, key)
         )
         test = self.query_one(f"#test-{key}", Button)
-        test.disabled = kind == "webhook"
-        test.tooltip = (
-            "Webhook is intake-only; send a signed test event to the hook."
-            if kind == "webhook" else None
-        )
+        test.disabled = False
+        test.tooltip = None
 
     def _set_model_runtime(self, runtime: str) -> None:
         subscription = runtime == "subscription-cli"
@@ -1718,7 +1702,7 @@ class ConfigurationApp(App[None]):
         try:
             connector = self._collect_connector(key)
         except (TypeError, ValueError) as error:
-            status.update(f"Invalid connection: {error}")
+            status.update(f"Invalid connection: {format_tui_error(error)}")
             status.set_class(True, "error")
             status.set_class(False, "pending", "success")
             return
@@ -1727,7 +1711,7 @@ class ConfigurationApp(App[None]):
         status.set_class(False, "error", "success")
         result = await ConnectorManager([connector]).test_connection(connector.name)
         prefix = "Connected" if result.connected else "Connection failed"
-        status.update(f"{prefix}: {result.message}")
+        status.update(f"{prefix}: {format_tui_message(result.message)}")
         status.set_class(result.connected, "success")
         status.set_class(not result.connected, "error")
         status.set_class(False, "pending")
@@ -1864,14 +1848,7 @@ class ConfigurationApp(App[None]):
             self._set_status(f"Saved {self.path}")
             self._refresh_overview()
         except (OSError, TypeError, ValueError) as error:
-            message = (
-                "; ".join(
-                    f"{'.'.join(map(str, item['loc']))}: {item['msg']}"
-                    for item in error.errors(include_input=False, include_url=False)
-                )
-                if isinstance(error, ValidationError)
-                else str(error)
-            )
+            message = format_tui_error(error)
             self._set_status(f"Could not save: {message}", error=True)
 
 

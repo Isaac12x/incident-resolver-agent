@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Allow editing and testing a webhook's public URL in Sources, with a reachability
+  check that does not create an incident or claim to verify delivery.
+- Replace internal connector validation details with actionable form errors.
+- Support copying selected text across configuration and execution TUIs.
+
 - Restore code from merged PRs #48–52 after master was force-pushed back to the #47 tip.
   The recovery commit restores the recovered code tree without handoff documentation.
 - Clarify source setup in the TUI with type-specific guidance and fields. Explain
