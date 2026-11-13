@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,6 +138,63 @@ def _run(command: Sequence[str], cwd: Path, runner: CommandRunner) -> ToolResult
     )
 
 
+def _run_with_progress(
+    command: Sequence[str],
+    cwd: Path,
+    runner: CommandRunner,
+    on_progress: Callable[[str], None] | None,
+) -> ToolResult:
+    """Run a command while forwarding real output lines from the default runner."""
+    if on_progress is None or runner is not subprocess.run:
+        return _run(command, cwd, runner)
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except OSError as error:
+        return ToolResult(tuple(command), 127, "", str(error))
+
+    output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def drain(name: str, stream: Any) -> None:
+        pending = bytearray()
+        while character := stream.read(1):
+            if character in (b"\r", b"\n"):
+                if pending:
+                    line = pending.decode("utf-8", errors="replace")
+                    output[name].append(line)
+                    on_progress(line.strip())
+                    pending.clear()
+            else:
+                pending.extend(character)
+        if pending:
+            line = pending.decode("utf-8", errors="replace")
+            output[name].append(line)
+            on_progress(line.strip())
+
+    threads = [
+        threading.Thread(target=drain, args=("stdout", process.stdout), daemon=True),
+        threading.Thread(target=drain, args=("stderr", process.stderr), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    returncode = process.wait()
+    for thread in threads:
+        thread.join()
+    process.stdout.close()
+    process.stderr.close()
+    return ToolResult(
+        tuple(command),
+        returncode,
+        "\n".join(output["stdout"]),
+        "\n".join(output["stderr"]),
+    )
+
+
 def capture_structured_tree(
     base: Path | str = ".",
     output: Path | str = "structure.seed",
@@ -189,13 +247,15 @@ def build_repository_graphs(
     base: Path | str = ".",
     *,
     runner: CommandRunner = subprocess.run,
+    on_progress: Callable[[str], None] | None = None,
 ) -> ToolResult:
     """Build the code-review-graph index for ``base``."""
     root = _validate_base(base)
-    return _run(
+    return _run_with_progress(
         (_tool_executable("code-review-graph"), "build", "--repo", str(root)),
         cwd=root,
         runner=runner,
+        on_progress=on_progress,
     )
 
 
@@ -549,14 +609,26 @@ def clone_and_index_repository(
             raise FileExistsError(f"repository destination is not a Git checkout: {target}")
         if on_progress:
             on_progress("Pulling latest changes…")
-        acquisition = _run(("git", "-C", str(target), "pull", "--ff-only"), target.parent, runner)
+        acquisition = _run_with_progress(
+            ("git", "-C", str(target), "pull", "--ff-only", "--progress"),
+            target.parent,
+            runner,
+            on_progress,
+        )
     else:
         if on_progress:
             on_progress("Cloning repository…")
-        acquisition = _run(("git", "clone", clone_url, str(target)), target.parent, runner)
+        acquisition = _run_with_progress(
+            ("git", "clone", "--progress", clone_url, str(target)),
+            target.parent,
+            runner,
+            on_progress,
+        )
     if not acquisition.succeeded:
         return RepositorySetupResult(target, acquisition)
     if on_progress:
         on_progress("Building code review graph…")
-    code_review_graph = build_repository_graphs(target, runner=runner)
+    code_review_graph = build_repository_graphs(
+        target, runner=runner, on_progress=on_progress
+    )
     return RepositorySetupResult(target, acquisition, code_review_graph)

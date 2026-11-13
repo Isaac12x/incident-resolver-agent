@@ -53,6 +53,7 @@ from src.skills import SkillResolver
 from src.storage import Storage
 from src.tooling import (
     ToolResult,
+    _run_with_progress,
     build_repository_graphs,
     capture_structured_tree,
     clone_and_index_repository,
@@ -502,7 +503,7 @@ def test_clone_pull_and_index_repository(tmp_path: Path) -> None:
 
     calls.clear()
     refreshed = clone_and_index_repository("unused", target, runner=runner)
-    assert refreshed.succeeded and calls[0][-2:] == ["pull", "--ff-only"]
+    assert refreshed.succeeded and calls[0][-3:] == ["pull", "--ff-only", "--progress"]
 
     occupied = tmp_path / "occupied"
     occupied.mkdir()
@@ -2480,10 +2481,10 @@ async def test_tui_repository_setup_reports_live_stages_and_cleans_up_on_failure
                 in app.query_one(f"#repo-status-{key}", Static).render().plain,
                 "clone progress was not displayed",
             )
-            await wait_until(
-                lambda: "1s" in app.query_one(f"#repo-status-{key}", Static).render().plain,
-                "elapsed time did not advance while clone was blocked",
-            )
+            await pilot.pause(1.1)
+            clone_status = app.query_one(f"#repo-status-{key}", Static).render().plain
+            assert "elapsed" not in clone_status
+            assert "Cloning" in clone_status
             assert app.query_one("#repository-0").disabled
             app.query_one("#setup-repository-0", Button).press()
             await pilot.pause(0.05)
@@ -2541,6 +2542,49 @@ def test_clone_and_index_reports_pull_and_graph_stages(tmp_path: Path) -> None:
     assert result.succeeded
     assert stages == ["Pulling latest changes…", "Building code review graph…"]
     assert commands[0][:4] == ["git", "-C", str(destination), "pull"]
+
+
+def test_streaming_command_reports_progress_before_completion(tmp_path: Path) -> None:
+    marker = tmp_path / "callback-ran"
+    updates: list[str] = []
+
+    def report(update: str) -> None:
+        updates.append(update)
+        marker.touch(exist_ok=True)
+
+    result = _run_with_progress(
+        [
+            sys.executable,
+            "-c",
+            "import pathlib, sys, time\n"
+            "sys.stderr.write('Progress: 1/2\\r'); sys.stderr.flush()\n"
+            f"marker = pathlib.Path({str(marker)!r})\n"
+            "deadline = time.monotonic() + 5\n"
+            "while not marker.exists() and time.monotonic() < deadline:\n"
+            "    time.sleep(.01)\n"
+            "if not marker.exists(): raise SystemExit(9)\n"
+            "sys.stderr.write('Progress: 2/2\\n'); sys.stderr.flush()\n",
+        ],
+        tmp_path,
+        subprocess.run,
+        report,
+    )
+
+    assert result.succeeded
+    assert marker.exists()
+    assert updates == ["Progress: 1/2", "Progress: 2/2"]
+    assert "Progress: 1/2" in result.stderr
+
+
+def test_streaming_command_preserves_failed_return_code(tmp_path: Path) -> None:
+    result = _run_with_progress(
+        [sys.executable, "-c", "raise SystemExit(7)"],
+        tmp_path,
+        subprocess.run,
+        lambda _update: None,
+    )
+
+    assert result.returncode == 7
 
 
 def test_application_build_and_cli_dispatch(

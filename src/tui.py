@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import shlex
 import subprocess
-import time
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
@@ -1631,28 +1630,17 @@ class ConfigurationApp(App[None]):
             return
         self.query_one(f"#{prefix}-name", Input).value = name
         loop = asyncio.get_running_loop()
-        progress = {"stage": "Cloning/pulling repository…"}
-        started = time.monotonic()
 
         def report_progress(stage: str) -> None:
             def update_stage() -> None:
                 if key not in self._repository_setup_active:
                     return
-                progress["stage"] = stage
-                elapsed = int(time.monotonic() - started)
-                status.update(f"{stage} ({elapsed}s elapsed)…")
+                status.update(stage)
 
             with suppress(RuntimeError):
                 loop.call_soon_threadsafe(update_stage)
 
-        async def heartbeat() -> None:
-            while True:
-                await asyncio.sleep(1)
-                elapsed = int(time.monotonic() - started)
-                status.update(f"{progress['stage']} ({elapsed}s elapsed)…")
-
         status.update("Cloning/pulling repository…")
-        heartbeat_task = asyncio.create_task(heartbeat())
         try:
             result = await asyncio.to_thread(
                 clone_and_index_repository,
@@ -1664,8 +1652,6 @@ class ConfigurationApp(App[None]):
         except (FileExistsError, OSError) as error:
             status.update(str(error))
             return
-        finally:
-            heartbeat_task.cancel()
         if not result.acquisition.succeeded:
             status.update(
                 self._result_message(

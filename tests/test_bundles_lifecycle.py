@@ -211,4 +211,4 @@ def test_helper_resolution_keeps_interpreter_environment(tmp_path, monkeypatch):
     install_uv_tools(["seed"], runner=runner)
     assert commands[0][-1] == "seed-cli"
     update_installation(managed_tools=("seed",), runner=runner)
-    assert commands[-1][-2:] == ["--upgrade", "seed-cli"]
+    assert commands[-1][-3:] == ["--force", "--upgrade", "seed-cli"]

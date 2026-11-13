@@ -6,6 +6,11 @@
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.
 - Support copying selected text across configuration and execution TUIs.
+- Show update stages and a completion message instead of successful package-manager
+  logs; replace existing managed helper executables during updates and identify the
+  failed package when an update fails.
+- Stream Git clone/pull progress and graph parsed-file counts into repository setup
+  status instead of displaying an elapsed-time heartbeat.
 
 - Restore code from merged PRs #48–52 after master was force-pushed back to the #47 tip.
   The recovery commit restores the recovered code tree without handoff documentation.
