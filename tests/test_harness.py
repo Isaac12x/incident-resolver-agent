@@ -1246,6 +1246,23 @@ async def test_connector_failure_and_callable_tools(config: Config) -> None:
 
 
 @pytest.mark.asyncio
+async def test_webhook_test_connection_explains_inbound_validation_and_keeps_factory() -> None:
+    config = ConnectorConfig(name="alerts", type="webhook", purpose="incident")
+    default_result = await ConnectorManager([config]).test_connection("alerts")
+    assert not default_result.connected
+    assert "inbound-only" in default_result.message
+    assert "configured harness webhook path" in default_result.message
+    assert "HMAC signature" in default_result.message
+
+    session = Mock(check_health=AsyncMock(), cleanup=AsyncMock())
+    factory = AsyncMock(return_value=session)
+    manager = ConnectorManager([config], {"alerts": factory})
+    injected_result = await manager.test_connection("alerts")
+    assert injected_result.connected
+    assert factory.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_default_mcp_connector_transports(monkeypatch: pytest.MonkeyPatch) -> None:
     import agents.mcp as agents_mcp
 

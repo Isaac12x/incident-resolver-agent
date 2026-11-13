@@ -236,3 +236,35 @@ Implementation e68f8b2. Initial check at 09:59 UTC and five-minute follow-up at
 10:04:47 UTC: open, CLEAN/mergeable, no general/inline comments, reviews, or
 configured CI checks. No feedback required integration. Monitoring completed for
 this turn; no background monitor remains active.
+
+## 2026-11-13 — Sources connection setup and TUI clarity
+
+Luna backend and TUI agents implemented this change under root orchestration on
+fix/tui-source-connection-setup from origin/master 327d3f0. No VISION.md exists.
+User reported Sources Test connection returning “no runtime adapter configured”
+after entering URL/type/purpose, with no adapter setup option.
+
+Evidence: ConnectorManager selects built-in factories by type for MCP, Loki,
+Grafana, and local logs. Webhooks intentionally have no outbound factory; the
+server receives incidents at {trigger.hook_path}/{connector}. The old generic
+error and unused URL/auth fields made intake look like an unconfigured adapter.
+
+The backend now explains inbound webhook validation without reporting fabricated
+success; injected webhook factories still probe normally. Sources includes
+per-type setup cards, hides unused webhook and stdio bearer-token fields,
+disables webhook outbound tests, and displays current webhook route/name and
+conditional HMAC instructions. Runtime/name edits update that guidance. Connection
+feedback uses pending/success/error states. Hidden legacy URL/auth values survive
+Save. Documentation and changelog explain automatic adapter selection.
+
+Validation: final full suite 690 passed, 94.49% coverage; per-file gates pass.
+Three new TUI regressions failed against the original TUI in an isolated archive
+and passed after repair. Expanded focused TUI/overview verification: 4 passed;
+backend/observability focused verification: 22 passed. First full run caught a
+lost Runtime cross-navigation hint; restored it without weakening the assertion.
+Whole-repository Ruff, compileall, lock check, wheel/sdist build, and diff checks
+pass. No static type checker or hosted preview is configured. Narrow terminal
+interaction tested at 64x28 and inspected at 62x22; content scrolls vertically.
+Independent Luna Standards and Spec reviews each reported zero outstanding issues.
+No live external connector credentials were used; no real incident was submitted.
+Publication and five-minute review follow-up are recorded below.

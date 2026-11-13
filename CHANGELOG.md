@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Clarify source setup in the TUI with type-specific guidance and fields. Explain
+  webhook intake instead of reporting a missing runtime adapter; retain connection
+  probes for MCP, Loki, Grafana, and local logs.
+
 - Make default installs and updates fetch merged default-branch code with refreshed
   source caches; keep explicit stable releases and release pins. Point README installs
   at the current installer instead of a stale release-attached script.
