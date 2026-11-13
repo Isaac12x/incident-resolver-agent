@@ -538,13 +538,30 @@ def main(argv: list[str] | None = None) -> None:
                 if load_config(args.config, create=False).repositories
                 else ()
             )
-        result = update_installation(channel=args.channel, managed_tools=managed_tools)
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
+
+        def update_progress(name: str) -> None:
+            label = {"seed": "seed-cli", "code-review-graph": "code-review-graph"}.get(
+                name, name
+            )
+            print(f"Updating {label}…", file=sys.stderr, flush=True)
+
+        result = update_installation(
+            channel=args.channel,
+            managed_tools=managed_tools,
+            progress=update_progress,
+        )
         if result.returncode:
+            command = getattr(result, "args", ())
+            package = command[-1] if command else "incident-agent"
+            diagnostic = (result.stderr or result.stdout or "uv returned an error").strip()
+            if "Executable already exists:" in diagnostic:
+                diagnostic = (
+                    "uv reported an executable-name conflict. Check `uv tool list` to identify "
+                    f"the existing owner. Details: {diagnostic}"
+                )
+            print(f"Update failed while updating {package}: {diagnostic}", file=sys.stderr)
             raise SystemExit(result.returncode)
+        print("Update complete.")
         return
     if args.command in {"doctor", "status"}:
         if args.command == "doctor" and args.install:

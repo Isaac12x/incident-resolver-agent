@@ -54,6 +54,46 @@ def test_update_returns_actual_uv_result(monkeypatch) -> None:
     assert result is expected
 
 
+def test_cli_update_reports_stages_without_installer_noise(capsys) -> None:
+    def update(**kwargs):
+        kwargs["progress"]("incident-agent")
+        assert "Updating incident-agent" in capsys.readouterr().err
+        kwargs["progress"]("seed")
+        assert "Updating seed-cli" in capsys.readouterr().err
+        return CompletedProcess(["uv"], 0, "Resolved 8 packages", "Installed 8 packages")
+
+    with patch("src.__main__.update_installation", side_effect=update):
+        main(["update", "nightly"])
+
+    captured = capsys.readouterr()
+    assert captured.out == "Update complete.\n"
+    assert captured.err == ""
+
+
+def test_update_reinstalls_managed_tools_and_reports_progress(monkeypatch) -> None:
+    monkeypatch.setattr("src.lifecycle.shutil.which", lambda _: "/usr/bin/uv")
+    commands = []
+    progress = []
+
+    def runner(command, **kwargs):
+        commands.append(command)
+        return CompletedProcess(command, 0, "installed", "")
+
+    update_installation(
+        managed_tools=("seed",), runner=runner, progress=progress.append
+    )
+
+    assert commands[1] == [
+        "/usr/bin/uv",
+        "tool",
+        "install",
+        "--force",
+        "--upgrade",
+        "seed-cli",
+    ]
+    assert progress == ["incident-agent", "seed"]
+
+
 def test_installation_source_resolves_release_pins(monkeypatch) -> None:
     from src.lifecycle import installation_source
 
@@ -517,7 +557,7 @@ def test_cli_eval_update_and_argument_free_run(tmp_path: Path, capsys) -> None:
     completed = CompletedProcess(["uv"], 0, "updated\n", "warning\n")
     with patch("src.__main__.update_installation", return_value=completed):
         main(["update"])
-    assert "updated" in capsys.readouterr().out
+    assert "Update complete" in capsys.readouterr().out
     with patch("src.__main__.update_installation", return_value=completed) as update:
         main(["update", "nightly"])
     assert update.call_args.kwargs["channel"] == "nightly"
@@ -577,7 +617,7 @@ def test_cli_bundle_status_doctor_and_eval_suites(
     assert report["failed"] == 0
 
 
-def test_cli_eval_dataset_errors_and_update_failure(tmp_path: Path) -> None:
+def test_cli_eval_dataset_errors_and_update_failure(tmp_path: Path, capsys) -> None:
     with pytest.raises(SystemExit, match="requires a JSON"):
         main(["eval", "--suite", "root-cause"])
     invalid = tmp_path / "invalid.jsonl"
@@ -587,11 +627,22 @@ def test_cli_eval_dataset_errors_and_update_failure(tmp_path: Path) -> None:
     with (
         patch(
             "src.__main__.update_installation",
-            return_value=CompletedProcess(["uv"], 2, "", "failed"),
+            return_value=CompletedProcess(
+                ["uv", "tool", "install", "seed-cli"],
+                2,
+                "",
+                "error: Executable already exists: seed (use --force to replace)",
+            ),
         ),
         pytest.raises(SystemExit, match="2"),
     ):
         main(["update"])
+    assert (
+        "Update failed while updating seed-cli: uv reported an executable-name conflict. "
+        "Check `uv tool list` to identify the existing owner. Details: "
+        "error: Executable already exists: seed (use --force to replace)"
+        in capsys.readouterr().err
+    )
 
 
 def test_application_uses_active_bundle_from_unrelated_directory(
