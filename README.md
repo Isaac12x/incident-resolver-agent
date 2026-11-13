@@ -97,7 +97,13 @@ Non-GitHub Git, local, and other custom source installations retain their uv sou
 normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE` or `INCIDENT_HARNESS_REPOSITORY` to
 deliberately change the nightly source; release version and asset overrides apply to stable updates.
 `incident-agent doctor` reports executable, credential, repository, and container
-readiness. `run` installs missing managed tools when dependency installation is enabled, then
+readiness in an aligned table, with green OK and red FAIL labels in terminals.
+Plugin and configured-source listings also use tables; use `plugins --json` or
+`connect --list --json` for machine-readable listings.
+Use `doctor --json` or `status --json` for structured readiness output. Color is disabled when
+piping output, when `NO_COLOR` is set, or with `TERM=dumb`; `FORCE_COLOR=1` enables
+color for redirected output unless either disable setting is present.
+`run` installs missing managed tools when dependency installation is enabled, then
 checks readiness before starting. The TUI Overview shows those checks.
 The installer accepts `INCIDENT_HARNESS_SOURCE` for a Git revision, fork, local path, or wheel;
 `INCIDENT_HARNESS_REPOSITORY` selects a fork that publishes GitHub release wheels.
