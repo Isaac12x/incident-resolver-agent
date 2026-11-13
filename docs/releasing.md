@@ -1,7 +1,8 @@
 # Releasing Incident Harness
 
-The curl installer resolves a versioned wheel from the GitHub release API. The asset
-is built from the tagged commit, so an installation does not need Git or a checkout.
+The default curl installer tracks the latest merged source and requires Git. In stable
+mode it resolves a versioned wheel from the GitHub release API. Release assets are built
+from the tagged commit; stable installations do not need Git or a checkout.
 Keep the version in `pyproject.toml` and the release tag in sync (for example, `0.3.0`
 and `v0.3.0`).
 
@@ -50,20 +51,24 @@ curl -fI https://github.com/Isaac12x/incident-resolver-agent/releases/latest/dow
 ## Installer behavior
 
 ```bash
-curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
 ```
 
-The default resolves and installs the latest release's versioned wheel. Set
-`INCIDENT_HARNESS_VERSION=v0.3.0` to pin a tag, or set
-`INCIDENT_HARNESS_REPOSITORY=owner/repository` to use a fork that publishes a wheel.
-`INCIDENT_HARNESS_RELEASE_ASSET` selects an exact asset name. For development
-or source based installs, `INCIDENT_HARNESS_SOURCE` takes precedence and can be a Git
-URL, local path, or wheel URL.
+The default fetches the repository's default branch with a refreshed source cache.
+`INCIDENT_HARNESS_CHANNEL=stable` selects the latest published release wheel.
+`INCIDENT_HARNESS_VERSION=v0.3.0` pins a release tag and selects stable mode when no
+channel is specified. An explicit release asset or SHA256 checksum also selects
+stable mode. `INCIDENT_HARNESS_REPOSITORY=owner/repository` selects a fork for either
+mode. `INCIDENT_HARNESS_SOURCE` overrides the source (Git URL, local path or wheel URL).
 
-Run `incident-agent update` to install the latest published release. To try changes
-merged since that release, run `incident-agent update nightly`; this installs from the
-repository's default branch and requires Git. Run it again to fetch newer commits,
-or run `incident-agent update` to return to the published release.
+`incident-agent update` and `incident-agent update nightly` fetch merged default-branch
+changes even if the package version stays unchanged. Use `incident-agent update stable`
+for the latest published release. Omitted-channel updates with VERSION/RELEASE_ASSET
+settings retain release pinning; explicit nightly rejects those settings. Default
+updates retain recorded custom non-GitHub/local sources and refresh them.
+Older installations need `incident-agent update nightly` once, or the installer above,
+to move past the old stable-only default. Release-attached installer scripts are snapshots;
+the README deliberately uses the current branch script so reinstalling picks up fixes.
 
 Managed helper tools are upgraded only after the main package succeeds. Restart any
 running agent services after updating so they load the installed code.

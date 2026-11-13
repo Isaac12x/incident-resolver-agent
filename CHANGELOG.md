@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Restore code from merged PRs #48–52 after master was force-pushed back to the #47 tip.
+  The recovery commit restores the recovered code tree without handoff documentation.
+- Clarify source setup in the TUI with type-specific guidance and fields. Explain
+  webhook intake instead of reporting a missing runtime adapter; retain connection
+  probes for MCP, Loki, Grafana, and local logs.
+- Show live clone/pull and code-graph setup stages with elapsed time in the TUI,
+  keep other controls responsive, and prevent duplicate setup runs.
+
+- Make default installs and updates fetch merged default-branch code with refreshed
+  source caches; keep explicit stable releases and release pins. Point README installs
+  at the current installer instead of a stale release-attached script.
+
+- Add `incident-agent version`, `--version`, and `version --json` to report the
+  installed package version and recorded Git revision without runtime configuration.
+
+- Format CLI readiness checks and source listings as readable tables, with terminal-aware
+  color and structured `doctor --json` / `status --json` output.
+
 - Explain at the top of Sources that connecting logs gives the agent investigation evidence.
 
 ## 0.3.0 - 2026-09-19

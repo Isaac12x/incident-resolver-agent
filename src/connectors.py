@@ -221,6 +221,13 @@ class ConnectorManager:
         if name not in self.configs:
             return ConnectorTestResult(name, False, "unknown connector")
         if name not in self.factories:
+            if self.configs[name].type == "webhook":
+                return ConnectorTestResult(
+                    name,
+                    False,
+                    "webhook is inbound-only; test it by sending an event to the configured "
+                    "harness webhook path (include an HMAC signature when webhook auth is enabled)",
+                )
             return ConnectorTestResult(name, False, "no runtime adapter configured")
         try:
             if name in self.sessions:

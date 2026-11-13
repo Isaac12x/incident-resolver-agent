@@ -36,6 +36,22 @@ incident-agent connect local-logs --name worker-logs --log-path /var/log/myapp/w
 With no arguments, `connect` opens the interactive connection form. Use
 `connect --list` to show configured names and their adapter types.
 
+The configuration TUI also configures sources under **Sources**. Choose a type
+to see its required fields and setup notes. The harness selects the built-in
+runtime adapter from the type; there is no separate adapter selector. Webhook
+sources are intake routes, so **Test connection** is unavailable for them. Use
+the displayed route and send a signed sample event when a webhook secret is
+configured. Save the configuration and restart the server or worker to load
+source changes.
+
+| TUI type | Setup fields | Runtime behavior |
+| --- | --- | --- |
+| Webhook | Name and Incident purpose; route and secret are on Runtime | Receives incident POSTs at `{hook_path}/{name}`; no outbound connection test. |
+| MCP | Transport, then command for stdio or URL for HTTP/SSE; capabilities | Starts the selected MCP server and exposes its configured tools. |
+| Loki | URL, optional token environment variable and tenant ID | Built-in read-only Loki log and metric queries. |
+| Grafana | URL, datasource UID, optional token environment variable | Built-in read-only queries against the configured Loki datasource. |
+| Local logs | Absolute host log path | Built-in read-only bounded log tail; no service URL or token. |
+
 The common options are:
 
 | Option | Use |

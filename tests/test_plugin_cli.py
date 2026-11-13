@@ -26,8 +26,11 @@ def test_plugins_lists_catalog_as_json(capsys: pytest.CaptureFixture[str]) -> No
 def test_plugins_lists_human_catalog(capsys: pytest.CaptureFixture[str]) -> None:
     cli.main(["plugins", "list"])
     output = capsys.readouterr().out
-    assert "mcp:" in output
-    assert "[logs]" in output
+    assert "PLUGIN" in output
+    assert "DESCRIPTION" in output
+    assert "CAPABILITIES" in output
+    assert "mcp" in output
+    assert "logs" in output
 
 
 def test_connect_adds_two_named_instances_and_lists_secret_free(tmp_path: Path, capsys) -> None:
@@ -35,7 +38,9 @@ def test_connect_adds_two_named_instances_and_lists_secret_free(tmp_path: Path, 
     cli.main(["--config", str(path), "connect", "webhook", "--name", "alerts-a"])
     cli.main(["--config", str(path), "connect", "webhook", "--name", "alerts-b"])
     cli.main(["--config", str(path), "connect", "--list"])
-    assert "alerts-a\twebhook" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "NAME" in output and "TYPE" in output and "CAPABILITIES" in output
+    assert "alerts-a" in output and "webhook" in output
     assert [item.name for item in load_config(path, create=False).connectors] == [
         "alerts-a",
         "alerts-b",
@@ -63,9 +68,21 @@ def test_connect_list_hides_endpoint_and_secret_values(tmp_path: Path, capsys) -
     capsys.readouterr()
     cli.main(["--config", str(path), "connect", "--list"])
     output = capsys.readouterr().out
-    assert "tools\tmcp\tlogs" in output
+    assert "tools" in output and "mcp" in output and "logs" in output
     assert "private.example" not in output
     assert "PRIVATE_TOKEN_ENV" not in output
+
+
+def test_connect_list_has_machine_readable_json(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "config.toml"
+    cli.main(["--config", str(path), "connect", "webhook", "--name", "alerts"])
+    capsys.readouterr()
+
+    cli.main(["--config", str(path), "connect", "--list", "--json"])
+
+    assert json.loads(capsys.readouterr().out) == [
+        {"name": "alerts", "type": "webhook", "capabilities": []}
+    ]
 
 
 def test_duplicate_connect_does_not_mutate_config(tmp_path: Path) -> None:
