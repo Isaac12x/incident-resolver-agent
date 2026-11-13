@@ -201,3 +201,38 @@ Published implementation c903991. Initial review check at 08:50 UTC and five-min
 follow-up at 08:55:47 UTC: open, CLEAN/mergeable, no general/inline comments, reviews,
 or configured CI checks. No feedback required changes. Monitoring completed for
 this turn; no background monitor remains active.
+
+## 2026-11-13 — Update and reinstall merged changes
+
+Luna implementation, regression/spec and standards-review agents worked under root
+orchestration on fix/update-latest-source from origin/master 0686a78. No VISION.md.
+User reported update and README reinstall missing merged changes. GitHub evidence:
+latest release is still v0.3.0 (2026-09-19); merged CLI changes are on master. Both
+old defaults selected that release; the README also downloaded its frozen installer.
+
+Default installs now select refreshed Git default-branch source; bare updates do the
+same for recorded GitHub installations. Explicit stable and release pins remain.
+Unknown/custom/local installations retain uv's recorded source. Installer reinstalls
+refresh all sources; explicit nightly/release-pin conflicts fail. README uses the
+current master installer and documents one-time `update nightly` for older CLIs.
+Updated release/configuration documentation and changelog. No stable release published
+and no user-installed CLI modified. These source changes require merging the PR to
+reach default-branch installs; the existing nightly command already retrieves merged
+CLI version/color changes.
+
+Validation: final full suite 686 passed, 94.48% coverage; focused suite 44 passed,
+plus the final expanded real Git regression passed. The real regression uses isolated
+uv dirs and a dependency-free Git package with an unchanged version: before -> after
+-> custom executable output, clearing SOURCE on the last update to verify provenance
+preservation. This caught uv rejecting `tool upgrade --refresh`; the corrected
+`--reinstall-package` path passed. Final repository Ruff, shell syntax, compileall,
+lock/build and diff checks pass. No static type checker or hosted preview configured.
+Independent reviewer installed the actual public v0.3.0 wheel in isolated uv dirs:
+version failed initially, then update nightly fetched 0686a78 and version succeeded.
+Initial reviewer lint findings were resolved; final spec review has no remaining issues.
+
+PR #50: https://github.com/Isaac12x/incident-resolver-agent/pull/50
+Implementation e68f8b2. Initial check at 09:59 UTC and five-minute follow-up at
+10:04:47 UTC: open, CLEAN/mergeable, no general/inline comments, reviews, or
+configured CI checks. No feedback required integration. Monitoring completed for
+this turn; no background monitor remains active.
