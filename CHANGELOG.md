@@ -5,6 +5,8 @@
 - Clarify source setup in the TUI with type-specific guidance and fields. Explain
   webhook intake instead of reporting a missing runtime adapter; retain connection
   probes for MCP, Loki, Grafana, and local logs.
+- Show live clone/pull and code-graph setup stages with elapsed time in the TUI,
+  keep other controls responsive, and prevent duplicate setup runs.
 
 - Make default installs and updates fetch merged default-branch code with refreshed
   source caches; keep explicit stable releases and release pins. Point README installs

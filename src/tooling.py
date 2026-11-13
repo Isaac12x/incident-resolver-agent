@@ -539,6 +539,7 @@ def clone_and_index_repository(
     destination: Path | str,
     *,
     runner: CommandRunner = subprocess.run,
+    on_progress: Callable[[str], None] | None = None,
 ) -> RepositorySetupResult:
     """Clone or fast-forward a managed checkout, then generate the repository graph."""
     target = Path(destination).expanduser().resolve()
@@ -546,10 +547,16 @@ def clone_and_index_repository(
     if target.exists():
         if not (target / ".git").exists():
             raise FileExistsError(f"repository destination is not a Git checkout: {target}")
+        if on_progress:
+            on_progress("Pulling latest changes…")
         acquisition = _run(("git", "-C", str(target), "pull", "--ff-only"), target.parent, runner)
     else:
+        if on_progress:
+            on_progress("Cloning repository…")
         acquisition = _run(("git", "clone", clone_url, str(target)), target.parent, runner)
     if not acquisition.succeeded:
         return RepositorySetupResult(target, acquisition)
+    if on_progress:
+        on_progress("Building code review graph…")
     code_review_graph = build_repository_graphs(target, runner=runner)
     return RepositorySetupResult(target, acquisition, code_review_graph)

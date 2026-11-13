@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import shlex
 import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -204,6 +206,7 @@ class ConfigurationApp(App[None]):
         self._connector_keys: list[str] = []
         self._application_keys: list[str] = []
         self._github_repositories: dict[str, dict[str, GitHubRepository]] = {}
+        self._repository_setup_active: set[str] = set()
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="content", initial="overview-tab"):
@@ -959,7 +962,7 @@ class ConfigurationApp(App[None]):
                 self._input(repository.clone_url, f"{prefix}-clone-url"),
                 f"{prefix}-clone-url-field",
             ),
-            self._button("Clone/pull and build graphs", f"setup-{key}", variant="primary"),
+            self._button("Clone/pull and build code graph", f"setup-{key}", variant="primary"),
             Static("", id=f"repo-status-{key}", classes="inline-status", markup=False),
             self._field(
                 "Local checkout",
@@ -1612,6 +1615,19 @@ class ConfigurationApp(App[None]):
         status.update(f"Loaded {len(repositories)} GitHub repositories. Select one above.")
 
     async def _setup_repository(self, key: str) -> None:
+        if key in self._repository_setup_active:
+            return
+        form = self.query_one(f"#{key}", Vertical)
+        was_disabled = form.disabled
+        self._repository_setup_active.add(key)
+        form.disabled = True
+        try:
+            await self._setup_repository_flow(key)
+        finally:
+            form.disabled = was_disabled
+            self._repository_setup_active.discard(key)
+
+    async def _setup_repository_flow(self, key: str) -> None:
         prefix = f"repo-{key}"
         status = self.query_one(f"#repo-status-{key}", Static)
         clone_url = self._value(f"{prefix}-clone-url").strip()
@@ -1630,17 +1646,42 @@ class ConfigurationApp(App[None]):
             status.update(str(error))
             return
         self.query_one(f"#{prefix}-name", Input).value = name
-        status.update("Cloning/pulling the repository, then building both code graphs…")
+        loop = asyncio.get_running_loop()
+        progress = {"stage": "Cloning/pulling repository…"}
+        started = time.monotonic()
+
+        def report_progress(stage: str) -> None:
+            def update_stage() -> None:
+                if key not in self._repository_setup_active:
+                    return
+                progress["stage"] = stage
+                elapsed = int(time.monotonic() - started)
+                status.update(f"{stage} ({elapsed}s elapsed)…")
+
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(update_stage)
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(1)
+                elapsed = int(time.monotonic() - started)
+                status.update(f"{progress['stage']} ({elapsed}s elapsed)…")
+
+        status.update("Cloning/pulling repository…")
+        heartbeat_task = asyncio.create_task(heartbeat())
         try:
             result = await asyncio.to_thread(
                 clone_and_index_repository,
                 clone_url,
                 destination,
                 runner=self.command_runner,
+                on_progress=report_progress,
             )
         except (FileExistsError, OSError) as error:
             status.update(str(error))
             return
+        finally:
+            heartbeat_task.cancel()
         if not result.acquisition.succeeded:
             status.update(
                 self._result_message(
@@ -1669,7 +1710,7 @@ class ConfigurationApp(App[None]):
             status.update(f"Ready: pulled, indexed, and saved {name}.")
             self._set_status(f"Saved {self.path}")
             self._refresh_overview()
-        except (TypeError, ValueError) as error:
+        except (OSError, TypeError, ValueError) as error:
             status.update(f"Repository is indexed; correct the remaining form error: {error}")
 
     async def _test_connector(self, key: str) -> None:
@@ -1780,7 +1821,12 @@ class ConfigurationApp(App[None]):
             await self._load_github_repositories(button_id.removeprefix("github-login-"))
             return
         if button_id.startswith("setup-repository-"):
-            await self._setup_repository(button_id.removeprefix("setup-"))
+            key = button_id.removeprefix("setup-")
+            self.run_worker(
+                self._setup_repository(key),
+                name=f"repository-setup-{key}",
+                group=f"repository-setup-{key}",
+            )
             return
         if button_id.startswith("test-connector-"):
             await self._test_connector(button_id.removeprefix("test-"))

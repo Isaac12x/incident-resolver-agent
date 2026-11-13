@@ -275,3 +275,45 @@ follow-up at 11:26:14 UTC: open, CLEAN/mergeable, no general/inline comments,
 reviews, or configured CI checks. No feedback required integration. GitHub
 connector lacked PR-create permission; authenticated gh published the PR.
 Monitoring completed for this turn; no background monitor remains active.
+
+## 2026-11-13 — Live repository setup progress in the TUI
+
+Luna implementation, regression/spec, and standards agents worked under root
+orchestration on fix/tui-repository-progress in /tmp/incident-harness-tui-progress,
+from origin/master 327d3f08. No VISION.md exists. The original checkout's
+uncommitted source-connection work was preserved.
+
+The setup button awaited the entire clone/index operation in Textual's event
+handler and displayed one static message. Setup now runs in a Textual worker,
+reports clone/pull and code-review graph stages immediately, and updates elapsed
+time every second. The repository form is disabled during setup to prevent
+duplicate runs or changing/removing its target; other controls remain usable.
+Cleanup restores the form and stops progress updates on completion/failure.
+The button now correctly refers to one graph. Existing command errors remain
+visible, and save errors are reported. No subprocess percentage or ETA is claimed.
+
+Validation: full suite 687 passed, 94.48% coverage (261 resource/deprecation
+warnings). Final focused regression run: 3 passed, covering elapsed progress,
+responsive buttons, duplicate prevention, graph failure cleanup, existing errors,
+and pull-stage callbacks; the pull test and final assertions were added after
+the full-suite collection. Ruff, compileall, package sdist/wheel build, and
+diff checks pass. No static type checker or hosted preview is configured.
+Independent Standards review: 0 findings; Spec review: 0 findings.
+Publication and review follow-up recorded below.
+
+PR #51: https://github.com/Isaac12x/incident-resolver-agent/pull/51
+Implementation e1c8a35. Initial review check at 11:20 UTC: open, CLEAN/mergeable,
+no general/inline comments, reviews, or configured CI checks. GitHub connector
+could read but could not create the PR (403 integration permissions); authenticated
+local gh created it successfully.
+
+Regression red proof used a separate archived copy of baseline 327d3f08 with the
+new test: it failed at the absent setup-form disable. Moving the heartbeat assertion
+before that check in the archived copy also failed because elapsed time did not
+advance during cloning. The committed test passes with the fix. The live worktree
+was left clean; no baseline source was restored over implementation changes.
+
+Five-minute review follow-up at 11:26:03 UTC on head d79a4f8: open,
+CLEAN/mergeable, no general/inline comments, reviews, or configured CI checks.
+No feedback required changes. Monitoring completed for this turn; no background
+monitor remains active.

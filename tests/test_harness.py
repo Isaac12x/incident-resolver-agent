@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -2375,6 +2376,122 @@ async def test_tui_repository_and_github_failures_are_reported(tmp_path: Path) -
         app.query_one("#save", Button).press()
         await pilot.pause()
         assert "must be a number" in app.query_one("#status", Static).render().plain
+
+
+@pytest.mark.asyncio
+async def test_tui_repository_setup_reports_live_stages_and_cleans_up_on_failure(
+    tmp_path: Path,
+) -> None:
+    clone_entered = threading.Event()
+    release_clone = threading.Event()
+    graph_entered = threading.Event()
+    release_graph = threading.Event()
+    clone_calls = []
+
+    def runner(command, **_kwargs):  # noqa: ANN001, ANN202
+        if command[:2] == ["git", "clone"]:
+            clone_calls.append(command)
+            clone_entered.set()
+            assert release_clone.wait(10), "test did not release clone runner"
+            destination = Path(command[-1])
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / ".git").mkdir()
+            return subprocess.CompletedProcess(command, 0, "cloned", "")
+        if Path(command[0]).name == "code-review-graph" and command[1] == "build":
+            graph_entered.set()
+            assert release_graph.wait(10), "test did not release graph runner"
+            return subprocess.CompletedProcess(command, 4, "", "graph failed")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    async def wait_until(predicate, message: str) -> None:
+        for _ in range(200):
+            if predicate():
+                return
+            await pilot.pause(0.02)
+        raise AssertionError(message)
+
+    path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / "runtime"), path)
+    app = ConfigurationApp(path, command_runner=runner)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.query_one(TabbedContent).active = "repositories-tab"
+        app.query_one("#add-repository", Button).press()
+        await pilot.pause()
+        key = "repository-0"
+        app.query_one("#repo-repository-0-clone-url", Input).value = (
+            "https://github.com/company/application"
+        )
+
+        app.query_one("#setup-repository-0", Button).press()
+        try:
+            await wait_until(clone_entered.is_set, "clone command did not start")
+            await wait_until(
+                lambda: "Cloning"
+                in app.query_one(f"#repo-status-{key}", Static).render().plain,
+                "clone progress was not displayed",
+            )
+            await wait_until(
+                lambda: "1s" in app.query_one(f"#repo-status-{key}", Static).render().plain,
+                "elapsed time did not advance while clone was blocked",
+            )
+            assert app.query_one("#repository-0").disabled
+            app.query_one("#setup-repository-0", Button).press()
+            await pilot.pause(0.05)
+            assert len(clone_calls) == 1
+            app.query_one(TabbedContent).active = "connections-tab"
+            await pilot.pause(0.05)
+            app.query_one("#add-connector", Button).press()
+            await pilot.pause(0.05)
+            assert app.query_one("#connector-connector-1-url", Input).display
+
+            release_clone.set()
+            await wait_until(graph_entered.is_set, "graph command did not start")
+            await wait_until(
+                lambda: "Building code review graph"
+                in app.query_one(f"#repo-status-{key}", Static).render().plain,
+                "graph progress was not displayed",
+            )
+            app.query_one(TabbedContent).active = "repositories-tab"
+            await pilot.pause(0.05)
+
+            release_graph.set()
+            await wait_until(
+                lambda: "Graph generation failed"
+                in app.query_one(f"#repo-status-{key}", Static).render().plain,
+                "graph failure was not reported after progress",
+            )
+            assert not load_config(path).repositories
+            assert not app.query_one("#repository-0").disabled
+            await pilot.pause(1.05)
+            assert "Graph generation failed" in app.query_one(
+                f"#repo-status-{key}", Static
+            ).render().plain
+        finally:
+            release_clone.set()
+            release_graph.set()
+
+
+def test_clone_and_index_reports_pull_and_graph_stages(tmp_path: Path) -> None:
+    destination = tmp_path / "owner" / "repo"
+    (destination / ".git").mkdir(parents=True)
+    commands = []
+    stages = []
+
+    def runner(command, **_kwargs):  # noqa: ANN001, ANN202
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    result = clone_and_index_repository(
+        "https://github.com/owner/repo.git",
+        destination,
+        runner=runner,
+        on_progress=stages.append,
+    )
+
+    assert result.succeeded
+    assert stages == ["Pulling latest changes…", "Building code review graph…"]
+    assert commands[0][:4] == ["git", "-C", str(destination), "pull"]
 
 
 def test_application_build_and_cli_dispatch(
