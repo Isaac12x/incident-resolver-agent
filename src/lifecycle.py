@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.metadata import distribution
 from pathlib import Path
@@ -301,7 +302,11 @@ def ensure_user_config(path: Path) -> None:
 
 
 def update_installation(
-    *, channel: str | None = None, runner=subprocess.run, managed_tools: tuple[str, ...] = ()
+    *,
+    channel: str | None = None,
+    runner=subprocess.run,
+    managed_tools: tuple[str, ...] = (),
+    progress: Callable[[str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Update the isolated uv tool installation and return the real command result.
 
@@ -382,6 +387,8 @@ def update_installation(
         ]
     else:
         command = [uv, "tool", "upgrade", PACKAGE_NAME]
+    if progress:
+        progress("incident-agent")
     result = runner(
         command,
         capture_output=True,
@@ -393,8 +400,10 @@ def update_installation(
     from .tooling import TOOL_PACKAGES
 
     for tool in managed_tools:
+        if progress:
+            progress(tool)
         upgraded = runner(
-            [uv, "tool", "install", "--upgrade", TOOL_PACKAGES.get(tool, tool)],
+            [uv, "tool", "install", "--force", "--upgrade", TOOL_PACKAGES.get(tool, tool)],
             capture_output=True,
             text=True,
             check=False,
