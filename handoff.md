@@ -171,3 +171,33 @@ at 16:23:38 UTC: open, CLEAN/mergeable, no general or inline comments, reviews,
 or configured CI checks. No feedback required integration. The GitHub connector
 returned an integration-permission 403 for PR creation; authenticated gh succeeded.
 Review monitoring completed for this turn; no background monitor remains active.
+
+## 2026-11-13 — Installed CLI version reporting
+
+Implemented with Luna source, test/spec and standards-review agents, root orchestrating,
+on feat/cli-version from origin/master 3f761a2 (prior CLI formatting PR #48 merged).
+No VISION.md exists. Original `uv run incident-agent version` exited 2 as unknown.
+Updates already use uv plus installed provenance and release resolution; they do not
+require a CLI version command. Added version, global --version and version --json
+using installed distribution metadata. Optional recorded VCS commit distinguishes
+same-version nightly revisions; raw source URLs are never printed. Missing package
+metadata reports unknown, and absent/malformed optional provenance yields null commit.
+Version dispatch precedes config resolution and does not bootstrap, probe tools or
+contact the network. Updater behavior is unchanged. README/help/changelog updated.
+
+Validation: full suite 678 passed, 94.46% coverage (version module 93%). Two further
+metadata edge-case tests and stronger side-effect assertions were added afterward;
+final focused suite 10 passed, targeted version coverage 100%. A targeted coverage
+invocation hit unrelated global per-file gates, so it is not a full-suite success.
+Ruff, compileall, lock check, build and diff checks pass. Built wheel smoke installed
+in an isolated uv environment outside checkout correctly reports version JSON.
+No static type checker or hosted preview is configured. Standards: no issues; spec:
+no blocking issues. Reviewer suggested restricting VCS commit to Git; retained generic
+commit reporting because CLI labels it generically and other VCS revisions are valid.
+Publication and review follow-up recorded below.
+
+PR #49: https://github.com/Isaac12x/incident-resolver-agent/pull/49
+Published implementation c903991. Initial review check at 08:50 UTC and five-minute
+follow-up at 08:55:47 UTC: open, CLEAN/mergeable, no general/inline comments, reviews,
+or configured CI checks. No feedback required changes. Monitoring completed for
+this turn; no background monitor remains active.
