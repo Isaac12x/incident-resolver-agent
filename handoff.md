@@ -262,3 +262,15 @@ the full-suite collection. Ruff, compileall, package sdist/wheel build, and
 diff checks pass. No static type checker or hosted preview is configured.
 Independent Standards review: 0 findings; Spec review: 0 findings.
 Publication and review follow-up recorded below.
+
+PR #51: https://github.com/Isaac12x/incident-resolver-agent/pull/51
+Implementation e1c8a35. Initial review check at 11:20 UTC: open, CLEAN/mergeable,
+no general/inline comments, reviews, or configured CI checks. GitHub connector
+could read but could not create the PR (403 integration permissions); authenticated
+local gh created it successfully.
+
+Regression red proof used a separate archived copy of baseline 327d3f08 with the
+new test: it failed at the absent setup-form disable. Moving the heartbeat assertion
+before that check in the archived copy also failed because elapsed time did not
+advance during cloning. The committed test passes with the fix. The live worktree
+was left clean; no baseline source was restored over implementation changes.
