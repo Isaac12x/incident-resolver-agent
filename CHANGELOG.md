@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Show live clone/pull and code-graph setup stages with elapsed time in the TUI,
+  keep other controls responsive, and prevent duplicate setup runs.
+
 - Make default installs and updates fetch merged default-branch code with refreshed
   source caches; keep explicit stable releases and release pins. Point README installs
   at the current installer instead of a stale release-attached script.
