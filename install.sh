@@ -1,13 +1,28 @@
 #!/usr/bin/env sh
 set -eu
 
-# Curlable installer. By default this installs the wheel published on the latest
-# GitHub release. Override INCIDENT_HARNESS_SOURCE for a fork, Git revision, or
-# directly hosted wheel. INCIDENT_HARNESS_VERSION may be a tag such as v0.3.0.
+# Curlable installer. By default this installs the latest default-branch source.
+# Set INCIDENT_HARNESS_CHANNEL=stable to install a release wheel. Override
+# INCIDENT_HARNESS_SOURCE for a fork, Git revision, or directly hosted wheel.
+# INCIDENT_HARNESS_VERSION may be a tag such as v0.3.0.
 REPOSITORY=${INCIDENT_HARNESS_REPOSITORY:-Isaac12x/incident-resolver-agent}
 VERSION=${INCIDENT_HARNESS_VERSION:-latest}
 ASSET=${INCIDENT_HARNESS_RELEASE_ASSET:-}
+CHANNEL=${INCIDENT_HARNESS_CHANNEL:-}
 PACKAGE=${INCIDENT_HARNESS_PACKAGE:-incident-harness}
+
+if [ -n "$CHANNEL" ] && [ "$CHANNEL" != stable ] && [ "$CHANNEL" != nightly ]; then
+  printf '%s\n' 'INCIDENT_HARNESS_CHANNEL must be stable or nightly.' >&2
+  exit 1
+fi
+
+if [ "$CHANNEL" = nightly ] && {
+  [ "${INCIDENT_HARNESS_VERSION+x}" = x ] || [ -n "$ASSET" ] ||
+  [ -n "${INCIDENT_HARNESS_SHA256:-}" ];
+}; then
+  printf '%s\n' 'INCIDENT_HARNESS_VERSION, INCIDENT_HARNESS_RELEASE_ASSET, and INCIDENT_HARNESS_SHA256 require the stable channel.' >&2
+  exit 1
+fi
 
 if [ -n "${INCIDENT_HARNESS_SOURCE:-}" ]; then
   SOURCE=$INCIDENT_HARNESS_SOURCE
@@ -18,7 +33,10 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ -z "${INCIDENT_HARNESS_SOURCE:-}" ]; then
+if [ -z "${INCIDENT_HARNESS_SOURCE:-}" ] && {
+  [ "$CHANNEL" = stable ] || [ "${INCIDENT_HARNESS_VERSION+x}" = x ] || [ -n "$ASSET" ] ||
+  [ -n "${INCIDENT_HARNESS_SHA256:-}" ];
+}; then
   if ! command -v curl >/dev/null 2>&1; then
     printf '%s\n' 'curl is required to download the release wheel.' >&2
     exit 1
@@ -69,6 +87,11 @@ if [ -z "${INCIDENT_HARNESS_SOURCE:-}" ]; then
   fi
 fi
 
-uv tool install --force --from "$SOURCE" "$PACKAGE"
+if [ -z "${INCIDENT_HARNESS_SOURCE:-}" ] && [ "$CHANNEL" != stable ] &&
+  [ "${INCIDENT_HARNESS_VERSION+x}" != x ] && [ -z "$ASSET" ] &&
+  [ -z "${INCIDENT_HARNESS_SHA256:-}" ]; then
+  SOURCE="git+https://github.com/$REPOSITORY.git"
+fi
+uv tool install --refresh --force --from "$SOURCE" "$PACKAGE"
 printf '%s\n' "Installed $PACKAGE in uv's isolated tool environment."
 printf '%s\n' 'Run: incident-agent init && incident-agent config'

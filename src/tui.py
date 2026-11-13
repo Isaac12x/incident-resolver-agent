@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shlex
 import subprocess
+import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Literal
 
@@ -13,6 +16,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button,
     Checkbox,
@@ -161,6 +165,13 @@ class ConfigurationApp(App[None]):
     .actions-row Button { margin-bottom: 0; }
     #repositories-list, #connectors-list, #applications-list { height: auto; }
     .inline-status { height: auto; min-height: 0; color: #787878; margin-bottom: 0; }
+    .source-type-help {
+        height: auto; color: #a9b1d6; background: $boost;
+        border-left: tall $primary; padding: 1 2; margin: 0 0 1 0;
+    }
+    .inline-status.pending { color: #e0af68; }
+    .inline-status.success { color: $success; }
+    .inline-status.error { color: $error; }
     #status {
         width: 1fr; height: auto; max-height: 3; overflow-y: auto; padding: 0 1;
         background: $background; color: #787878; border-top: none;
@@ -195,6 +206,7 @@ class ConfigurationApp(App[None]):
         self._connector_keys: list[str] = []
         self._application_keys: list[str] = []
         self._github_repositories: dict[str, dict[str, GitHubRepository]] = {}
+        self._repository_setup_active: set[str] = set()
 
     def compose(self) -> ComposeResult:
         with TabbedContent(id="content", initial="overview-tab"):
@@ -854,22 +866,23 @@ class ConfigurationApp(App[None]):
             forms.append(self._connector_form(key, connector))
         container = Vertical(*forms, id="connectors-list")
         empty = Static(
-            "No connections yet. Add Grafana, Loki, webhook, or MCP sources for intake and "
-            "observability. CLI: incident-agent connect",
+            "No sources configured. Add a webhook for incoming incidents, or an MCP, Loki, "
+            "Grafana, or local log source for investigation tools.",
             id="connectors-empty",
             classes="empty",
         )
         empty.display = not forms
         return [
             Static(
-                "Connect to your logs to get the agent access to investigation evidence "
-                "needed to fix the bug",
+                "Choose how the harness receives incidents or gives the agent "
+                "investigation evidence.",
                 id="sources-guidance",
                 classes="page-lead",
             ),
             Static(
-                "Incident intake, PR output, and observability feeds. "
-                "Host process settings are on Runtime.",
+                "MCP, Loki, Grafana, and local logs provide runtime tools. Webhook configures "
+                "incident intake and does not need an endpoint URL or connection test. "
+                "Host and intake settings are on Runtime.",
                 id="sources-lead",
                 classes="page-lead",
             ),
@@ -949,7 +962,7 @@ class ConfigurationApp(App[None]):
                 self._input(repository.clone_url, f"{prefix}-clone-url"),
                 f"{prefix}-clone-url-field",
             ),
-            self._button("Clone/pull and build graphs", f"setup-{key}", variant="primary"),
+            self._button("Clone/pull and build code graph", f"setup-{key}", variant="primary"),
             Static("", id=f"repo-status-{key}", classes="inline-status", markup=False),
             self._field(
                 "Local checkout",
@@ -1059,6 +1072,10 @@ class ConfigurationApp(App[None]):
         auth_field.display = visible["auth"]
         tenant_field.display = visible["tenant"]
         datasource_field.display = visible["datasource"]
+        test_button = self._button("Test connection", f"test-{key}", variant="primary")
+        test_button.disabled = connector.type == "webhook"
+        if connector.type == "webhook":
+            test_button.tooltip = "Webhook is intake-only; send a signed test event to the hook."
         return Vertical(
             Label(connector.name or "New connection", classes="card-title"),
             self._pair(
@@ -1079,6 +1096,12 @@ class ConfigurationApp(App[None]):
                     ("mcp", "webhook", "loki", "grafana", "local-logs"),
                 ),
             ),
+            Static(
+                self._connector_description(connector.type, key, connector.name),
+                id=f"{prefix}-type-help",
+                classes="source-type-help",
+                markup=False,
+            ),
             log_field,
             transport_field,
             url_field,
@@ -1091,7 +1114,7 @@ class ConfigurationApp(App[None]):
                 self._input(", ".join(connector.capabilities), f"{prefix}-capabilities"),
             ),
             Horizontal(
-                self._button("Test connection", f"test-{key}", variant="primary"),
+                test_button,
                 self._button("Remove", f"remove-{key}", variant="warning"),
                 classes="actions-row",
             ),
@@ -1425,16 +1448,58 @@ class ConfigurationApp(App[None]):
     def _connector_visible(kind: str, transport: str) -> dict[str, bool]:
         mcp = kind == "mcp"
         stdio = mcp and transport == "stdio"
-        httpish = kind in {"webhook", "loki", "grafana"} or (mcp and not stdio)
+        httpish = kind in {"loki", "grafana"} or (mcp and not stdio)
         return {
             "log-path": kind == "local-logs",
             "transport": mcp,
             "url": httpish,
             "command": stdio,
-            "auth": kind != "local-logs",
+            "auth": kind in {"loki", "grafana"} or (mcp and not stdio),
             "tenant": kind == "loki",
             "datasource": kind == "grafana",
         }
+
+    def _connector_description(
+        self, kind: str, key: str | None = None, connector_name: str = ""
+    ) -> str:
+        if kind == "webhook":
+            try:
+                hook_path = self._value("trigger-hook-path").strip()
+                secret_env = self._value("server-webhook-secret-env").strip()
+            except NoMatches:
+                hook_path = self.config.trigger.hook_path
+                secret_env = self.config.server.webhook_secret_env
+            name = connector_name
+            if key is not None:
+                with contextlib.suppress(NoMatches):
+                    name = self._value(f"connector-{key}-name").strip()
+            if not name:
+                name = "{name}"
+            return (
+                f"POST incidents to {hook_path.rstrip('/')}/{name}. When {secret_env} is set, "
+                "sign the raw request body with HMAC-SHA256 and send its hex digest in "
+                "X-Agent-Signature-256. If intake authentication is required, set that "
+                "environment variable on the harness host. Set Purpose to Incident. "
+                "This intake source has no outbound connection to test."
+            )
+        return {
+            "mcp": (
+                "Connect an MCP tool server. Choose stdio for a local command or HTTP/SSE "
+                "for a remote endpoint; add capabilities such as logs to expose tools."
+            ),
+            "loki": (
+                "Built-in read-only Loki log and metric queries. Use a credential-free HTTP(S) "
+                "URL and put bearer credentials in the harness environment."
+            ),
+            "grafana": (
+                "Built-in read-only Grafana Loki queries. Provide the Grafana URL and Loki "
+                "datasource UID; put bearer credentials in the harness environment."
+            ),
+            "local-logs": (
+                "Built-in read-only access to a bounded tail of a regular log file on the "
+                "harness host. The path must be absolute."
+            ),
+        }.get(kind, "Choose a source type to see its setup requirements.")
 
     def _set_connector_shape(self, key: str) -> None:
         prefix = f"connector-{key}"
@@ -1443,6 +1508,16 @@ class ConfigurationApp(App[None]):
         )
         for name, shown in visible.items():
             self.query_one(f"#{prefix}-{name}-field").display = shown
+        kind = self._selected(f"{prefix}-type")
+        self.query_one(f"#{prefix}-type-help", Static).update(
+            self._connector_description(kind, key)
+        )
+        test = self.query_one(f"#test-{key}", Button)
+        test.disabled = kind == "webhook"
+        test.tooltip = (
+            "Webhook is intake-only; send a signed test event to the hook."
+            if kind == "webhook" else None
+        )
 
     def _set_model_runtime(self, runtime: str) -> None:
         subscription = runtime == "subscription-cli"
@@ -1540,6 +1615,19 @@ class ConfigurationApp(App[None]):
         status.update(f"Loaded {len(repositories)} GitHub repositories. Select one above.")
 
     async def _setup_repository(self, key: str) -> None:
+        if key in self._repository_setup_active:
+            return
+        form = self.query_one(f"#{key}", Vertical)
+        was_disabled = form.disabled
+        self._repository_setup_active.add(key)
+        form.disabled = True
+        try:
+            await self._setup_repository_flow(key)
+        finally:
+            form.disabled = was_disabled
+            self._repository_setup_active.discard(key)
+
+    async def _setup_repository_flow(self, key: str) -> None:
         prefix = f"repo-{key}"
         status = self.query_one(f"#repo-status-{key}", Static)
         clone_url = self._value(f"{prefix}-clone-url").strip()
@@ -1558,17 +1646,42 @@ class ConfigurationApp(App[None]):
             status.update(str(error))
             return
         self.query_one(f"#{prefix}-name", Input).value = name
-        status.update("Cloning/pulling the repository, then building both code graphs…")
+        loop = asyncio.get_running_loop()
+        progress = {"stage": "Cloning/pulling repository…"}
+        started = time.monotonic()
+
+        def report_progress(stage: str) -> None:
+            def update_stage() -> None:
+                if key not in self._repository_setup_active:
+                    return
+                progress["stage"] = stage
+                elapsed = int(time.monotonic() - started)
+                status.update(f"{stage} ({elapsed}s elapsed)…")
+
+            with suppress(RuntimeError):
+                loop.call_soon_threadsafe(update_stage)
+
+        async def heartbeat() -> None:
+            while True:
+                await asyncio.sleep(1)
+                elapsed = int(time.monotonic() - started)
+                status.update(f"{progress['stage']} ({elapsed}s elapsed)…")
+
+        status.update("Cloning/pulling repository…")
+        heartbeat_task = asyncio.create_task(heartbeat())
         try:
             result = await asyncio.to_thread(
                 clone_and_index_repository,
                 clone_url,
                 destination,
                 runner=self.command_runner,
+                on_progress=report_progress,
             )
         except (FileExistsError, OSError) as error:
             status.update(str(error))
             return
+        finally:
+            heartbeat_task.cancel()
         if not result.acquisition.succeeded:
             status.update(
                 self._result_message(
@@ -1597,7 +1710,7 @@ class ConfigurationApp(App[None]):
             status.update(f"Ready: pulled, indexed, and saved {name}.")
             self._set_status(f"Saved {self.path}")
             self._refresh_overview()
-        except (TypeError, ValueError) as error:
+        except (OSError, TypeError, ValueError) as error:
             status.update(f"Repository is indexed; correct the remaining form error: {error}")
 
     async def _test_connector(self, key: str) -> None:
@@ -1606,11 +1719,18 @@ class ConfigurationApp(App[None]):
             connector = self._collect_connector(key)
         except (TypeError, ValueError) as error:
             status.update(f"Invalid connection: {error}")
+            status.set_class(True, "error")
+            status.set_class(False, "pending", "success")
             return
         status.update("Testing connection…")
+        status.set_class(True, "pending")
+        status.set_class(False, "error", "success")
         result = await ConnectorManager([connector]).test_connection(connector.name)
         prefix = "Connected" if result.connected else "Connection failed"
         status.update(f"{prefix}: {result.message}")
+        status.set_class(result.connected, "success")
+        status.set_class(not result.connected, "error")
+        status.set_class(False, "pending")
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "model-runtime" and event.value is not Select.NULL:
@@ -1649,6 +1769,21 @@ class ConfigurationApp(App[None]):
             self.query_one(f"#{prefix}-base-branch", Input).value = repository.base_branch
             return
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        input_id = event.input.id or ""
+        if input_id in {"trigger-hook-path", "server-webhook-secret-env"}:
+            for key in self._connector_keys:
+                if self._selected(f"connector-{key}-type") == "webhook":
+                    self.query_one(f"#connector-{key}-type-help", Static).update(
+                        self._connector_description("webhook", key)
+                    )
+        if input_id.startswith("connector-") and input_id.endswith("-name"):
+            key = input_id.removeprefix("connector-").removesuffix("-name")
+            if self._selected(f"connector-{key}-type") == "webhook":
+                self.query_one(f"#connector-{key}-type-help", Static).update(
+                    self._connector_description("webhook", key)
+                )
+
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
         if button_id == "quit":
@@ -1686,7 +1821,12 @@ class ConfigurationApp(App[None]):
             await self._load_github_repositories(button_id.removeprefix("github-login-"))
             return
         if button_id.startswith("setup-repository-"):
-            await self._setup_repository(button_id.removeprefix("setup-"))
+            key = button_id.removeprefix("setup-")
+            self.run_worker(
+                self._setup_repository(key),
+                name=f"repository-setup-{key}",
+                group=f"repository-setup-{key}",
+            )
             return
         if button_id.startswith("test-connector-"):
             await self._test_connector(button_id.removeprefix("test-"))

@@ -36,21 +36,22 @@ GitHub Pages; publishing instructions are included on the documentation home pag
 
 ### Install the CLI (no checkout required)
 
-The curl installer requires `curl` and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
-Git is required later when configured repositories are cloned or repaired.
+The curl installer requires `curl`, Git, and [`uv`](https://docs.astral.sh/uv/getting-started/installation/).
 The package requires Python 3.12 or newer; uv can provision a compatible Python.
-The release installer resolves the latest published wheel without requiring a checkout:
+The installer fetches the latest merged code from the default branch without requiring
+a local checkout. Re-running it refreshes the source even when the package version is unchanged:
 
 ```bash
-curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | sh
 uv tool update-shell
 ```
 
 Restart your shell after `uv tool update-shell` if `incident-agent` is not on `PATH`.
-To pin a release tag:
+To install the latest published release instead, set `INCIDENT_HARNESS_CHANNEL=stable`
+when running the installer. To pin a release tag:
 
 ```bash
-curl -fsSL https://github.com/Isaac12x/incident-resolver-agent/releases/latest/download/install.sh | \
+curl -fsSL https://raw.githubusercontent.com/Isaac12x/incident-resolver-agent/master/install.sh | \
   INCIDENT_HARNESS_VERSION=v0.3.0 sh
 ```
 
@@ -89,15 +90,36 @@ Each connection has a unique name, so multiple sources can use the same plugin. 
 credential configuration. Restart the service after changing connections; if a runtime bundle
 is active, build and activate a new bundle first.
 
-`incident-agent update` refreshes the latest stable release wheel. `incident-agent update nightly`
-follows the default branch from GitHub and refreshes the source on every run, so repeated nightly
-updates pick up new commits. A nightly install can return to the latest stable release with the
-default `incident-agent update` command, including installs from a GitHub fork with a release.
-Non-GitHub Git, local, and other custom source installations retain their uv source and use uv's
-normal upgrade behavior. Set `INCIDENT_HARNESS_SOURCE` or `INCIDENT_HARNESS_REPOSITORY` to
-deliberately change the nightly source; release version and asset overrides apply to stable updates.
+`incident-agent version` (or `incident-agent --version`) reports the installed package
+version and, for Git installs with recorded metadata, its commit revision. Use
+`incident-agent version --json` for structured output. This works offline without
+configuration; an unpackaged checkout reports `unknown` if package metadata is absent.
+Check the version before and after an update in a new CLI invocation. Nightly builds
+can share a package version, so the recorded commit distinguishes their revisions.
+
+`incident-agent update` fetches the latest merged code from the repository's default
+branch. `incident-agent update nightly` is an explicit alias for that behavior. Both
+refresh Git source even when the package version is unchanged and preserve the recorded
+GitHub repository for fork installs. `incident-agent update stable` installs the latest
+published release wheel, which may be older than merged code. Explicit
+`INCIDENT_HARNESS_VERSION` or `INCIDENT_HARNESS_RELEASE_ASSET` settings select a release
+when the channel is omitted; explicit `nightly` rejects those release-only settings.
+Default updates preserve recorded custom non-GitHub/local installations.
+`INCIDENT_HARNESS_SOURCE` overrides the source, and `INCIDENT_HARNESS_REPOSITORY` selects
+a GitHub fork. Restart running agent services after updating.
+
+**Upgrading an older installation:** older CLIs default to the published release. Run
+`incident-agent update nightly` once to pick up merged changes, or re-run the installer
+above. A merged PR does not automatically publish a new stable release.
+
 `incident-agent doctor` reports executable, credential, repository, and container
-readiness. `run` installs missing managed tools when dependency installation is enabled, then
+readiness in an aligned table, with green OK and red FAIL labels in terminals.
+Plugin and configured-source listings also use tables; use `plugins --json` or
+`connect --list --json` for machine-readable listings.
+Use `doctor --json` or `status --json` for structured readiness output. Color is disabled when
+piping output, when `NO_COLOR` is set, or with `TERM=dumb`; `FORCE_COLOR=1` enables
+color for redirected output unless either disable setting is present.
+`run` installs missing managed tools when dependency installation is enabled, then
 checks readiness before starting. The TUI Overview shows those checks.
 The installer accepts `INCIDENT_HARNESS_SOURCE` for a Git revision, fork, local path, or wheel;
 `INCIDENT_HARNESS_REPOSITORY` selects a fork that publishes GitHub release wheels.
