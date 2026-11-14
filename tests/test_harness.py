@@ -1239,7 +1239,7 @@ async def test_connector_failure_and_callable_tools(config: Config) -> None:
     await manager.stop()
     assert not (await ConnectorManager(config.connectors).test_connection("sentry")).connected
     result = await ConnectorManager(config.connectors, {"sentry": broken}).test_connection("sentry")
-    assert not result.connected and result.message == "offline"
+    assert not result.connected and "Review the endpoint" in result.message
 
     failing_manager = ConnectorManager(config.connectors, {"sentry": broken})
     await failing_manager.start()
@@ -1248,13 +1248,11 @@ async def test_connector_failure_and_callable_tools(config: Config) -> None:
 
 
 @pytest.mark.asyncio
-async def test_webhook_test_connection_explains_inbound_validation_and_keeps_factory() -> None:
+async def test_webhook_without_url_requests_public_url_and_keeps_factory() -> None:
     config = ConnectorConfig(name="alerts", type="webhook", purpose="incident")
     default_result = await ConnectorManager([config]).test_connection("alerts")
     assert not default_result.connected
-    assert "inbound-only" in default_result.message
-    assert "configured harness webhook path" in default_result.message
-    assert "HMAC signature" in default_result.message
+    assert default_result.message == "Enter the public webhook URL to check its connection."
 
     session = Mock(check_health=AsyncMock(), cleanup=AsyncMock())
     factory = AsyncMock(return_value=session)
@@ -1262,6 +1260,57 @@ async def test_webhook_test_connection_explains_inbound_validation_and_keeps_fac
     injected_result = await manager.test_connection("alerts")
     assert injected_result.connected
     assert factory.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_url_test_uses_authenticated_head_without_sending_incident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from src import connectors
+
+    captured = {}
+
+    def respond(request):
+        captured["method"] = request.method
+        captured["authorization"] = request.headers["Authorization"]
+        captured["body"] = request.content
+        return httpx.Response(204)
+
+    client_class = httpx.AsyncClient
+
+    def client(**kwargs):
+        captured["timeout"] = kwargs["timeout"]
+        captured["follow_redirects"] = kwargs["follow_redirects"]
+        return client_class(transport=httpx.MockTransport(respond), **kwargs)
+
+    monkeypatch.setenv("WEBHOOK_TOKEN", "secret-token")
+    monkeypatch.setattr(connectors.httpx, "AsyncClient", client)
+    config = ConnectorConfig(
+        name="receiver", type="webhook", url="https://receiver.example/hook",
+        auth_token_env="WEBHOOK_TOKEN",
+    )
+    result = await ConnectorManager([config]).test_connection("receiver")
+    assert result.connected
+    assert "delivery not verified" in result.message
+    assert captured == {
+        "method": "HEAD", "authorization": "Bearer secret-token", "body": b"",
+        "timeout": 5, "follow_redirects": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_webhook_url_head_unsupported_reports_reachability() -> None:
+    config = ConnectorConfig(name="receiver", type="webhook", url="https://receiver.example/hook")
+    manager = ConnectorManager([config])
+    manager._probe_webhook_url = AsyncMock(return_value=405)  # noqa: SLF001
+    result = await manager.test_connection("receiver")
+    assert result.connected
+    assert "endpoint reachable" in result.message
+    assert "HEAD is not supported" in result.message
+    assert "HTTP 405" in result.message
+    assert "receiver.example" not in result.message
 
 
 @pytest.mark.asyncio
@@ -2156,7 +2205,7 @@ async def test_tui_reports_cli_and_save_failures(tmp_path: Path) -> None:
         original = path.read_bytes()
         with patch("src.tui.save_config", side_effect=OSError("disk full")):
             await pilot.press("ctrl+s")
-        assert "disk full" in app.query_one("#status", Static).render().plain
+        assert "disk space" in app.query_one("#status", Static).render().plain
         assert path.read_bytes() == original
 
 

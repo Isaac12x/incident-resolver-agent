@@ -29,21 +29,18 @@ async def test_source_type_setup_guidance_and_webhook_intake(tmp_path) -> None:
         kind.value = "webhook"
         await pilot.pause()
         help_text = app.query_one(f"#{prefix}-type-help", Static).render().plain
-        assert "/custom/incidents" in help_text
-        assert "/new-connection" in help_text
-        assert "CUSTOM_INTAKE_SECRET" in help_text
-        assert "X-Agent-Signature-256" in help_text
-        assert app.query_one("#test-connector-0", Button).disabled
-        assert not app.query_one(f"#{prefix}-url-field").display
-        assert not app.query_one(f"#{prefix}-auth-field").display
+        assert "public URL" in help_text
+        assert "sends no incident" in help_text
+        assert not app.query_one("#test-connector-0", Button).disabled
+        assert app.query_one(f"#{prefix}-url-field").display
+        assert app.query_one(f"#{prefix}-auth-field").display
 
         app.query_one("#trigger-hook-path", Input).value = "/edited/hook"
         app.query_one("#server-webhook-secret-env", Input).value = "EDITED_SECRET"
         app.query_one(f"#{prefix}-name", Input).value = "edited-source"
         await pilot.pause()
         help_text = app.query_one(f"#{prefix}-type-help", Static).render().plain
-        assert "/edited/hook/edited-source" in help_text
-        assert "EDITED_SECRET" in help_text
+        assert "sends no incident" in help_text
 
         kind.value = "local-logs"
         await pilot.pause()
@@ -71,12 +68,9 @@ async def test_webhook_hidden_legacy_endpoint_survives_save(tmp_path) -> None:
     async with app.run_test(size=(100, 36)) as pilot:
         app.query_one("#content", TabbedContent).active = "connections-tab"
         await pilot.pause()
-        assert not app.query_one("#connector-connector-0-url-field").display
-        assert not app.query_one("#connector-connector-0-auth-field").display
+        assert app.query_one("#connector-connector-0-url-field").display
+        assert app.query_one("#connector-connector-0-auth-field").display
         assert app.query_one("#connector-connector-0-url", Input).value == "https://legacy.invalid/unused"
-        assert "/hooks/incidents/alerts" in app.query_one(
-            "#connector-connector-0-type-help", Static
-        ).render().plain
         app.query_one("#save", Button).press()
         await pilot.pause()
 

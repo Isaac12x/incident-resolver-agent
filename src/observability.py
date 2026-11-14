@@ -14,6 +14,7 @@ from mcp.types import CallToolResult, GetPromptResult, ListPromptsResult, TextCo
 from pydantic import BaseModel, ConfigDict, Field
 
 from .config import ConnectorConfig
+from .connector_errors import ConnectorHTTPError
 
 
 class LogQuery(BaseModel):
@@ -72,15 +73,17 @@ class ObservabilityServer(MCPServer):
                 ) as response,
             ):
                 if response.status_code != 200:
-                    raise RuntimeError(f"{self.name}: HTTP {response.status_code}")
+                    raise ConnectorHTTPError(response.status_code, self.name)
                 body = bytearray()
                 async for chunk in response.aiter_bytes():
                     body.extend(chunk)
                     if len(body) > 1_000_000:
                         raise ValueError("response exceeds 1 MB; narrow the query window")
                 return json.loads(body)
-        except (httpx.HTTPError, TimeoutError) as error:
-            raise RuntimeError(f"{self.name}: connection failed or timed out") from error
+        except (TimeoutError, httpx.TimeoutException):
+            raise TimeoutError("connector request timed out") from None
+        except httpx.HTTPError as error:
+            raise RuntimeError("connector connection failed") from error
 
     def _loki_path(self, endpoint: str) -> str:
         prefix = ""

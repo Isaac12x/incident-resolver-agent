@@ -21,6 +21,7 @@ from .config import load_config
 from .file_session import FileSession
 from .models import TaskRecord
 from .storage import Storage
+from .tui_copy import copy_selection
 from .tui_theme import CHROME_CSS, apply_theme
 
 _CHILD_SESSIONS = (":research", ":implementation")
@@ -149,6 +150,8 @@ class ExecutionInspectScreen(Screen[None]):
     """Conversation overlay opened from the executions list."""
 
     BINDINGS = [
+        Binding("ctrl+c", "copy", "Copy", priority=True),
+        Binding("super+c", "copy", "Copy", priority=True),
         Binding("q", "back", "Back"),
         Binding("escape", "back", "Back"),
     ]
@@ -173,12 +176,17 @@ class ExecutionInspectScreen(Screen[None]):
     def action_back(self) -> None:
         self.app.pop_screen()
 
+    def action_copy(self) -> None:
+        copy_selection(self.app)
+
 
 class ExecutionInspectApp(App[None]):
     """Read-only viewer for a stored agent conversation."""
 
     TITLE = "Incident Agent"
     BINDINGS = [
+        Binding("ctrl+c", "copy", "Copy", priority=True),
+        Binding("super+c", "copy", "Copy", priority=True),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit"),
     ]
@@ -201,6 +209,9 @@ class ExecutionInspectApp(App[None]):
         yield VerticalScroll(Static(_style_transcript(self._transcript), id="transcript"))
         yield Footer()
 
+    def action_copy(self) -> None:
+        copy_selection(self)
+
 
 class ExecutionListApp(App[None]):
     """Browse previous agent runs and inspect a stored conversation."""
@@ -208,6 +219,8 @@ class ExecutionListApp(App[None]):
     TITLE = "Incident Agent"
     SUB_TITLE = "Executions"
     BINDINGS = [
+        Binding("ctrl+c", "copy", "Copy", priority=True),
+        Binding("super+c", "copy", "Copy", priority=True),
         Binding("q", "quit", "Quit"),
         Binding("escape", "quit", "Quit"),
     ]
@@ -237,6 +250,9 @@ class ExecutionListApp(App[None]):
         else:
             yield Static("no agent runs", id="empty", markup=False)
         yield Footer()
+
+    def action_copy(self) -> None:
+        copy_selection(self)
 
     def on_mount(self) -> None:
         if not self._tasks:
