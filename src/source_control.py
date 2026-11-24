@@ -7,6 +7,7 @@ optional plug-in dependency.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -42,8 +43,10 @@ _webhook_routers: list[APIRouter] = []
 def register_source_control_provider(name: str, factory: ProviderFactory) -> None:
     """Register a provider factory under the ``RepositoryConfig.publish_mode`` name."""
     normalized = name.strip().casefold()
-    if not normalized or normalized in {"auto", "local"}:
-        raise ValueError("provider name must be non-empty and cannot be 'auto' or 'local'")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized):
+        raise ValueError("provider name must be a non-empty provider name")
+    if normalized in {"auto", "local"}:
+        raise ValueError("provider name cannot be 'auto' or 'local'")
     if normalized in _provider_factories:
         raise ValueError(f"source-control provider is already registered: {normalized}")
     _provider_factories[normalized] = factory

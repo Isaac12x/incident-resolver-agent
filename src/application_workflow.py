@@ -463,15 +463,8 @@ class ApplicationWorkflow:
             self._write_group_artifact(current)
         result = self.storage.load_task(task.task_id)
         sync = getattr(self.engine.github, "sync_application_pull_requests", None)
-        github_members = {
-            repository: member
-            for repository, member in result.repositories.items()
-            if member.pr_number
-            and self.engine.provider_for_repository(repository) is self.engine.github
-        }
-        if sync and github_members:
-            github_task = result.model_copy(update={"repositories": github_members})
-            await sync(github_task)
+        if sync and result.repositories:
+            await sync(result)
         return self.storage.load_task(task.task_id)
 
     def accept_deployment(

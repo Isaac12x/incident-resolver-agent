@@ -1,17 +1,19 @@
 """Public extension points for source control integrations."""
 
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import APIRouter, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from src import source_control
 from src.app import Application
 from src.config import Config, RepositoryConfig, save_config
 from src.github import GitHubCLIAdapter, GitHubService
-from src.models import Incident
+from src.models import Incident, PullRequestReference
 from src.server import create_server
 from src.source_control import (
     create_source_control_provider,
@@ -28,7 +30,7 @@ def isolated_plugin_registry(monkeypatch):
         "_provider_factories",
         source_control._provider_factories.copy(),
     )
-    monkeypatch.setattr(source_control, "_webhook_routers", [])
+    monkeypatch.setattr(source_control, "_webhook_routers", source_control._webhook_routers.copy())
 
 
 @pytest.mark.asyncio
@@ -47,8 +49,11 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
             raise NotImplementedError
 
         def repository_and_pr(self, payload):
-            repository = payload.get("repository", {}).get("full_name")
-            number = payload.get("pull_request", {}).get("number")
+            pull_request = payload.get("pull_request", {})
+            repository = pull_request.get("repository") or payload.get("repository", {}).get(
+                "full_name"
+            )
+            number = pull_request.get("number")
             return (repository, number) if repository and number else None
 
         def review_comment(self, payload):
@@ -99,6 +104,272 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
         "test-provider", "issue_comment", payload
     )
     assert result is not None and result.task_id == task.task_id
+    mismatched_deployment = {
+        "repository": {"full_name": "org/github-repo"},
+        "pull_request": {"repository": "org/repo", "number": 17},
+        "deployment": {
+            "sha": "deployment-sha",
+            "environment": "preview",
+            "repository": {"full_name": "org/github-repo"},
+        },
+    }
+    assert (
+        await application.workflow.handle_source_control_event(
+            "test-provider", "deployment_status", mismatched_deployment
+        )
+        is None
+    )
+    mismatched_nested_deployment = {
+        "repository": {"full_name": "org/repo"},
+        "pull_request": {"repository": "org/repo", "number": 17},
+        "deployment": {
+            "sha": "deployment-sha",
+            "environment": "preview",
+            "repository": {"full_name": "org/github-repo"},
+        },
+    }
+    assert (
+        await application.workflow.handle_source_control_event(
+            "test-provider", "deployment_status", mismatched_nested_deployment
+        )
+        is None
+    )
+    github_task = application.storage.create_task(
+        Incident(
+            external_id="issue-github",
+            source="test",
+            repository="org/github-repo",
+            environment="production",
+            summary="GitHub incident",
+        )
+    )
+    github_task.pr_number = 23
+    application.storage.save_task(github_task)
+    foreign_provider_event = {
+        "repository": {"full_name": "org/github-repo"},
+        "pull_request": {"repository": "org/github-repo", "number": 23},
+        "deployment": {"sha": "github-sha", "environment": "preview"},
+    }
+    assert (
+        await application.workflow.handle_source_control_event(
+            "test-provider", "deployment_status", foreign_provider_event
+        )
+        is None
+    )
+
+
+def test_publish_mode_is_normalized_and_validated():
+    repository = RepositoryConfig(name="org/repo", publish_mode="  My-Provider  ")
+    assert repository.publish_mode == "my-provider"
+    with pytest.raises(ValidationError, match="provider name"):
+        RepositoryConfig(name="org/repo", publish_mode="not a provider")
+
+
+def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
+    register_source_control_provider("plugin", lambda config, storage: SimpleNamespace())
+    config_path = tmp_path / ".agent" / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / ".agent",
+            repositories=[
+                RepositoryConfig(
+                    name="org/repo",
+                    clone_url="https://github.com/org/repo.git",
+                    publish_mode="plugin",
+                )
+            ],
+        ),
+        config_path,
+    )
+
+    application = Application.build(config_path, agent_backend=AsyncMock())
+
+    assert application.github.api is None
+    save_config(
+        Config(
+            runtime_root=tmp_path / ".agent",
+            repositories=[
+                RepositoryConfig(
+                    name="org/repo",
+                    clone_url="https://github.com/org/repo.git",
+                    publish_mode="local",
+                )
+            ],
+        ),
+        config_path,
+    )
+    legacy_application = Application.build(config_path, agent_backend=AsyncMock())
+
+    assert isinstance(legacy_application.github.api, GitHubCLIAdapter)
+
+
+@pytest.mark.asyncio
+async def test_github_health_skips_plugin_owned_github_clone_urls():
+    config = Config(
+        repositories=[
+            RepositoryConfig(
+                name="org/plugin",
+                clone_url="https://github.com/org/plugin.git",
+                publish_mode="plugin",
+            ),
+            RepositoryConfig(
+                name="org/github",
+                clone_url="https://github.com/org/github.git",
+                publish_mode="auto",
+            ),
+        ]
+    )
+    calls = []
+
+    async def health_command(*command):
+        calls.append(command)
+        return '{"permissions":{"push":true}}' if command[0] == "gh" else ""
+
+    adapter = GitHubCLIAdapter(config, object())
+    with patch.object(adapter, "_health_command", side_effect=health_command):
+        result = await adapter.check_health()
+
+    assert set(result) == {"github:org/github"}
+    assert all("org/plugin" not in command for command in calls)
+
+
+@pytest.mark.asyncio
+async def test_workflow_publishes_create_and_update_through_each_repository_provider(tmp_path):
+    class PluginProvider:
+        publish_enabled = True
+
+        def __init__(self):
+            self.calls = []
+
+        async def create_pull_request(self, task):
+            self.calls.append(("create", task.repository))
+            return PullRequestReference(
+                repository=task.repository,
+                number=71,
+                url="https://example.test/71",
+                head_sha="plugin-create-sha",
+                branch=task.branch or "plugin-branch",
+            )
+
+        async def update_pull_request(self, task):
+            self.calls.append(("update", task.repository))
+            return PullRequestReference(
+                repository=task.repository,
+                number=task.pr_number or 0,
+                url=task.pr_url or "https://example.test/71",
+                head_sha="plugin-update-sha",
+                branch=task.branch or "plugin-branch",
+            )
+
+        async def publish_verification(self, task, result):
+            return None
+
+        def repository_and_pr(self, payload):
+            return None
+
+        def review_comment(self, payload):
+            return None
+
+    plugin = PluginProvider()
+    register_source_control_provider("plugin", lambda config, storage: plugin)
+    config_path = tmp_path / ".agent" / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / ".agent",
+            repositories=[
+                RepositoryConfig(name="org/plugin", publish_mode="plugin"),
+                RepositoryConfig(
+                    name="org/github",
+                    clone_url="https://github.com/org/github.git",
+                    publish_mode="auto",
+                ),
+            ],
+        ),
+        config_path,
+    )
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    application.github.api = object()
+    github_create = AsyncMock()
+    github_update = AsyncMock()
+    application.github.create_pull_request = github_create
+    application.github.update_pull_request = github_update
+
+    plugin_worktree = _git_worktree(tmp_path / "plugin-worktree")
+    plugin_task = _publication_task(application, "org/plugin")
+    plugin_created = PullRequestReference(
+        repository="org/plugin",
+        number=19,
+        url="https://github.test/19",
+        head_sha="github-create-sha",
+        branch="github-branch",
+    )
+    plugin_updated = plugin_created.model_copy(update={"head_sha": "github-update-sha"})
+    github_create.return_value = plugin_created
+    github_update.return_value = plugin_updated
+
+    created = await application.workflow._publish(plugin_task, plugin_worktree)
+    plugin_task.pr_number = created.number
+    plugin_task.pr_url = created.url
+    plugin_task.pr_head_sha = created.head_sha
+    plugin_task.branch = created.branch
+    _change_worktree(plugin_worktree)
+    updated = await application.workflow._publish(plugin_task, plugin_worktree, update=True)
+
+    assert created.number == 71 and updated.head_sha == "plugin-update-sha"
+    assert plugin.calls == [("create", "org/plugin"), ("update", "org/plugin")]
+
+    github_worktree = _git_worktree(tmp_path / "github-worktree")
+    github_task = _publication_task(application, "org/github")
+    github_create.return_value = plugin_created.model_copy(
+        update={"repository": "org/github", "number": 29}
+    )
+    github_update.return_value = plugin_updated.model_copy(
+        update={"repository": "org/github", "number": 29}
+    )
+    github_created = await application.workflow._publish(github_task, github_worktree)
+    github_task.pr_number = github_created.number
+    github_task.pr_url = github_created.url
+    github_task.pr_head_sha = github_created.head_sha
+    github_task.branch = github_created.branch
+    _change_worktree(github_worktree)
+    github_updated = await application.workflow._publish(
+        github_task, github_worktree, update=True
+    )
+
+    assert github_updated.repository == "org/github"
+    github_create.assert_awaited_once()
+    github_update.assert_awaited_once()
+
+
+def _publication_task(application, repository):
+    return application.storage.create_task(
+        Incident(
+            external_id=f"publish-{repository}",
+            source="test",
+            repository=repository,
+            environment="production",
+            summary="publication test",
+        )
+    )
+
+
+def _git_worktree(path):
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@example.test"], check=True
+    )
+    (path / "file.txt").write_text("first\n")
+    subprocess.run(["git", "-C", str(path), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "first"], check=True)
+    return path
+
+
+def _change_worktree(path):
+    (path / "file.txt").write_text("second\n")
+    subprocess.run(["git", "-C", str(path), "add", "file.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "second"], check=True)
 
 
 def test_registered_webhook_router_is_mounted(tmp_path):
@@ -126,6 +397,10 @@ def test_provider_registration_rejects_invalid_and_duplicate_names():
 
     with pytest.raises(ValueError, match="cannot be 'auto'"):
         register_source_control_provider("auto", lambda config, storage: object())
+    with pytest.raises(ValueError, match="provider name"):
+        register_source_control_provider("not a provider", lambda config, storage: object())
+    with pytest.raises(ValueError, match="provider name"):
+        register_source_control_provider("not a provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="already registered"):
         register_source_control_provider("duplicate-provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="not registered"):
@@ -168,7 +443,8 @@ def test_grouped_github_sync_only_updates_github_members(tmp_path):
         "PATCH",
         {
             "body": "PR body\n\n## Application pull requests\n\n"
-            "- `org/github`: [PR #7](https://github.test/7) (SHA `sha-7`)"
+            "- `org/github`: [PR #7](https://github.test/7) (SHA `sha-7`)\n"
+            "- `org/plugin`: [PR #8](https://example.test/8) (SHA `sha-8`)"
         },
     )
 

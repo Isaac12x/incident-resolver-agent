@@ -32,7 +32,11 @@ def _github_provider(config: Config, storage: Storage) -> GitHubService:
         webhook_secret=os.getenv(config.github.webhook_secret_env),
         api=GitHubCLIAdapter(config, storage)
         if any(
-            repository.publish_mode == "github" or "github.com" in (repository.clone_url or "")
+            repository.publish_mode == "github"
+            or (
+                repository.publish_mode in {"auto", "local"}
+                and "github.com" in (repository.clone_url or "")
+            )
             for repository in config.repositories
         )
         else None,

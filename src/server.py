@@ -11,13 +11,13 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .app import Application
 from .github import GitHubCLIAdapter, WebhookSignatureError
 from .models import Incident
-from .source_control import mount_webhook_routers
+from .source_control import mount_webhook_routers, register_webhook_router
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_INTELLIGENCE_TEXT_BYTES = 32 * 1024
@@ -30,6 +30,32 @@ async def _bounded_request_body(request: Request, maximum: int = MAX_WEBHOOK_BOD
         if len(body) > maximum:
             raise HTTPException(status_code=413, detail="request body is too large")
     return bytes(body)
+
+
+_github_webhook_router = APIRouter()
+
+
+@_github_webhook_router.post("/hooks/github", status_code=status.HTTP_202_ACCEPTED)
+async def github_webhook(request: Request) -> JSONResponse:
+    application: Application = request.app.state.application
+    body = await _bounded_request_body(request)
+    try:
+        application.github.verify_webhook(request.headers, body)
+    except WebhookSignatureError as error:
+        raise HTTPException(status_code=401, detail=str(error)) from error
+    delivery = request.headers.get("x-github-delivery", "")
+    if not application.github.accept_delivery(delivery):
+        return JSONResponse({"duplicate": True}, status_code=status.HTTP_202_ACCEPTED)
+    payload = application.github.decode(body)
+    event = request.headers.get("x-github-event", "")
+    task = await application.workflow.handle_github_event(event, payload)
+    return JSONResponse(
+        {"accepted": True, "task_id": task.task_id if task else None},
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
+register_webhook_router(_github_webhook_router)
 
 
 def _intelligence_text(payload: dict[str, Any], *keys: str) -> str:
@@ -195,24 +221,6 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
             "group_key": event_metadata.get("group_key"),
             "duplicate": event_metadata.get("duplicate", False),
         }
-
-    @server.post("/hooks/github", status_code=status.HTTP_202_ACCEPTED)
-    async def github_webhook(request: Request) -> JSONResponse:
-        body = await _bounded_request_body(request)
-        try:
-            application.github.verify_webhook(request.headers, body)
-        except WebhookSignatureError as error:
-            raise HTTPException(status_code=401, detail=str(error)) from error
-        delivery = request.headers.get("x-github-delivery", "")
-        if not application.github.accept_delivery(delivery):
-            return JSONResponse({"duplicate": True}, status_code=status.HTTP_202_ACCEPTED)
-        payload = application.github.decode(body)
-        event = request.headers.get("x-github-event", "")
-        task = await application.workflow.handle_github_event(event, payload)
-        return JSONResponse(
-            {"accepted": True, "task_id": task.task_id if task else None},
-            status_code=status.HTTP_202_ACCEPTED,
-        )
 
     async def submit(payload: dict[str, Any]) -> dict[str, Any]:
         try:

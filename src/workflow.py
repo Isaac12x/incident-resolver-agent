@@ -1633,10 +1633,14 @@ class WorkflowEngine:
                 task = candidates[0]
         deployment_data = payload.get("deployment", payload)
         deployment_status = payload.get("deployment_status", {})
-        deployment_repository = str(
-            payload.get("repository", {}).get("full_name")
-            or deployment_data.get("repository", {}).get("full_name", "")
-        )
+        root_repository = payload.get("repository", {}).get("full_name")
+        deployment_repository_name = deployment_data.get("repository", {}).get("full_name")
+        deployment_repositories = {
+            str(name) for name in (root_repository, deployment_repository_name) if name
+        }
+        if len({repository.casefold() for repository in deployment_repositories}) > 1:
+            return None
+        deployment_repository = str(root_repository or deployment_repository_name or "")
         deployment_sha = str(deployment_data.get("sha", ""))
         deployment_environment = str(deployment_data.get("environment", ""))
         # GitHub deployment_status events often have no pull_request object. Match
@@ -1668,8 +1672,20 @@ class WorkflowEngine:
                 task = matches[0]
         if not task:
             return None
-        event_repository = target[0] if target else deployment_repository
-        if event_repository and self.provider_for_repository(event_repository) is not provider:
+        if target and any(
+            target[0].casefold() != repository.casefold()
+            for repository in deployment_repositories
+        ):
+            return None
+        event_repositories = {
+            repository.casefold()
+            for repository in (target[0] if target else None, *deployment_repositories)
+            if repository
+        }
+        if any(
+            self.provider_for_repository(repository) is not provider
+            for repository in event_repositories
+        ):
             return None
         if task.state in TERMINAL_STATES:
             return task

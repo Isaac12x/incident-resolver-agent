@@ -22,6 +22,7 @@ class ExampleProvider:
     async def publish_verification(self, task, result): ...
     def repository_and_pr(self, payload): ...
     def review_comment(self, payload): ...
+    async def authenticate_and_translate(self, request): ...
 
 
 register_source_control_provider("example", ExampleProvider)
@@ -32,9 +33,9 @@ router = APIRouter()
 @router.post("/hooks/example")
 async def example_webhook(request: Request):
     application = request.app.state.application
-    # Authenticate the request and translate its payload to the core event shape.
-    event = "pull_request"
-    payload = await request.json()
+    provider = application.source_control["example"]
+    # This provider method verifies the request signature before returning normalized data.
+    event, payload = await provider.authenticate_and_translate(request)
     task = await application.workflow.handle_source_control_event("example", event, payload)
     return {"accepted": True, "task_id": task.task_id if task else None}
 
@@ -55,8 +56,9 @@ The provider receives the core `TaskRecord` and `VerificationResult` models. For
 webhook delivery, implement `repository_and_pr(payload)` and
 `review_comment(payload)` for your provider's translated event shape. The event name
 and payload should use the core workflow's existing pull request, comment, merge and
-deployment fields. Authenticate and translate provider-native requests in the mounted
-route before calling `handle_source_control_event`.
+deployment fields. Implement `authenticate_and_translate(request)` on the provider
+used by the route. It must verify provider authentication before returning normalized
+event data; do not dispatch unverified payloads.
 
 Import and register the extension before calling `Application.build` or
 `create_server`. Mounted handlers can access the built application as

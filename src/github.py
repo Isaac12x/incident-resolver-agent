@@ -85,7 +85,7 @@ class GitHubCLIAdapter:
         repositories = [
             r
             for r in self.config.repositories
-            if r.publish_mode != "local"
+            if r.publish_mode in {"auto", "github"}
             and (r.publish_mode == "github" or "github.com" in (r.clone_url or ""))
         ]
         return dict(await asyncio.gather(*(check(r) for r in repositories)))
@@ -171,7 +171,9 @@ class GitHubCLIAdapter:
         if not github_repositories:
             return
         references = []
-        for repository, state in github_repositories.items():
+        for repository, state in task.repositories.items():
+            if not state.pr_number:
+                continue
             references.append(
                 f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
                 f"(SHA `{state.pr_head_sha or ''}`)"

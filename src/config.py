@@ -269,6 +269,16 @@ class RepositoryConfig(BaseModel):
     project_instructions: str = "AGENTS.md"
     playwright: PlaywrightConfig = Field(default_factory=PlaywrightConfig)
 
+    @field_validator("publish_mode", mode="before")
+    @classmethod
+    def safe_publish_mode(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("publish mode must be a provider name")
+        value = value.strip().casefold()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
+            raise ValueError("publish mode must be a non-empty provider name")
+        return value
+
     @field_validator("name")
     @classmethod
     def safe_repository_name(cls, value: str) -> str:
