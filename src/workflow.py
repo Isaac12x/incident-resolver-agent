@@ -1705,7 +1705,7 @@ class WorkflowEngine:
         if event in {"deployment_status", "deployment"}:
             status = deployment_status
             deployment = DeploymentReference(
-                repository=deployment_repository or task.repository,
+                repository=deployment_repository or (target[0] if target else task.repository),
                 environment=str(deployment_data.get("environment", "")),
                 sha=str(deployment_data.get("sha", "")),
                 url=str(status.get("environment_url") or status.get("target_url") or ""),

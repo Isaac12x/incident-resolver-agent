@@ -11,9 +11,9 @@ from pydantic import ValidationError
 
 from src import source_control
 from src.app import Application
-from src.config import Config, RepositoryConfig, save_config
+from src.config import ApplicationConfig, Config, RepositoryConfig, save_config
 from src.github import GitHubCLIAdapter, GitHubService
-from src.models import Incident, PullRequestReference
+from src.models import Incident, PullRequestReference, TaskState
 from src.server import create_server
 from src.source_control import (
     create_source_control_provider,
@@ -21,6 +21,8 @@ from src.source_control import (
     register_webhook_router,
     registered_source_control_provider_names,
 )
+from src.storage import Storage
+from src.workflow import WorkflowEngine
 
 
 @pytest.fixture(autouse=True)
@@ -447,6 +449,67 @@ def test_grouped_github_sync_only_updates_github_members(tmp_path):
             "- `org/plugin`: [PR #8](https://example.test/8) (SHA `sha-8`)"
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_plugin_deployment_without_repo_field_uses_target_member_in_group(tmp_path):
+    config = Config(
+        runtime_root=tmp_path / "runtime",
+        repositories=[
+            RepositoryConfig(name="org/api", publish_mode="github"),
+            RepositoryConfig(name="org/web", publish_mode="plugin"),
+        ],
+        applications=[
+            ApplicationConfig(name="shop", repositories=["org/api", "org/web"])
+        ],
+    )
+    storage = Storage(config.runtime_root)
+    task = storage.create_task(
+        Incident(
+            external_id="group-deployment",
+            source="test",
+            repository="org/api",
+            application="shop",
+            environment="production",
+            summary="group deployment",
+        ),
+        config,
+    )
+    task.state = TaskState.WAITING_FOR_DEPLOYMENT
+    task.repositories["org/web"].pr_number = 12
+    task.repositories["org/web"].pr_head_sha = "web-head"
+    storage.save_task(task)
+
+    class Plugin:
+        publish_enabled = True
+
+        @staticmethod
+        def repository_and_pr(payload):
+            return "org/web", 12
+
+        @staticmethod
+        def review_comment(payload):
+            return None
+
+    github = GitHubService(config.github)
+    engine = WorkflowEngine(
+        config,
+        storage,
+        None,
+        github,
+        SimpleNamespace(accepts=lambda *_: True),
+        source_control_providers={"github": github, "plugin": Plugin()},
+    )
+
+    result = await engine.handle_source_control_event(
+        "plugin",
+        "deployment_status",
+        {"deployment": {"sha": "web-head", "environment": "preview"}},
+    )
+
+    assert result is not None
+    assert result.repositories["org/web"].deployment_sha == "web-head"
+    assert result.repositories["org/api"].deployment_sha is None
 
 
 def _application_stub(tmp_path):
