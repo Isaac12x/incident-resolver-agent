@@ -9,7 +9,7 @@ import logging
 import subprocess
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ from .models import (
     VerificationResult,
 )
 from .operations import OperationBudgetExceeded, OperationLedger
+from .source_control import SourceControlProvider
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
@@ -324,10 +325,7 @@ class _TaskLifecycle:
                 return self.workflow._review_feedback(self.task_id)
             local_only = all(
                 self.workflow.config.repository(repository).publish_mode == "local"
-                or (
-                    self.workflow.config.repository(repository).publish_mode == "auto"
-                    and self.workflow.github.api is None
-                )
+                or not self.workflow.provider_enabled_for_repository(repository)
                 for repository in self.workflow.application.changed_repositories(task)
             )
             if local_only:
@@ -373,10 +371,12 @@ class _TaskLifecycle:
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
         repository = self.workflow.config.repository(task.repository)
-        if task.pr_number and self.workflow.github.api is not None:
+        if task.pr_number and self.workflow.provider_enabled_for_repository(task.repository):
             reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
-                raise RuntimeError("GitHub did not confirm the updated pull request")
+                raise RuntimeError(
+                    "source-control provider did not confirm the updated pull request"
+                )
             task = self.workflow.storage.transition(
                 self.task_id,
                 TaskState.WAITING_FOR_DEPLOYMENT,
@@ -397,8 +397,8 @@ class _TaskLifecycle:
                 conflict_merge_pending=False,
                 conflict_base_branch=None,
             )
-        elif repository.publish_mode == "local" or (
-            repository.publish_mode == "auto" and self.workflow.github.api is None
+        elif repository.publish_mode == "local" or not (
+            self.workflow.provider_enabled_for_repository(task.repository)
         ):
             if task.state != TaskState.PUBLISHING_PR:
                 task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
@@ -449,6 +449,7 @@ class WorkflowEngine:
         github: GitHubService,
         verifier: DeploymentVerifier,
         *,
+        source_control_providers: Mapping[str, SourceControlProvider] | None = None,
         context_collector: Callable[[TaskRecord, Path], Awaitable[str]] | None = None,
         reproducer: Callable[[TaskRecord, Path], Awaitable[bool]] | None = None,
         local_tester: Callable[[TaskRecord, Path], Awaitable[bool]] | None = None,
@@ -458,6 +459,11 @@ class WorkflowEngine:
         self.storage = storage
         self.agent = agent
         self.github = github
+        self.source_control_providers = {
+            name.casefold(): provider
+            for name, provider in (source_control_providers or {"github": github}).items()
+        }
+        self.source_control_providers.setdefault("github", github)
         self.verifier = verifier
         self.context_collector = context_collector
         self.reproducer = reproducer
@@ -477,6 +483,22 @@ class WorkflowEngine:
         self._history_signature = self._current_history_signature()
         self._intelligence_initialized = False
         self.application = ApplicationWorkflow(self)
+
+    def provider_for_repository(self, repository: str) -> SourceControlProvider:
+        """Return the provider selected for one repository, defaulting to GitHub."""
+        try:
+            mode = self.config.repository(repository).publish_mode.strip().casefold()
+        except KeyError:
+            mode = "auto"
+        providers = getattr(self, "source_control_providers", {})
+        return providers.get(mode, self.github)
+
+    def provider_enabled_for_repository(self, repository: str) -> bool:
+        provider = self.provider_for_repository(repository)
+        if provider is self.github:
+            configured = self.config.repository(repository)
+            return configured.publish_mode != "auto" or provider.publish_enabled
+        return provider.publish_enabled
 
     def _is_application(self, task: TaskRecord) -> bool:
         return self.application.is_application(task)
@@ -533,7 +555,10 @@ class WorkflowEngine:
     ) -> PullRequestReference:
         revision = self._publication_revision(task, worktree)
         with self._operation(task, "publish", revision) as outcome:
-            if update and self.github.api is None:
+            provider = self.provider_for_repository(task.repository)
+            if update and provider is self.github and getattr(self.github, "api", None) is None:
+                if task.pr_number is None:
+                    raise RuntimeError("cannot update a pull request without its number")
                 tools = WorkspaceTools(worktree)
                 result = await tools.shell("git rev-parse HEAD")
                 if result.returncode:
@@ -558,12 +583,14 @@ class WorkflowEngine:
                 )
             else:
                 reference = (
-                    await self.github.update_pull_request(task)
+                    await provider.update_pull_request(task)
                     if update
-                    else await self.github.create_pull_request(task)
+                    else await provider.create_pull_request(task)
                 )
                 if reference is None:
-                    raise RuntimeError("GitHub did not confirm the updated pull request")
+                    raise RuntimeError(
+                        "source-control provider did not confirm the updated pull request"
+                    )
             outcome.update(reference.model_dump(mode="json"))
             return reference
 
@@ -1234,7 +1261,9 @@ class WorkflowEngine:
                         data={"repository": repository, **result.model_dump(mode="json")},
                     ),
                 )
-                await self.github.publish_verification(member, result)
+                await self.provider_for_repository(member.repository).publish_verification(
+                    member, result
+                )
                 if not result.passed:
                     return self.storage.transition(
                         task.task_id, TaskState.REPRODUCING, playwright_status="failed"
@@ -1448,8 +1477,8 @@ class WorkflowEngine:
                     return self.storage.load_task(task_id)
                 task = self.storage.load_task(task_id)
                 repository = self.config.repository(task.repository)
-                if repository.publish_mode == "local" or (
-                    repository.publish_mode == "auto" and self.github.api is None
+                if repository.publish_mode == "local" or not self.provider_enabled_for_repository(
+                    task.repository
                 ):
                     return self._local_publish(task, worktree)
                 pull_request = await self._publish(task, worktree)
@@ -1499,7 +1528,9 @@ class WorkflowEngine:
                 self.storage.write_artifact(
                     task_id, "artifacts/playwright/output.txt", result.output or result.reason or ""
                 )
-                await self.github.publish_verification(task, result)
+                await self.provider_for_repository(task.repository).publish_verification(
+                    task, result
+                )
                 if result.passed:
                     return self.storage.transition(
                         task_id, TaskState.WAITING_FOR_REVIEW, playwright_status="passed"
@@ -1573,7 +1604,18 @@ class WorkflowEngine:
             return latest
 
     async def handle_github_event(self, event: str, payload: dict[str, Any]) -> TaskRecord | None:
-        target = self.github.repository_and_pr(payload)
+        """Handle native GitHub payloads through the shared provider event path."""
+        return await self.handle_source_control_event("github", event, payload)
+
+    async def handle_source_control_event(
+        self, provider_name: str, event: str, payload: dict[str, Any]
+    ) -> TaskRecord | None:
+        """Handle a provider event translated to the core webhook payload contract."""
+        normalized_provider = provider_name.strip().casefold()
+        if normalized_provider not in self.source_control_providers:
+            raise ValueError(f"source-control provider is not registered: {provider_name}")
+        provider = self.source_control_providers[normalized_provider]
+        target = provider.repository_and_pr(payload)
         task = self.storage.find_by_pr(*target) if target else None
         if task is None and target:
             candidates = []
@@ -1626,6 +1668,9 @@ class WorkflowEngine:
                 task = matches[0]
         if not task:
             return None
+        event_repository = target[0] if target else deployment_repository
+        if event_repository and self.provider_for_repository(event_repository) is not provider:
+            return None
         if task.state in TERMINAL_STATES:
             return task
         action = payload.get("action")
@@ -1636,7 +1681,7 @@ class WorkflowEngine:
         if event == "pull_request" and self._is_conflicted_pull_request(payload):
             return await self._recover_pull_request_conflict(task, target, payload)
         if event in {"pull_request_review_comment", "issue_comment", "pull_request_review"}:
-            comment = self.github.review_comment(payload)
+            comment = provider.review_comment(payload)
             if comment:
                 self._queue_review_comments(task.task_id, [comment], target[0] if target else None)
                 await self.wake(task.task_id)
@@ -1957,6 +2002,11 @@ class WorkflowEngine:
         for task in self.storage.list_tasks("pending", "active", "waiting"):
             if task.state in TERMINAL_STATES or task.conflict_pending:
                 continue
+            if (
+                not self._is_application(task)
+                and self.provider_for_repository(task.repository) is not self.github
+            ):
+                continue
             targets = [task]
             if self._is_application(task):
                 targets = [
@@ -1964,6 +2014,7 @@ class WorkflowEngine:
                     for repository in self.application.repositories(task)
                     if application_value(task, repository, "pr_number")
                     and not application_value(task, repository, "merged", False)
+                    and self.provider_for_repository(repository) is self.github
                 ]
             for target in targets:
                 if not target.pr_number:

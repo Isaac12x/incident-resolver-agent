@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from .app import Application
 from .github import GitHubCLIAdapter, WebhookSignatureError
 from .models import Incident
+from .source_control import mount_webhook_routers
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_INTELLIGENCE_TEXT_BYTES = 32 * 1024
@@ -55,6 +56,7 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
         await application.connectors.stop()
 
     server = FastAPI(title="Incident Harness", version="0.1.0", lifespan=lifespan)
+    server.state.application = application
 
     @server.middleware("http")
     async def authenticate_control_api(request: Request, call_next):
@@ -328,4 +330,5 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     async def a2a_cancel(task_id: str) -> dict[str, Any]:
         return await mcp_cancel(task_id)
 
+    mount_webhook_routers(server)
     return server

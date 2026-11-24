@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add per-repository source-control provider registration and webhook route mounting
+  for external packages while preserving the core GitHub integration.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.

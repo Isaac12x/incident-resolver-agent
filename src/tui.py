@@ -43,6 +43,7 @@ from .config import (
 )
 from .connectors import ConnectorManager
 from .lifecycle import doctor
+from .source_control import registered_source_control_provider_names
 from .tooling import (
     CommandRunner,
     GitHubRepository,
@@ -974,7 +975,19 @@ class ConfigurationApp(App[None]):
             self._pair(
                 "Publish mode",
                 self._select(
-                    repository.publish_mode, f"{prefix}-publish-mode", ("auto", "github", "local")
+                    repository.publish_mode,
+                    f"{prefix}-publish-mode",
+                    tuple(
+                        dict.fromkeys(
+                            (
+                                "auto",
+                                "github",
+                                "local",
+                                *registered_source_control_provider_names(),
+                                *(item.publish_mode for item in self.config.repositories),
+                            )
+                        )
+                    ),
                 ),
                 "Base branch",
                 self._input(repository.base_branch, f"{prefix}-base-branch"),

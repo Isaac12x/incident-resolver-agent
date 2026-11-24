@@ -327,7 +327,7 @@ class ApplicationWorkflow:
         configured = self.config.repository(repository)
         return not (
             configured.publish_mode == "local"
-            or (configured.publish_mode == "auto" and self.engine.github.api is None)
+            or not self.engine.provider_enabled_for_repository(repository)
         )
 
     def _persist(self, task: TaskRecord) -> TaskRecord:
@@ -388,8 +388,9 @@ class ApplicationWorkflow:
             if already_published:
                 continue
             repo_config = self.config.repository(repository)
-            if repo_config.publish_mode == "local" or (
-                repo_config.publish_mode == "auto" and self.engine.github.api is None
+            if (
+                repo_config.publish_mode == "local"
+                or not self.engine.provider_enabled_for_repository(repository)
             ):
                 sha = _commit(worktree, f"Fix incident {current.external_id}: {current.summary}")
                 reference = PullRequestReference(
@@ -462,8 +463,15 @@ class ApplicationWorkflow:
             self._write_group_artifact(current)
         result = self.storage.load_task(task.task_id)
         sync = getattr(self.engine.github, "sync_application_pull_requests", None)
-        if sync and result.repositories:
-            await sync(result)
+        github_members = {
+            repository: member
+            for repository, member in result.repositories.items()
+            if member.pr_number
+            and self.engine.provider_for_repository(repository) is self.engine.github
+        }
+        if sync and github_members:
+            github_task = result.model_copy(update={"repositories": github_members})
+            await sync(github_task)
         return self.storage.load_task(task.task_id)
 
     def accept_deployment(

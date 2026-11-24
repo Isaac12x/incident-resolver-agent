@@ -10,7 +10,7 @@ import subprocess
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .config import Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
@@ -162,17 +162,22 @@ class GitHubCLIAdapter:
             return
         from .application_workflow import _view
 
+        github_repositories = {
+            repository: state
+            for repository, state in task.repositories.items()
+            if state.pr_number
+            and self.config.repository(repository).publish_mode in {"auto", "github"}
+        }
+        if not github_repositories:
+            return
         references = []
-        for repository, state in task.repositories.items():
-            if state.pr_number:
-                references.append(
-                    f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
-                    f"(SHA `{state.pr_head_sha or ''}`)"
-                )
+        for repository, state in github_repositories.items():
+            references.append(
+                f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
+                f"(SHA `{state.pr_head_sha or ''}`)"
+            )
         sibling_text = "\n\n## Application pull requests\n\n" + "\n".join(references)
-        for repository, state in task.repositories.items():
-            if not state.pr_number:
-                continue
+        for repository, state in github_repositories.items():
             member = _view(task, repository)
             body = self._body(member) + sibling_text
             self._api(
@@ -340,6 +345,10 @@ class GitHubService:
         self._deliveries: deque[str] = deque(maxlen=10_000)
         self._delivery_set: set[str] = set()
 
+    @property
+    def publish_enabled(self) -> bool:
+        return self.api is not None
+
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> None:
         if not self.webhook_secret:
             raise WebhookSignatureError("GitHub webhook secret is not configured")
@@ -411,8 +420,9 @@ class GitHubService:
         )
 
     async def sync_application_pull_requests(self, task: TaskRecord) -> None:
-        if self.api and hasattr(self.api, "sync_application_pull_requests"):
-            await self.api.sync_application_pull_requests(task)
+        sync = cast(Any, getattr(self.api, "sync_application_pull_requests", None))
+        if callable(sync):
+            await cast(Callable[[TaskRecord], Awaitable[None]], sync)(task)
 
     async def reply_to_review(self, comment: ReviewComment, message: str) -> None:
         await self._call("reply_to_review", {"comment_id": comment.id, "message": message})

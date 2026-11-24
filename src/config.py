@@ -260,7 +260,8 @@ class RepositoryConfig(BaseModel):
     name: str
     clone_url: str | None = None
     local_path: Path | None = None
-    publish_mode: Literal["auto", "github", "local"] = "auto"
+    # Third-party source-control packages may register additional provider names.
+    publish_mode: str = "auto"
     base_branch: str = "main"
     responsibility_paths: list[str] = Field(default_factory=lambda: ["."])
     incident_environments: list[str] = Field(default_factory=lambda: ["production"])
