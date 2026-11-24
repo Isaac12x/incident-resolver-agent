@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a public `ee/` pointer to the commercial Incident Harness Enterprise repository.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.
