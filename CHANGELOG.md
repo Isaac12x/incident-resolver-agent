@@ -4,6 +4,7 @@
 
 ## 0.4.1 - 2026-11-25
 
+- Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.
 - Clarify source-control provider configuration and documentation, and deduplicate webhook
   router registration.
 - Report provider startup failures with provider and repository context, roll back partial
