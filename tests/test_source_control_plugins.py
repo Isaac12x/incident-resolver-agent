@@ -394,6 +394,38 @@ def test_registered_webhook_router_is_mounted(tmp_path):
     assert response.json() == {"accepted": True, "task_id": "translated"}
 
 
+def test_native_github_route_uses_provider_webhook_contract(tmp_path):
+    provider = SimpleNamespace(
+        authenticate_and_translate=lambda headers, body: (
+            "pull_request",
+            {"number": 17},
+            False,
+        )
+    )
+    application = _application_stub(tmp_path)
+    application.source_control = {"github": provider}
+    application.workflow.handle_source_control_event = AsyncMock(
+        return_value=SimpleNamespace(task_id="translated")
+    )
+    app = create_server(application, run_worker=False)
+
+    response = TestClient(app).post("/hooks/github", content=b"raw-body")
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True, "task_id": "translated"}
+    application.workflow.handle_source_control_event.assert_awaited_once_with(
+        "github", "pull_request", {"number": 17}
+    )
+
+
+def test_server_openapi_version_uses_installed_package_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.server.get_version_info", lambda: {"version": "4.5.6"})
+
+    app = create_server(_application_stub(tmp_path), run_worker=False)
+
+    assert app.version == "4.5.6"
+
+
 def test_provider_registration_rejects_invalid_and_duplicate_names():
     register_source_control_provider("duplicate-provider", lambda config, storage: object())
 

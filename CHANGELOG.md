@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-11-25
+
 - Add per-repository source-control provider registration and webhook route mounting
-  for external packages while preserving the core GitHub integration.
+  for external packages while routing native GitHub webhooks through the provider
+  authentication and translation contract. Discover zero-argument plugin registrars
+  from the `incident_harness.plugins` entry-point group.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.
