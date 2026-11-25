@@ -3,17 +3,17 @@
 import json
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.app import Application
 from src.config import Config, RepositoryConfig, save_config
-from src.github import GitHubCLIAdapter
-from src.models import Incident, TaskEvent, TaskState, VerificationResult
+from src.github import GitHubCLIAdapter, GitHubService
+from src.models import Incident, PullRequestReference, TaskEvent, TaskState, VerificationResult
 from src.storage import Storage
 from src.systemd_env import build_systemd_environment
-from src.tooling import install_configured_repositories, repository_candidates
+from src.tooling import ToolResult, install_configured_repositories, repository_candidates
 from src.workflow import _TaskLifecycle
 
 
@@ -153,6 +153,83 @@ async def test_update_commits_and_tracks_exact_head(restore_task_state, publicat
         result = await _TaskLifecycle(workflow, task.task_id, worktree).open_pr("Verified fix")
     assert result["state"] == TaskState.WAITING_FOR_DEPLOYMENT
     assert storage.load_task(task.task_id).pr_head_sha == git(worktree, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_worktree_update_uses_api_before_inspecting_git(publication, monkeypatch):
+    _, _, task, worktree, _, _ = publication
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix"})
+    reference = PullRequestReference(
+        repository=task.repository,
+        number=7,
+        url="https://github.com/company/application/pull/7",
+        head_sha="adapter-head",
+        branch=task.branch,
+    )
+    service = GitHubService(Config().github, api=lambda *_: None)
+    service.update_pull_request = AsyncMock(return_value=reference)
+    monkeypatch.setattr(
+        "src.github.WorkspaceTools",
+        lambda _: pytest.fail("API-backed updates must not inspect the worktree"),
+    )
+
+    assert await service.update_from_worktree(task, worktree) == reference
+    service.update_pull_request.assert_awaited_once_with(task)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_updates", "results", "message"),
+    [
+        ({"pr_number": None}, [], "without its number"),
+        ({"branch": None}, [], "without its branch"),
+        ({}, [ToolResult((), 1, "", "rev failed")], "rev failed"),
+        (
+            {},
+            [ToolResult((), 0, "worktree-head", ""), ToolResult((), 1, "", "push failed")],
+            "push failed",
+        ),
+    ],
+)
+async def test_worktree_update_reports_local_precondition_and_git_failures(
+    publication, monkeypatch, task_updates, results, message
+):
+    _, _, task, worktree, _, _ = publication
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", **task_updates})
+    service = GitHubService(Config().github)
+
+    class FakeTools:
+        async def shell(self, command):
+            return results.pop(0)
+
+    monkeypatch.setattr("src.github.WorkspaceTools", lambda _: FakeTools())
+    with pytest.raises(RuntimeError, match=message):
+        await service.update_from_worktree(task, worktree)
+
+
+@pytest.mark.asyncio
+async def test_worktree_update_returns_local_reference_when_adapter_is_absent(
+    publication, monkeypatch
+):
+    _, _, task, worktree, _, _ = publication
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", "pr_url": "url"})
+    service = GitHubService(Config().github)
+
+    class FakeTools:
+        async def shell(self, command):
+            return ToolResult((), 0, "worktree-head", "")
+
+    monkeypatch.setattr("src.github.WorkspaceTools", lambda _: FakeTools())
+
+    reference = await service.update_from_worktree(task, worktree)
+
+    assert reference == PullRequestReference(
+        repository=task.repository,
+        number=7,
+        url="url",
+        head_sha="worktree-head",
+        branch="incident/fix",
+    )
 
 
 @pytest.mark.asyncio
