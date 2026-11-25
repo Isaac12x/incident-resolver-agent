@@ -28,24 +28,17 @@ from .verify import DeploymentVerifier
 from .workflow import WorkflowEngine
 
 
-def _github_provider(config: Config, storage: Storage) -> GitHubService:
+def _create_github_service(config: Config, storage: Storage) -> GitHubService:
     return GitHubService(
         config.github,
         webhook_secret=os.getenv(config.github.webhook_secret_env),
         api=GitHubCLIAdapter(config, storage)
-        if any(
-            repository.publish_mode == "github"
-            or (
-                repository.publish_mode in {"auto", "local"}
-                and "github.com" in (repository.clone_url or "")
-            )
-            for repository in config.repositories
-        )
+        if any(repository.needs_github_adapter for repository in config.repositories)
         else None,
     )
 
 
-register_source_control_provider("github", _github_provider)
+register_source_control_provider("github", _create_github_service)
 
 
 @dataclass
@@ -90,9 +83,9 @@ class Application:
             ),
         )
         provider_names = {"github"} | {
-            repository.publish_mode.strip().casefold()
+            repository.publish_mode
             for repository in config.repositories
-            if repository.publish_mode.strip().casefold() not in {"auto", "local", "github"}
+            if repository.publish_mode not in {"auto", "local", "github"}
         }
         providers: dict[str, SourceControlProvider] = {}
         for provider_name in provider_names:
@@ -110,7 +103,7 @@ class Application:
                     f"failed to create source-control provider {provider_name!r} "
                     f"for repositories: {', '.join(repositories)}"
                 ) from error
-        # The reserved registry entry is installed by _github_provider above.
+        # The reserved registry entry is installed by _create_github_service above.
         github = cast(GitHubService, providers["github"])
         backend = agent_backend or (
             SubscriptionCLIBackend(config)

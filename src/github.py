@@ -86,8 +86,7 @@ class GitHubCLIAdapter:
         repositories = [
             r
             for r in self.config.repositories
-            if r.publish_mode in {"auto", "github"}
-            and (r.publish_mode == "github" or "github.com" in (r.clone_url or ""))
+            if r.github_health_checkable
         ]
         return dict(await asyncio.gather(*(check(r) for r in repositories)))
 
@@ -167,7 +166,7 @@ class GitHubCLIAdapter:
             repository: state
             for repository, state in task.repositories.items()
             if state.pr_number
-            and self.config.repository(repository).publish_mode in {"auto", "github"}
+            and self.config.repository(repository).uses_github
         }
         if not github_repositories:
             return

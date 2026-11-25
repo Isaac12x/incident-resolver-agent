@@ -328,8 +328,7 @@ class _TaskLifecycle:
             if task.state not in {TaskState.PUBLISHING_PR, TaskState.WAITING_FOR_DEPLOYMENT}:
                 return self.workflow._review_feedback(self.task_id)
             local_only = all(
-                self.workflow.config.repository(repository).publish_mode == "local"
-                or not self.workflow.provider_enabled_for_repository(repository)
+                not self.workflow.provider_enabled_for_repository(repository)
                 for repository in self.workflow.application.changed_repositories(task)
             )
             if local_only:
@@ -374,7 +373,6 @@ class _TaskLifecycle:
         self.workflow.storage.append_task_memory(
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
-        repository = self.workflow.config.repository(task.repository)
         if task.pr_number and self.workflow.provider_enabled_for_repository(task.repository):
             reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
@@ -401,9 +399,7 @@ class _TaskLifecycle:
                 conflict_merge_pending=False,
                 conflict_base_branch=None,
             )
-        elif repository.publish_mode == "local" or not (
-            self.workflow.provider_enabled_for_repository(task.repository)
-        ):
+        elif not self.workflow.provider_enabled_for_repository(task.repository):
             if task.state != TaskState.PUBLISHING_PR:
                 task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
             task = self.workflow._local_publish(task, self.worktree)
@@ -491,18 +487,20 @@ class WorkflowEngine:
     def provider_for_repository(self, repository: str) -> SourceControlProvider:
         """Return the provider selected for one repository, defaulting to GitHub."""
         name = self.source_control_name_for_repository(repository)
-        providers = getattr(self, "source_control_providers", {})
+        providers = self.source_control_providers
         try:
             return providers[name]
         except KeyError as error:
             raise RuntimeError(f"source-control provider is not configured: {name}") from error
 
     def provider_enabled_for_repository(self, repository: str) -> bool:
-        provider = self.provider_for_repository(repository)
         try:
             mode = self.config.repository(repository).publish_mode
         except KeyError:
             mode = "auto"
+        if mode == "local":
+            return False
+        provider = self.provider_for_repository(repository)
         enabled = getattr(provider, "publishing_enabled", None)
         return bool(enabled(mode) if callable(enabled) else provider.publish_enabled)
 
@@ -1466,10 +1464,7 @@ class WorkflowEngine:
                 if not await self._review_fix(task, worktree):
                     return self.storage.load_task(task_id)
                 task = self.storage.load_task(task_id)
-                repository = self.config.repository(task.repository)
-                if repository.publish_mode == "local" or not self.provider_enabled_for_repository(
-                    task.repository
-                ):
+                if not self.provider_enabled_for_repository(task.repository):
                     return self._local_publish(task, worktree)
                 pull_request = await self._publish(task, worktree)
                 return self.storage.transition(
@@ -1597,6 +1592,22 @@ class WorkflowEngine:
         """Handle native GitHub payloads through the shared provider event path."""
         return await self.handle_source_control_event("github", event, payload)
 
+    @staticmethod
+    def _event_repositories(
+        payload: dict[str, Any], target: tuple[str, int] | None
+    ) -> tuple[set[str], str] | None:
+        """Validate repository identities shared by PR and deployment event fields."""
+        deployment = payload.get("deployment", payload)
+        root = payload.get("repository", {}).get("full_name")
+        deployment_repository = deployment.get("repository", {}).get("full_name")
+        names = [str(name) for name in (root, deployment_repository) if name]
+        if target:
+            names.append(target[0])
+        repositories = {name.casefold() for name in names}
+        if len(repositories) > 1:
+            return None
+        return repositories, str(root or deployment_repository or (target[0] if target else ""))
+
     async def handle_source_control_event(
         self, provider_name: str, event: str, payload: dict[str, Any]
     ) -> TaskRecord | None:
@@ -1621,16 +1632,12 @@ class WorkflowEngine:
                         break
             if len(candidates) == 1:
                 task = candidates[0]
+        validated_repositories = self._event_repositories(payload, target)
+        if validated_repositories is None:
+            return None
+        event_repositories, deployment_repository = validated_repositories
         deployment_data = payload.get("deployment", payload)
         deployment_status = payload.get("deployment_status", {})
-        root_repository = payload.get("repository", {}).get("full_name")
-        deployment_repository_name = deployment_data.get("repository", {}).get("full_name")
-        deployment_repositories = {
-            str(name) for name in (root_repository, deployment_repository_name) if name
-        }
-        if len({repository.casefold() for repository in deployment_repositories}) > 1:
-            return None
-        deployment_repository = str(root_repository or deployment_repository_name or "")
         deployment_sha = str(deployment_data.get("sha", ""))
         deployment_environment = str(deployment_data.get("environment", ""))
         # GitHub deployment_status events often have no pull_request object. Match
@@ -1662,16 +1669,6 @@ class WorkflowEngine:
                 task = matches[0]
         if not task:
             return None
-        if target and any(
-            target[0].casefold() != repository.casefold()
-            for repository in deployment_repositories
-        ):
-            return None
-        event_repositories = {
-            repository.casefold()
-            for repository in (target[0] if target else None, *deployment_repositories)
-            if repository
-        }
         if any(
             self.provider_for_repository(repository) is not provider
             for repository in event_repositories

@@ -325,11 +325,7 @@ class ApplicationWorkflow:
         return changed
 
     def requires_remote_deployment(self, repository: str) -> bool:
-        configured = self.config.repository(repository)
-        return not (
-            configured.publish_mode == "local"
-            or not self.engine.provider_enabled_for_repository(repository)
-        )
+        return self.engine.provider_enabled_for_repository(repository)
 
     def _persist(self, task: TaskRecord) -> TaskRecord:
         self.storage.save_task(task)
@@ -400,11 +396,7 @@ class ApplicationWorkflow:
                 )
             if already_published:
                 continue
-            repo_config = self.config.repository(repository)
-            if (
-                repo_config.publish_mode == "local"
-                or not self.engine.provider_enabled_for_repository(repository)
-            ):
+            if not self.engine.provider_enabled_for_repository(repository):
                 sha = _commit(worktree, f"Fix incident {current.external_id}: {current.summary}")
                 reference = PullRequestReference(
                     repository=repository,
