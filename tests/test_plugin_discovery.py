@@ -182,6 +182,18 @@ def test_nested_webhook_router_prefix_is_checked():
         source_control.mount_webhook_routers(server)
 
 
+def test_conflicting_catchall_and_dynamic_plugin_routes_are_rejected():
+    server = FastAPI()
+    server.add_api_route("/hooks/{name}", lambda: {"builtin": True}, methods=["POST"])
+    source_control._webhook_routers.clear()
+    router = source_control.APIRouter()
+    router.add_api_route("/hooks/{rest:path}", lambda: {"plugin": True}, methods=["POST"])
+    source_control.register_webhook_router(router)
+
+    with pytest.raises(ValueError, match=r"overlaps.*hooks/\{name\}"):
+        source_control.mount_webhook_routers(server)
+
+
 def test_registrar_can_validate_custom_mode_without_recursive_discovery(monkeypatch):
     calls = []
 
