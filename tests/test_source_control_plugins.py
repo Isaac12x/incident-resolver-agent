@@ -16,6 +16,8 @@ from src.github import GitHubCLIAdapter, GitHubService
 from src.models import Incident, PullRequestReference, ReviewComment, TaskState
 from src.server import _source_control_health, create_server
 from src.source_control import (
+    WebhookDetails,
+    WebhookEvent,
     create_source_control_provider,
     register_source_control_provider,
     register_webhook_router,
@@ -113,6 +115,34 @@ def test_application_build_dispatches_to_registered_provider(mixed_provider_appl
     assert application.workflow.provider_for_repository("org/repo") is provider
     assert application.workflow.provider_for_repository("org/github-repo") is application.github
     assert isinstance(application.github, GitHubService)
+
+
+def test_legacy_webhook_event_import_remains_tuple_compatible():
+    event = WebhookEvent("push", {}, False)
+
+    assert event == ("push", {}, False)
+
+
+@pytest.mark.asyncio
+async def test_workflow_dispatch_accepts_provider_neutral_webhook_details(
+    mixed_provider_application, restore_task_state,
+):
+    application, provider, task, _ = mixed_provider_application
+    provider.repository_and_pr = lambda payload: pytest.fail("dispatcher read provider payload")
+    task = restore_task_state(application.storage, task.task_id, TaskState.WAITING_FOR_REVIEW)
+    details = WebhookDetails(
+        repositories=("org/repo",),
+        target=("org/repo", 17),
+        action="closed",
+        merged=True,
+    )
+
+    result = await application.workflow.handle_source_control_event(
+        "test-provider", "pull_request", details
+    )
+
+    assert result.task_id == task.task_id
+    assert result.state == TaskState.COMPLETED
 
 
 def test_application_build_honors_disabled_explicit_github_provider(tmp_path, monkeypatch):

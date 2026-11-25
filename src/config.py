@@ -5,13 +5,23 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-BUILTIN_PUBLISH_MODES = ("auto", "github", "local")
+
+class BuiltinPublishMode(StrEnum):
+    """Built-in source-control publication modes."""
+
+    AUTO = "auto"
+    GITHUB = "github"
+    LOCAL = "local"
+
+
+BUILTIN_PUBLISH_MODES = tuple(BuiltinPublishMode)
 
 
 def normalize_provider_name(name: str) -> str:
@@ -272,8 +282,8 @@ class RepositoryConfig(BaseModel):
     name: str
     clone_url: str | None = None
     local_path: Path | None = None
-    # Third-party source-control packages may register additional provider names.
-    publish_mode: str = "auto"
+    # Third-party providers may register additional names during application startup.
+    publish_mode: str | BuiltinPublishMode = BuiltinPublishMode.AUTO
     base_branch: str = "main"
     responsibility_paths: list[str] = Field(default_factory=lambda: ["."])
     incident_environments: list[str] = Field(default_factory=lambda: ["production"])
@@ -283,29 +293,41 @@ class RepositoryConfig(BaseModel):
 
     @field_validator("publish_mode", mode="before")
     @classmethod
-    def safe_publish_mode(cls, value: Any) -> str:
+    def safe_publish_mode(cls, value: Any, info: ValidationInfo) -> str | BuiltinPublishMode:
         if not isinstance(value, str):
             raise ValueError("publish mode must be a provider name")
         try:
             normalized = normalize_provider_name(value)
         except ValueError:
             raise ValueError("publish mode must be a non-empty provider name") from None
-        if normalized not in BUILTIN_PUBLISH_MODES:
-            from .source_control import registered_source_control_providers
+        try:
+            return BuiltinPublishMode(normalized)
+        except ValueError:
+            from .source_control import validate_publish_mode
 
-            if normalized not in registered_source_control_providers():
-                raise ValueError(f"publish mode provider is not registered: {normalized}")
-        return normalized
+            context = info.context if isinstance(info.context, dict) else {}
+            validate_publish_mode(
+                normalized,
+                context=context,
+                repository=str(info.data.get("name", "")) if info.data else "",
+            )
+            return normalized
 
     @property
     def github_health_checkable(self) -> bool:
         """Whether configured GitHub operations should appear in health checks."""
-        return self.publish_mode in {"auto", "github"} and self.needs_github_adapter
+        return self.publish_mode in {
+            BuiltinPublishMode.AUTO,
+            BuiltinPublishMode.GITHUB,
+        } and self.needs_github_adapter
 
     @property
     def needs_github_adapter(self) -> bool:
         """Whether GitHub tooling is needed for configured repository access."""
-        return self.publish_mode == "github" or "github.com" in (self.clone_url or "")
+        return (
+            self.publish_mode == BuiltinPublishMode.GITHUB
+            or "github.com" in (self.clone_url or "")
+        )
 
     @property
     def clone_identity(self) -> str | None:
@@ -669,45 +691,7 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
         return config
     with path.open("rb") as handle:
         data = tomllib.load(handle)
-    # Discover extensions only when this configuration selects a non-builtin
-    # publication mode. Builtin-only config reads must stay free of plug-in imports.
-    repositories = data.get("repositories", [])
-    selected_custom_providers: set[str] = set()
-    if isinstance(repositories, list):
-        for repository in repositories:
-            if not isinstance(repository, dict) or not isinstance(
-                repository.get("publish_mode"), str
-            ):
-                continue
-            try:
-                provider_name = normalize_provider_name(repository["publish_mode"])
-            except ValueError:
-                continue
-            if provider_name not in BUILTIN_PUBLISH_MODES:
-                selected_custom_providers.add(provider_name)
-
-    if selected_custom_providers:
-        from .plugin_discovery import DiscoveryState, discover_plugins
-
-        discovery_state = discover_plugins()
-        if discovery_state is not DiscoveryState.COMPLETE:
-            from .source_control import registered_source_control_providers
-
-            unavailable = selected_custom_providers.difference(
-                registered_source_control_providers()
-            )
-            if unavailable:
-                provider_name = sorted(unavailable)[0]
-                reason = (
-                    "plug-in discovery is still in progress"
-                    if discovery_state is DiscoveryState.IN_PROGRESS
-                    else "plug-in metadata could not be enumerated"
-                )
-                raise ValueError(
-                    f"publish mode provider {provider_name!r} could not be checked because "
-                    f"{reason}; check the installed plug-in package and retry"
-                )
-    config = Config.model_validate(data)
+    config = Config.model_validate(data, context={"discover_plugins": True})
     if upgrade_model(config.model) and create:
         save_config(config, path)
     return config

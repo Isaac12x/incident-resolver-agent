@@ -21,8 +21,8 @@ from .application_workflow import ApplicationWorkflow
 from .application_workflow import _update_state as update_application_state
 from .application_workflow import _value as application_value
 from .code_review import review
-from .config import Config, RepositoryConfig, normalize_provider_name
-from .github import GitHubService
+from .config import BuiltinPublishMode, Config, RepositoryConfig, normalize_provider_name
+from .github import GitHubService, adapt_webhook_details, is_conflicted_pull_request
 from .intelligence import (
     LogisticRootCauseModel,
     SimilarIncidentSearch,
@@ -43,6 +43,7 @@ from .operations import OperationBudgetExceeded, OperationLedger
 from .source_control import (
     PullRequestPollingProvider,
     SourceControlProvider,
+    WebhookDetails,
 )
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
@@ -507,9 +508,12 @@ class WorkflowEngine:
             RuntimeError: If the configured provider is unavailable.
         """
         mode = self._publish_mode_for_repository(repository)
-        if mode == "local":
+        if mode == BuiltinPublishMode.LOCAL:
             return False
-        if existing_pull_request and mode in {"auto", "github"}:
+        if existing_pull_request and mode in {
+            BuiltinPublishMode.AUTO,
+            BuiltinPublishMode.GITHUB,
+        }:
             return True
         return self.provider_for_repository(repository).publish_enabled
 
@@ -518,11 +522,15 @@ class WorkflowEngine:
         try:
             return self.config.repository(repository).publish_mode
         except KeyError:
-            return "auto"
+            return BuiltinPublishMode.AUTO
 
     def source_control_name_for_repository(self, repository: str) -> str:
         mode = self._publish_mode_for_repository(repository)
-        return "github" if mode in {"auto", "local"} else mode
+        return (
+            BuiltinPublishMode.GITHUB
+            if mode in {BuiltinPublishMode.AUTO, BuiltinPublishMode.LOCAL}
+            else mode
+        )
 
     def _is_application(self, task: TaskRecord) -> bool:
         return self.application.is_application(task)
@@ -751,7 +759,9 @@ class WorkflowEngine:
         except KeyError as error:
             if self.storage.local_repository(incident.repository) is None:
                 raise ValueError(str(error)) from error
-            repository = RepositoryConfig(name=incident.repository, publish_mode="local")
+            repository = RepositoryConfig(
+                name=incident.repository, publish_mode=BuiltinPublishMode.LOCAL
+            )
             self.config.repositories.append(repository)
         if incident.environment not in repository.incident_environments:
             raise ValueError(
@@ -1644,21 +1654,18 @@ class WorkflowEngine:
     def _event_repository(
         self,
         provider_name: str,
-        payload: dict[str, Any],
+        repositories: tuple[str, ...],
         target: tuple[str, int] | None,
     ) -> str | None:
         """Resolve and validate the single repository identity in a provider event."""
-        deployment = payload.get("deployment", payload)
-        root = payload.get("repository", {}).get("full_name")
-        deployment_repository = deployment.get("repository", {}).get("full_name")
-        names = [str(name) for name in (root, deployment_repository) if name]
+        names = list(repositories)
         if target:
             names.append(target[0])
         resolved = [self._resolve_event_repository(name, provider_name) for name in names]
         if any(name is None for name in resolved):
             return None
-        repositories = {str(name).casefold() for name in resolved}
-        if len(repositories) > 1:
+        resolved_names = {str(name).casefold() for name in resolved}
+        if len(resolved_names) > 1:
             logging.getLogger(__name__).warning(
                 "Ignoring %s webhook with conflicting repository identities", provider_name
             )
@@ -1690,15 +1697,23 @@ class WorkflowEngine:
         return matches[0].name if matches else name
 
     async def handle_source_control_event(
-        self, provider_name: str, event: str, payload: dict[str, Any]
+        self, provider_name: str, event: str, payload: dict[str, Any] | WebhookDetails
     ) -> TaskRecord | None:
         """Handle a provider event translated to the core webhook payload contract."""
         normalized_provider = normalize_provider_name(provider_name)
         if normalized_provider not in self.source_control_providers:
             raise ValueError(f"source-control provider is not registered: {provider_name}")
         provider = self.source_control_providers[normalized_provider]
-        target = provider.repository_and_pr(payload)
-        event_repository = self._event_repository(normalized_provider, payload, target)
+        details = (
+            payload
+            if isinstance(payload, WebhookDetails)
+            else adapt_webhook_details(provider, event, payload)
+        )
+        target = details.target
+        repositories = details.repositories
+        if details.deployment and details.deployment.repository:
+            repositories += (details.deployment.repository,)
+        event_repository = self._event_repository(normalized_provider, repositories, target)
         if event_repository is None:
             return None
         if event_repository and self.provider_for_repository(event_repository) is not provider:
@@ -1733,11 +1748,10 @@ class WorkflowEngine:
                     "%s webhook pull request matches multiple active tasks",
                     normalized_provider,
                 )
+        deployment_data = details.deployment
         deployment_repository = event_repository
-        deployment_data = payload.get("deployment", payload)
-        deployment_status = payload.get("deployment_status", {})
-        deployment_sha = str(deployment_data.get("sha", ""))
-        deployment_environment = str(deployment_data.get("environment", ""))
+        deployment_sha = deployment_data.sha if deployment_data else ""
+        deployment_environment = deployment_data.environment if deployment_data else ""
         # GitHub deployment_status events often have no pull_request object. Match
         # an application member only by its repository, exact current PR SHA, and
         # configured environment; ambiguity is rejected closed.
@@ -1778,28 +1792,27 @@ class WorkflowEngine:
             return None
         if task.state in TERMINAL_STATES:
             return task
-        action = payload.get("action")
+        action = details.action
         if event == "pull_request" and action == "closed":
-            if payload.get("pull_request", {}).get("merged"):
-                return await self._record_merged_pull_request(task, target, payload)
+            if details.merged:
+                return await self._record_merged_pull_request(task, target, event_repository)
             return task
-        if event == "pull_request" and self._is_conflicted_pull_request(payload):
-            return await self._recover_pull_request_conflict(task, target, payload)
+        if event == "pull_request" and details.conflicted:
+            return await self._recover_pull_request_conflict(task, target, details)
         if event in {"pull_request_review_comment", "issue_comment", "pull_request_review"}:
-            comment = provider.review_comment(payload)
+            comment = details.review_comment
+            if comment is None and isinstance(payload, dict):
+                comment = provider.review_comment(payload)
             if comment:
                 self._queue_review_comments(task.task_id, [comment], target[0] if target else None)
                 await self.wake(task.task_id)
             return task
-        if event in {"deployment_status", "deployment"}:
-            status = deployment_status
-            deployment = DeploymentReference(
-                repository=deployment_repository or (target[0] if target else task.repository),
-                environment=str(deployment_data.get("environment", "")),
-                sha=str(deployment_data.get("sha", "")),
-                url=str(status.get("environment_url") or status.get("target_url") or ""),
-                deployment_id=deployment_data.get("id"),
-                state=str(status.get("state", deployment_data.get("state", ""))),
+        if event in {"deployment_status", "deployment"} and deployment_data is not None:
+            deployment = deployment_data.model_copy(
+                update={
+                    "repository": deployment_repository
+                    or (target[0] if target else task.repository)
+                }
             )
             if self._is_application(task):
                 repository = next(
@@ -1837,23 +1850,11 @@ class WorkflowEngine:
         """Preserve the legacy entry point for callers handling native GitHub events."""
         return await self.handle_source_control_event("github", event, payload)
 
-    @staticmethod
-    def _is_conflicted_pull_request(payload: dict[str, Any]) -> bool:
-        """Only act on GitHub's explicit dirty state; UNKNOWN is intentionally inert."""
-        pull_request = payload.get("pull_request")
-        if not isinstance(pull_request, dict):
-            return False
-        return bool(pull_request.get("head", {}).get("sha")) and str(
-            pull_request.get("mergeable_state", "")
-        ).casefold() == "dirty"
-
     async def _record_merged_pull_request(
-        self, task: TaskRecord, target: tuple[str, int] | None, payload: dict[str, Any]
+        self, task: TaskRecord, target: tuple[str, int] | None, repository: str | None
     ) -> TaskRecord:
         if self._is_application(task):
-            repository = target[0] if target else str(
-                payload.get("repository", {}).get("full_name", "")
-            )
+            repository = target[0] if target else str(repository or "")
             update_application_state(task, repository, merged=True)
             self.storage.append_event(
                 task.task_id,
@@ -1874,7 +1875,7 @@ class WorkflowEngine:
         self,
         task: TaskRecord,
         target: tuple[str, int] | None,
-        payload: dict[str, Any],
+        details: WebhookDetails,
         *,
         _lease_held: bool = False,
     ) -> TaskRecord:
@@ -1885,7 +1886,7 @@ class WorkflowEngine:
                 return task
             try:
                 return await self._recover_pull_request_conflict(
-                    task, target, payload, _lease_held=True
+                    task, target, details, _lease_held=True
                 )
             finally:
                 self.storage.catalog.release(task.task_id, owner)
@@ -1894,10 +1895,8 @@ class WorkflowEngine:
         task = self.storage.load_task(task.task_id)
         if task.state in TERMINAL_STATES:
             return task
-        pull_request = payload.get("pull_request") or {}
-        base = pull_request.get("base") or {}
-        base_branch = str(base.get("ref") or "").strip()
-        base_repository = str((base.get("repo") or {}).get("full_name") or target[0])
+        base_branch = details.conflict_base_branch
+        base_repository = details.conflict_base_repository
         if not base_branch or base_repository.casefold() != target[0].casefold():
             return task
         repository = target[0]
@@ -1920,7 +1919,7 @@ class WorkflowEngine:
             if self._is_application(task)
             else task.pr_head_sha
         )
-        webhook_head = str(pull_request.get("head", {}).get("sha") or "")
+        webhook_head = details.conflict_head_sha
         if (not webhook_head and not resuming_merge) or (
             not resuming_merge and expected_head and expected_head != webhook_head
         ):
@@ -2144,7 +2143,7 @@ class WorkflowEngine:
                     "repository": {"full_name": target.repository},
                     "pull_request": pull,
                 }
-                if self._is_conflicted_pull_request(payload):
+                if is_conflicted_pull_request(payload):
                     provider_name = self.source_control_name_for_repository(target.repository)
                     await self.handle_source_control_event(provider_name, "pull_request", payload)
 
@@ -2180,22 +2179,20 @@ class WorkflowEngine:
         for target in targets:
             if not target.pr_number:
                 continue
-            payload = {
-                "action": "synchronize",
-                "repository": {"full_name": target.repository},
-                "pull_request": {
-                    "number": target.pr_number,
-                    "head": {"sha": target.pr_head_sha or ""},
-                    "base": {
-                        "ref": target.conflict_base_branch
-                        or self.config.repository(target.repository).base_branch,
-                        "repo": {"full_name": target.repository},
-                    },
-                    "mergeable_state": "dirty",
-                },
-            }
+            details = WebhookDetails(
+                repositories=(target.repository,),
+                target=(target.repository, target.pr_number),
+                action="synchronize",
+                conflicted=True,
+                conflict_base_branch=(
+                    target.conflict_base_branch
+                    or self.config.repository(target.repository).base_branch
+                ),
+                conflict_base_repository=target.repository,
+                conflict_head_sha=target.pr_head_sha or "",
+            )
             await self._recover_pull_request_conflict(
-                task, (target.repository, target.pr_number), payload
+                task, (target.repository, target.pr_number), details
             )
 
     async def run_worker(self) -> None:

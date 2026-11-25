@@ -40,7 +40,11 @@ The provider receives the core `TaskRecord` and `VerificationResult` models. For
 webhook delivery, implement `repository_and_pr(payload)` and
 `review_comment(payload)` for your provider's translated event shape. The event name
 and payload should use the core workflow's existing pull request, comment, merge and
-deployment fields. The workflow matches repository identity fields to the configured
+deployment fields. `WorkflowEngine.handle_source_control_event` also accepts a typed
+`WebhookDetails` value containing provider-neutral routing, merge and deployment facts;
+new provider routes can pass that value directly. Existing providers may continue
+passing translated dictionaries, which core adapts for compatibility. The workflow
+matches repository identity fields to the configured
 `name` or the full repository path in its remote `clone_url`. For a checkout configured
 only by `local_path`, a provider that receives a different remote name must translate
 the repository fields and PR target to the configured name. A PR number alone cannot
@@ -51,14 +55,17 @@ Implement this synchronous webhook contract on the provider used by the route:
 ```python
 from collections.abc import Mapping
 from typing import Any
+from src.source_control import WebhookDetails
 
 
 def authenticate_and_translate(
     headers: Mapping[str, str], body: bytes
-) -> tuple[str, dict[str, Any], bool]: ...
+) -> tuple[str, dict[str, Any] | WebhookDetails, bool]: ...
 ```
 
-The contract accepts a three-item tuple of event name, payload, and duplicate flag.
+The contract accepts a three-item tuple of event name, translated dictionary payload
+or typed `WebhookDetails`, and duplicate flag. Typed details let a provider avoid
+passing provider-shaped fields into the workflow.
 Core's `WebhookEvent` named tuple remains available for existing providers and is
 compatible with that return shape, but plugins do not need to import a core event type.
 Verify authentication against the exact raw body before decoding or translating it.

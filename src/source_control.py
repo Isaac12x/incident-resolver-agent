@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from threading import RLock
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
@@ -17,8 +18,17 @@ from fastapi import APIRouter, FastAPI
 from fastapi.routing import iter_route_contexts
 from starlette.routing import BaseRoute, Mount
 
-from .config import normalize_provider_name
-from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
+from .config import (
+    BuiltinPublishMode,
+    normalize_provider_name,
+)
+from .models import (
+    DeploymentReference,
+    PullRequestReference,
+    ReviewComment,
+    TaskRecord,
+    VerificationResult,
+)
 from .storage import Storage
 
 if TYPE_CHECKING:
@@ -39,7 +49,7 @@ class SourceControlProvider(Protocol):
 
     def authenticate_and_translate(
         self, headers: Mapping[str, str], body: bytes
-    ) -> tuple[str, dict[str, Any], bool]:
+    ) -> tuple[str, dict[str, Any] | WebhookDetails, bool]:
         """Authenticate raw request bytes and return event, payload, and duplicate flag.
 
         Args:
@@ -57,6 +67,7 @@ class SourceControlProvider(Protocol):
     def repository_and_pr(self, payload: dict[str, Any]) -> tuple[str, int] | None: ...
 
     def review_comment(self, payload: dict[str, Any]) -> ReviewComment | None: ...
+
 
 
 @runtime_checkable
@@ -78,6 +89,30 @@ class PullRequestPollingProvider(Protocol):
     """Optional capability for checking a pull request's current state."""
 
     async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class WebhookDetails:
+    """Normalized event facts consumed by workflow dispatch."""
+
+    repositories: tuple[str, ...] = ()
+    target: tuple[str, int] | None = None
+    action: str = ""
+    merged: bool = False
+    conflicted: bool = False
+    deployment: DeploymentReference | None = None
+    conflict_base_branch: str = ""
+    conflict_base_repository: str = ""
+    conflict_head_sha: str = ""
+    review_comment: ReviewComment | None = None
+
+
+class WebhookEvent(NamedTuple):
+    """Tuple-compatible legacy result for providers predating the plain tuple contract."""
+
+    event: str
+    payload: dict[str, Any]
+    duplicate: bool
 
 
 ProviderFactory = Callable[["Config", Storage], SourceControlProvider]
@@ -111,12 +146,63 @@ def registration_transaction():
 def register_source_control_provider(name: str, factory: ProviderFactory) -> None:
     """Register a provider factory under the ``RepositoryConfig.publish_mode`` name."""
     normalized = normalize_provider_name(name)
-    if normalized in {"auto", "local"}:
+    if normalized in {BuiltinPublishMode.AUTO, BuiltinPublishMode.LOCAL}:
         raise ValueError("provider name cannot be 'auto' or 'local'")
     with _registry_lock:
         if normalized in _provider_factories:
             raise ValueError(f"source-control provider is already registered: {normalized}")
         _provider_factories[normalized] = factory
+
+
+def validate_publish_mode(
+    name: str,
+    *,
+    context: dict[str, Any],
+    repository: str = "",
+) -> None:
+    """Validate a configured mode against registered providers, optionally discovering plugins.
+
+    Args:
+        name: Normalized custom publication mode.
+        context: Mutable Pydantic validation context for this config load. Discovery results are
+            cached there so every provider in one file sees the same outcome.
+        repository: Repository name included in provider availability errors.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If the provider is unregistered or discovery could not confirm it.
+
+    Side effects:
+        When the validation context enables discovery, may load installed plug-ins and register
+        providers.
+    """
+    discovery_state = None
+    if context.get("discover_plugins"):
+        from .plugin_discovery import DiscoveryState, discover_plugins
+
+        discovery_state = context.get("_plugin_discovery_state")
+        if not isinstance(discovery_state, DiscoveryState):
+            discovery_state = discover_plugins()
+            context["_plugin_discovery_state"] = discovery_state
+    with _registry_lock:
+        registered = name in _provider_factories
+    if registered:
+        return
+    if discovery_state is None or discovery_state is DiscoveryState.COMPLETE:
+        raise ValueError(f"publish mode provider is not registered: {name}")
+    reason = (
+        "plug-in discovery is still in progress"
+        if discovery_state is DiscoveryState.IN_PROGRESS
+        else "plug-in metadata could not be enumerated"
+    )
+    repository_context = f" for repository {repository!r}" if repository else ""
+    raise ValueError(
+        f"publish mode provider {name!r}{repository_context} could not be checked "
+        f"because {reason}; "
+        "check the installed plug-in package and retry"
+    )
 
 
 def create_source_control_provider(

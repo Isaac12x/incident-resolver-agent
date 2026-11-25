@@ -673,6 +673,16 @@ def test_github_signature_delivery_and_comment_authorization(config: Config) -> 
     body = b'{"action":"created"}'
     signature = "sha256=" + hmac.new(b"secret", body, hashlib.sha256).hexdigest()
     github.verify_webhook({"x-hub-signature-256": signature}, body)
+    translated = github.authenticate_and_translate(
+        {
+            "x-hub-signature-256": signature,
+            "x-github-event": "pull_request",
+            "x-github-delivery": "tuple-contract",
+        },
+        body,
+    )
+    assert type(translated) is tuple
+    assert translated == ("pull_request", {"action": "created"}, False)
     with pytest.raises(WebhookSignatureError):
         github.verify_webhook({"x-hub-signature-256": "bad"}, body)
     assert github.accept_delivery("delivery")

@@ -13,13 +13,95 @@ from pathlib import Path
 from typing import Any
 
 from .config import BUILTIN_PUBLISH_MODES, Config, GitHubConfig
-from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
-from .source_control import ApplicationSyncProvider, HealthCheckProvider
+from .models import (
+    DeploymentReference,
+    PullRequestReference,
+    ReviewComment,
+    TaskRecord,
+    VerificationResult,
+)
+from .source_control import (
+    ApplicationSyncProvider,
+    HealthCheckProvider,
+    SourceControlProvider,
+    WebhookDetails,
+)
 from .storage import Storage
 
 
 class WebhookSignatureError(PermissionError):
     pass
+
+
+def is_conflicted_pull_request(payload: dict[str, Any]) -> bool:
+    """Return whether a legacy GitHub payload explicitly reports a dirty merge state.
+
+    Args:
+        payload: Legacy GitHub-shaped pull request payload.
+
+    Returns:
+        Whether the pull request has a head SHA and dirty merge state.
+    """
+    pull_request = payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    head = pull_request.get("head") or {}
+    return bool(head.get("sha")) and str(
+        pull_request.get("mergeable_state", "")
+    ).casefold() == "dirty"
+
+
+def adapt_webhook_details(
+    provider: SourceControlProvider, event: str, payload: dict[str, Any]
+) -> WebhookDetails:
+    """Adapt the v0.4.2 GitHub-shaped payload contract to neutral event facts.
+
+    Args:
+        provider: Existing provider implementation used to resolve pull request targets.
+        event: Source-control event name.
+        payload: Legacy translated event payload.
+
+    Returns:
+        Provider-neutral event facts for workflow dispatch.
+    """
+    target = provider.repository_and_pr(payload)
+    root = payload.get("repository")
+    repository = root.get("full_name") if isinstance(root, dict) else None
+    pr_value = payload.get("pull_request")
+    pull_request = pr_value if isinstance(pr_value, dict) else {}
+    base = pull_request.get("base") or {}
+    head = pull_request.get("head") or {}
+    deployment = payload.get("deployment", payload)
+    deployment_repo = deployment.get("repository")
+    deployment_repo_name = (
+        deployment_repo.get("full_name") if isinstance(deployment_repo, dict) else None
+    )
+    status = payload.get("deployment_status", {})
+    deployment_details = None
+    if event in {"deployment", "deployment_status"}:
+        deployment_details = DeploymentReference(
+            repository=str(deployment_repo_name or (target or ("", 0))[0]),
+            environment=str(deployment.get("environment", "")),
+            sha=str(deployment.get("sha", "")),
+            url=str(status.get("environment_url") or status.get("target_url") or ""),
+            deployment_id=deployment.get("id"),
+            state=str(status.get("state", deployment.get("state", ""))),
+        )
+    repositories = tuple(
+        dict.fromkeys(str(name) for name in (repository, deployment_repo_name) if name)
+    )
+    base_repo = (base.get("repo") or {}).get("full_name") or (target or ("", 0))[0]
+    return WebhookDetails(
+        repositories=repositories,
+        target=target,
+        action=str(payload.get("action", "")),
+        merged=bool(pull_request.get("merged")),
+        conflicted=is_conflicted_pull_request(payload),
+        deployment=deployment_details,
+        conflict_base_branch=str(base.get("ref") or "").strip(),
+        conflict_base_repository=str(base_repo),
+        conflict_head_sha=str(head.get("sha") or ""),
+    )
 
 
 class GitHubCLIAdapter:
@@ -386,6 +468,7 @@ class GitHubService:
         self._deliveries.append(delivery_id)
         self._delivery_set.add(delivery_id)
         return True
+
 
     def review_comment(self, payload: dict[str, Any]) -> ReviewComment | None:
         comment = payload.get("comment") or payload.get("review", {})

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.3 - 2026-11-25
+
+- Accept provider-neutral webhook details for repository routing, reviews, merges, conflicts,
+  and deployments while supporting existing plug-ins that send dictionary payloads.
+- Represent built-in publish modes with enum members and preserve their TOML values.
+  Source control now handles discovery and registry checks during custom mode validation.
 - Preserve worktree updates for existing GitHub pull requests when the publisher is disabled.
 - Match the GitHub webhook result annotation to the provider tuple protocol and use the
   configured module logger during plug-in discovery.

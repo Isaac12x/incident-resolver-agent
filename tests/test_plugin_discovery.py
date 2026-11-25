@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from src import __main__ as cli
 from src import plugin_discovery, source_control
@@ -130,6 +131,39 @@ def test_custom_provider_config_explains_metadata_enumeration_failure(tmp_path, 
     assert "plug-in metadata" in message
     assert "check the installed plug-in package and retry" in message
     assert "private metadata detail" not in message
+
+
+def test_config_load_caches_discovery_failure_for_all_repositories_and_retries(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    def register_provider():
+        source_control.register_source_control_provider("entrypoint-provider", lambda *_: object())
+
+    def enumerate_plugins(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("temporary metadata failure")
+        return (EntryPoint(register_provider),)
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", enumerate_plugins)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[repositories]]\nname = "org/first"\npublish_mode = "entrypoint-provider"\n'
+        '[[repositories]]\nname = "org/second"\npublish_mode = "entrypoint-provider"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as error:
+        load_config(config_path, create=False)
+
+    assert len(error.value.errors()) == 2
+    assert calls == [{"group": "incident_harness.plugins"}]
+    assert "org/first" in str(error.value)
+    assert "org/second" in str(error.value)
+    assert len(load_config(config_path, create=False).repositories) == 2
+    assert calls == [{"group": "incident_harness.plugins"}] * 2
 
 
 def test_custom_provider_typo_still_reports_unregistered_provider(tmp_path, monkeypatch):

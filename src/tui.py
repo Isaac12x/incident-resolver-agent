@@ -32,6 +32,7 @@ from .code_review import provision
 from .config import (
     BUILTIN_PUBLISH_MODES,
     ApplicationConfig,
+    BuiltinPublishMode,
     CodeReviewConfig,
     Config,
     ConnectorConfig,
@@ -940,7 +941,7 @@ class ConfigurationApp(App[None]):
                 name="",
                 clone_url=None,
                 local_path=None,
-                publish_mode="auto",
+                publish_mode=BuiltinPublishMode.AUTO,
                 base_branch="main",
                 incident_environments=["production"],
                 verification_environment="preview",

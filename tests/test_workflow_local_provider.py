@@ -82,10 +82,7 @@ def test_event_repository_validation_preserves_configured_case() -> None:
     )
     result = engine._event_repository(
         "github",
-        {
-            "repository": {"full_name": "Org/Repo"},
-            "deployment": {"repository": {"full_name": "org/repo"}},
-        },
+        ("Org/Repo", "org/repo"),
         ("ORG/REPO", 7),
     )
 
