@@ -167,7 +167,10 @@ def test_replaced_member_workspace_is_rejected(tmp_path: Path) -> None:
 def test_github_application_sync_links_all_sibling_prs(tmp_path: Path) -> None:
     config = Config(
         runtime_root=tmp_path / "runtime",
-        repositories=[RepositoryConfig(name="api"), RepositoryConfig(name="web")],
+        repositories=[
+            RepositoryConfig(name="api", publish_mode="github"),
+            RepositoryConfig(name="web", publish_mode="github"),
+        ],
         applications=[ApplicationConfig(name="shop", repositories=["api", "web"])],
     )
     storage = Storage(config.runtime_root)

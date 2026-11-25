@@ -34,33 +34,34 @@ def isolated_plugin_registry(monkeypatch):
     monkeypatch.setattr(source_control, "_webhook_routers", source_control._webhook_routers.copy())
 
 
-@pytest.mark.asyncio
-async def test_application_build_dispatches_to_registered_provider(tmp_path):
-    class Provider:
-        api = object()
-        publish_enabled = True
+class _TestProvider:
+    api = object()
+    publish_enabled = True
 
-        async def create_pull_request(self, task):
-            raise NotImplementedError
+    async def create_pull_request(self, task):
+        raise NotImplementedError
 
-        async def update_pull_request(self, task):
-            raise NotImplementedError
+    async def update_pull_request(self, task):
+        raise NotImplementedError
 
-        async def publish_verification(self, task, result):
-            raise NotImplementedError
+    async def publish_verification(self, task, result):
+        raise NotImplementedError
 
-        def repository_and_pr(self, payload):
-            pull_request = payload.get("pull_request", {})
-            repository = pull_request.get("repository") or payload.get("repository", {}).get(
-                "full_name"
-            )
-            number = pull_request.get("number")
-            return (repository, number) if repository and number else None
+    def repository_and_pr(self, payload):
+        pull_request = payload.get("pull_request", {})
+        repository = pull_request.get("repository") or payload.get("repository", {}).get(
+            "full_name"
+        )
+        number = pull_request.get("number")
+        return (repository, number) if repository and number else None
 
-        def review_comment(self, payload):
-            return None
+    def review_comment(self, payload):
+        return None
 
-    provider = Provider()
+
+@pytest.fixture
+def mixed_provider_application(tmp_path):
+    provider = _TestProvider()
     register_source_control_provider("test-provider", lambda config, storage: provider)
     config_path = tmp_path / ".agent" / "config.toml"
     provider_config = Config(
@@ -80,12 +81,6 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
     )
 
     application = Application.build(config_path, agent_backend=AsyncMock())
-
-    assert application.source_control["test-provider"] is provider
-    assert application.github.api is not None
-    assert application.workflow.provider_for_repository("org/repo") is provider
-    assert application.workflow.provider_for_repository("org/github-repo") is application.github
-    assert isinstance(application.github, GitHubService)
     task = application.storage.create_task(
         Incident(
             external_id="issue-1",
@@ -97,6 +92,32 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
     )
     task.pr_number = 17
     application.storage.save_task(task)
+    github_task = application.storage.create_task(
+        Incident(
+            external_id="issue-github",
+            source="test",
+            repository="org/github-repo",
+            environment="production",
+            summary="GitHub incident",
+        )
+    )
+    github_task.pr_number = 23
+    application.storage.save_task(github_task)
+    return application, provider, task, github_task
+
+
+def test_application_build_dispatches_to_registered_provider(mixed_provider_application):
+    application, provider, _, _ = mixed_provider_application
+    assert application.source_control["test-provider"] is provider
+    assert application.github.api is not None
+    assert application.workflow.provider_for_repository("org/repo") is provider
+    assert application.workflow.provider_for_repository("org/github-repo") is application.github
+    assert isinstance(application.github, GitHubService)
+
+
+@pytest.mark.asyncio
+async def test_events_dispatch_to_registered_provider(mixed_provider_application):
+    application, _, task, _ = mixed_provider_application
     payload = {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 17}}
 
     assert await application.workflow.handle_github_event("issue_comment", payload) is None
@@ -104,6 +125,11 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
         "test-provider", "issue_comment", payload
     )
     assert result is not None and result.task_id == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_provider_events_reject_repository_mismatches(mixed_provider_application):
+    application, _, _, github_task = mixed_provider_application
     mismatched_deployment = {
         "repository": {"full_name": "org/github-repo"},
         "pull_request": {"repository": "org/repo", "number": 17},
@@ -134,17 +160,6 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
         )
         is None
     )
-    github_task = application.storage.create_task(
-        Incident(
-            external_id="issue-github",
-            source="test",
-            repository="org/github-repo",
-            environment="production",
-            summary="GitHub incident",
-        )
-    )
-    github_task.pr_number = 23
-    application.storage.save_task(github_task)
     foreign_provider_event = {
         "repository": {"full_name": "org/github-repo"},
         "pull_request": {"repository": "org/github-repo", "number": 23},

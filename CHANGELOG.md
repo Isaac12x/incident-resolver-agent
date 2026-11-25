@@ -2,9 +2,14 @@
 
 ## Unreleased
 
-- Clarify source-control provider configuration and docs, deduplicate webhook router
-  registration, report provider startup failures with context, and run provider health
-  checks through the source-control registry.
+## 0.4.1 - 2026-11-25
+
+- Clarify source-control provider configuration and documentation, and deduplicate webhook
+  router registration.
+- Report provider startup failures with provider and repository context, roll back partial
+  registrations from failed plugin setup, and continue loading other plugins.
+- Run provider health checks through the source-control registry and exclude plugin-owned
+  GitHub clone URLs from native GitHub checks.
 
 ## 0.4.0 - 2026-11-25
 
