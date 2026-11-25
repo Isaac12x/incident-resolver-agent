@@ -13,7 +13,7 @@ from src import source_control
 from src.app import Application
 from src.config import ApplicationConfig, Config, RepositoryConfig, load_config, save_config
 from src.github import GitHubCLIAdapter, GitHubService
-from src.models import Incident, PullRequestReference, TaskState
+from src.models import Incident, PullRequestReference, ReviewComment, TaskState
 from src.server import _source_control_health, create_server
 from src.source_control import (
     create_source_control_provider,
@@ -174,6 +174,125 @@ async def test_provider_events_reject_repository_mismatches(mixed_provider_appli
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_registered_provider_webhook_routes_clone_full_name_to_alias(tmp_path):
+    provider = _TestProvider()
+    register_source_control_provider("test-provider", lambda config, storage: provider)
+    config = Config(
+        runtime_root=tmp_path / ".agent",
+        repositories=[RepositoryConfig(
+            name="service",
+            clone_url="https://git.example.com/company/service.git",
+            publish_mode="test-provider",
+        )],
+    )
+    storage = Storage(config.runtime_root)
+    github = GitHubService(config.github)
+    workflow = WorkflowEngine(
+        config, storage, AsyncMock(), github, SimpleNamespace(accepts=lambda *_: True),
+        source_control_providers={"github": github, "test-provider": provider},
+    )
+    task = storage.create_task(Incident(
+        external_id="alias-issue", source="test", repository="service",
+        environment="production", summary="test alias routing",
+    ))
+    task.pr_number = 17
+    task.pr_head_sha = "head-sha"
+    task.state = TaskState.WAITING_FOR_DEPLOYMENT
+    storage.save_task(task)
+
+    router = APIRouter()
+
+    @router.post("/hooks/alias-provider")
+    async def webhook(request: Request):
+        result = await request.app.state.application.workflow.handle_source_control_event(
+            "test-provider", "deployment_status", await request.json()
+        )
+        return {
+            "task_id": result.task_id if result else None,
+            "state": result.state.value if result else None,
+        }
+
+    provider.review_comment = lambda payload: ReviewComment(
+        id=31, body="Please fix this", author="owner"
+    )
+
+    @router.post("/hooks/alias-review")
+    async def review_webhook(request: Request):
+        result = await request.app.state.application.workflow.handle_source_control_event(
+            "test-provider", "issue_comment", await request.json()
+        )
+        return {"task_id": result.task_id if result else None}
+
+    register_webhook_router(router)
+    application = _application_stub(tmp_path)
+    application.workflow = workflow
+    client = TestClient(create_server(application, run_worker=False))
+    response = client.post(
+        "/hooks/alias-provider",
+        json={
+            "repository": {"full_name": "company/service"},
+            "pull_request": {"number": 17},
+            "deployment": {"sha": "head-sha", "environment": "preview"},
+            "deployment_status": {"state": "success", "environment_url": "https://preview.test"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"task_id": task.task_id, "state": TaskState.TESTING_DEPLOYMENT.value}
+
+    review_response = client.post(
+        "/hooks/alias-review",
+        json={
+            "repository": {"full_name": "company/service"},
+            "pull_request": {"number": 17},
+        },
+    )
+    assert review_response.status_code == 200
+    assert review_response.json() == {"task_id": task.task_id}
+    pending = storage.load_task(task.task_id).pending_review_comments
+    assert [comment.id for comment in pending] == [31]
+
+
+@pytest.mark.asyncio
+async def test_provider_event_rejects_alias_full_name_disagreement(tmp_path):
+    provider = _TestProvider()
+    register_source_control_provider("test-provider", lambda config, storage: provider)
+    config = Config(
+        runtime_root=tmp_path / ".agent",
+        repositories=[RepositoryConfig(
+            name="service",
+            clone_url="https://git.example.com/company/service.git",
+            publish_mode="test-provider",
+        )],
+    )
+    storage = Storage(config.runtime_root)
+    github = GitHubService(config.github)
+    workflow = WorkflowEngine(
+        config, storage, AsyncMock(), github, SimpleNamespace(accepts=lambda *_: True),
+        source_control_providers={"github": github, "test-provider": provider},
+    )
+    task = storage.create_task(Incident(
+        external_id="alias-disagreement", source="test", repository="service",
+        environment="production", summary="test disagreement rejection",
+    ))
+    task.pr_number = 17
+    storage.save_task(task)
+
+    result = await workflow.handle_source_control_event(
+        "test-provider", "deployment_status",
+        {
+            "repository": {"full_name": "company/service"},
+            "deployment": {
+                "repository": {"full_name": "another/service"},
+                "sha": "head", "environment": "preview",
+            },
+        },
+    )
+
+    assert result is None
 
 
 def test_publish_mode_is_normalized_and_validated():

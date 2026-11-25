@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from src import __main__ as cli
 from src import plugin_discovery, source_control
@@ -66,6 +67,19 @@ def test_builtin_config_validation_does_not_discover_plugins(tmp_path, monkeypat
     )
 
     assert load_config(config_path, create=False).repositories[0].publish_mode == "github"
+
+
+def test_direct_custom_repository_config_does_not_discover_plugins(monkeypatch):
+    monkeypatch.setattr(
+        plugin_discovery,
+        "entry_points",
+        lambda **kwargs: pytest.fail("direct model construction must not discover plugins"),
+    )
+
+    with pytest.raises(ValidationError, match="publish mode provider is not registered"):
+        RepositoryConfig(name="org/repo", publish_mode="entrypoint-provider")
+
+    assert plugin_discovery._discovered is False
 
 
 def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
@@ -255,6 +269,19 @@ def test_external_webhook_route_mount_conflicts_are_checked_before_mounting(tmp_
     source_control.register_webhook_router(second)
 
     with pytest.raises(ValueError, match="overlaps.*hooks/shared"):
+        create_server(application, run_worker=False)
+
+
+def test_create_server_preflights_plugins_against_native_github_route(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    router = source_control.APIRouter()
+    router.add_api_route("/hooks/github", lambda: {"plugin": True}, methods=["POST"])
+    source_control.register_webhook_router(router)
+
+    with pytest.raises(ValueError, match="overlaps.*hooks/github"):
         create_server(application, run_worker=False)
 
 

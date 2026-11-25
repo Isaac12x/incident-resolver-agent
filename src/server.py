@@ -20,9 +20,7 @@ from .models import Incident
 from .plugin_discovery import discover_plugins
 from .source_control import (
     HealthCheckProvider,
-    WebhookEvent,
     mount_webhook_routers,
-    register_webhook_router,
 )
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
@@ -46,25 +44,20 @@ async def github_webhook(request: Request) -> JSONResponse:
     application: Application = request.app.state.application
     body = await _bounded_request_body(request)
     try:
-        webhook = WebhookEvent(
-            *application.source_control["github"].authenticate_and_translate(
-                request.headers, body
-            )
-        )
+        event, payload, duplicate = application.source_control[
+            "github"
+        ].authenticate_and_translate(request.headers, body)
     except WebhookSignatureError as error:
         raise HTTPException(status_code=401, detail=str(error)) from error
-    if webhook.duplicate:
+    if duplicate:
         return JSONResponse({"duplicate": True}, status_code=status.HTTP_202_ACCEPTED)
     task = await application.workflow.handle_source_control_event(
-        "github", webhook.event, webhook.payload
+        "github", event, payload
     )
     return JSONResponse(
         {"accepted": True, "task_id": task.task_id if task else None},
         status_code=status.HTTP_202_ACCEPTED,
     )
-
-
-register_webhook_router(_github_webhook_router)
 
 
 def _intelligence_text(payload: dict[str, Any], *keys: str) -> str:
@@ -350,6 +343,7 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     async def a2a_cancel(task_id: str) -> dict[str, Any]:
         return await mcp_cancel(task_id)
 
+    server.include_router(_github_webhook_router)
     mount_webhook_routers(server)
     return server
 

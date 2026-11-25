@@ -290,24 +290,16 @@ class RepositoryConfig(BaseModel):
         except ValueError:
             raise ValueError("publish mode must be a non-empty provider name") from None
         if normalized not in BUILTIN_PUBLISH_MODES:
-            from .plugin_discovery import discover_plugins
             from .source_control import registered_source_control_providers
 
             if normalized not in registered_source_control_providers():
-                discover_plugins()
-                if normalized not in registered_source_control_providers():
-                    raise ValueError(f"publish mode provider is not registered: {normalized}")
+                raise ValueError(f"publish mode provider is not registered: {normalized}")
         return normalized
-
-    @property
-    def uses_github(self) -> bool:
-        """Whether GitHub is the selected publication provider for this repository."""
-        return self.publish_mode in {"auto", "github"}
 
     @property
     def github_health_checkable(self) -> bool:
         """Whether configured GitHub operations should appear in health checks."""
-        return self.uses_github and self.needs_github_adapter
+        return self.publish_mode in {"auto", "github"} and self.needs_github_adapter
 
     @property
     def needs_github_adapter(self) -> bool:
@@ -641,6 +633,18 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
         return config
     with path.open("rb") as handle:
         data = tomllib.load(handle)
+    # Discover extensions only when this configuration selects a non-builtin
+    # publication mode. Builtin-only config reads must stay free of plug-in imports.
+    repositories = data.get("repositories", [])
+    if isinstance(repositories, list) and any(
+        isinstance(repository, dict)
+        and isinstance(repository.get("publish_mode"), str)
+        and repository["publish_mode"].strip().casefold() not in BUILTIN_PUBLISH_MODES
+        for repository in repositories
+    ):
+        from .plugin_discovery import discover_plugins
+
+        discover_plugins()
     config = Config.model_validate(data)
     if upgrade_model(config.model) and create:
         save_config(config, path)

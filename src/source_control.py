@@ -7,6 +7,7 @@ optional plug-in dependency.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from threading import RLock
@@ -82,7 +83,7 @@ _registry_lock = RLock()
 
 class _RouteRecord(NamedTuple):
     path: str
-    matcher: Any
+    matcher: re.Pattern[str] | None
     methods: frozenset[str]
     prefix: bool
 
@@ -145,17 +146,11 @@ def mount_webhook_routers(server: FastAPI) -> None:
     """Validate and include all routes registered by installed provider packages."""
     with _registry_lock:
         routers = tuple(_webhook_routers)
-    routes = _route_records(server.routes)
-    pending: list[_RouteRecord] = []
+    existing = _route_records(server.routes)
     for router in routers:
         for route in _route_records(router.routes):
             conflict = next(
-                (
-                    existing
-                    for existing in (*routes, *pending)
-                    if _routes_conflict(existing, route)
-                ),
-                None,
+                (candidate for candidate in existing if _routes_conflict(candidate, route)), None
             )
             if conflict is not None:
                 raise ValueError(
@@ -163,7 +158,7 @@ def mount_webhook_routers(server: FastAPI) -> None:
                     f"{sorted(route.methods)} {route.path} overlaps "
                     f"{sorted(conflict.methods)} {conflict.path}"
                 )
-            pending.append(route)
+            existing.append(route)
     for router in routers:
         server.include_router(router)
 
@@ -172,8 +167,8 @@ def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:
     records = []
     for context in iter_route_contexts(routes):
         route = context.original_route
-        path = context.path or getattr(route, "path", "")
-        regex = context.path_regex or getattr(route, "path_regex", None)
+        path = context.path or ""
+        regex = context.path_regex
         methods = set(context.methods or ())
         if isinstance(route, Mount):
             methods.update({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
@@ -182,16 +177,7 @@ def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:
 
 
 def _routes_conflict(left: _RouteRecord, right: _RouteRecord) -> bool:
-    if not left.methods & right.methods:
-        return False
-    return _compiled_paths_overlap(left, right)
-
-
-def _compiled_paths_overlap(left: _RouteRecord, right: _RouteRecord) -> bool:
-    """Check each route against the other's path using Starlette's compiled matcher."""
-    import re
-
-    if not left.matcher or not right.matcher:
+    if not left.methods & right.methods or left.matcher is None or right.matcher is None:
         return False
     left_matches = left.matcher.match if left.prefix else left.matcher.fullmatch
     right_matches = right.matcher.match if right.prefix else right.matcher.fullmatch

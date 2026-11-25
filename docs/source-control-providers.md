@@ -41,8 +41,13 @@ The provider receives the core `TaskRecord` and `VerificationResult` models. For
 webhook delivery, implement `repository_and_pr(payload)` and
 `review_comment(payload)` for your provider's translated event shape. The event name
 and payload should use the core workflow's existing pull request, comment, merge and
-deployment fields. Implement this synchronous webhook contract on the provider used
-by the route:
+deployment fields. The workflow matches repository identity fields to the configured
+`name` or the full repository path in its remote `clone_url`. For a checkout configured
+only by `local_path`, a provider that receives a different remote name must translate
+the repository fields and PR target to the configured name. A PR number alone cannot
+distinguish repositories that use the same provider.
+
+Implement this synchronous webhook contract on the provider used by the route:
 
 ```python
 def authenticate_and_translate(headers: Mapping[str, str], body: bytes) -> WebhookEvent: ...
@@ -59,9 +64,12 @@ It calls the `github` provider through this contract, which owns GitHub signatur
 verification, delivery de-duplication, header translation, and JSON decoding. GitHub
 health checks continue to use its API adapter.
 
-Register the extension before calling `Application.build` or `create_server`, or expose
-a zero-argument registrar through the entry-point group above. Mounted handlers can
-access the built application as `request.app.state.application`. Core keeps
+Register the extension before validating a `RepositoryConfig` directly. `load_config`
+discovers installed entry points when the TOML selects a non-builtin provider; built-in
+configuration reads do not import provider packages. `Application.build` and
+`create_server` also run discovery so installed webhook routers are mounted, including
+when the server is created from an existing application. Mounted handlers can access
+the built application as `request.app.state.application`. Core keeps
 `/hooks/github`, event handling, and conflict polling on the registered GitHub provider.
 
 Discovery runs once per process and is safe when application builds or server creation

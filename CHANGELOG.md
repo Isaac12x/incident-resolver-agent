@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.4.2 - 2026-11-25
+
+- Route source-control webhooks to the configured repository when its local name differs
+  from the full name sent by the provider. Reject conflicting repository identities.
+- Refresh existing GitHub pull requests for local-mode application members and include
+  external providers’ pull requests in sibling links.
+- Validate repository models without loading third-party code. File-based configuration
+  discovers installed providers when a repository selects a custom publish mode.
+
 ## 0.4.1 - 2026-11-25
 
 - Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.

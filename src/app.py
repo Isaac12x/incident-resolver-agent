@@ -99,9 +99,14 @@ class Application:
                     for repository in config.repositories
                     if repository.publish_mode == provider_name
                 ]
+                context = (
+                    f"for repositories: {', '.join(repositories)}"
+                    if repositories
+                    else "for the built-in GitHub provider"
+                )
                 raise RuntimeError(
                     f"failed to create source-control provider {provider_name!r} "
-                    f"for repositories: {', '.join(repositories)}"
+                    f"{context}"
                 ) from error
         # The reserved registry entry is installed by _create_github_service above.
         github = cast(GitHubService, providers["github"])

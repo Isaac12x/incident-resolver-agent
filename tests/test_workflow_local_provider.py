@@ -26,6 +26,19 @@ def test_auto_mode_keeps_legacy_global_github_selection():
     assert engine.provider_enabled_for_repository("auto-local") is True
 
 
+def test_unconfigured_task_keeps_legacy_auto_provider_selection():
+    def repository(_name):
+        raise KeyError("not configured")
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(repository=repository)
+    engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=True)}
+
+    assert engine._publish_mode_for_repository("legacy-task") == "auto"
+    assert engine.source_control_name_for_repository("legacy-task") == "github"
+    assert engine.provider_enabled_for_repository("legacy-task") is True
+
+
 def test_explicit_github_mode_keeps_publication_enabled_without_api_adapter():
     engine = object.__new__(WorkflowEngine)
     engine.config = SimpleNamespace(repository=lambda name: SimpleNamespace(publish_mode="github"))
@@ -47,7 +60,14 @@ def test_plugin_mode_selects_its_registered_provider():
 
 
 def test_event_repository_validation_preserves_configured_case() -> None:
-    result = WorkflowEngine._event_repositories(
+    repository = SimpleNamespace(name="Org/Repo", clone_url=None, publish_mode="github")
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        repositories=[repository],
+        repository=lambda _name: repository,
+    )
+    result = engine._event_repository(
+        "github",
         {
             "repository": {"full_name": "Org/Repo"},
             "deployment": {"repository": {"full_name": "org/repo"}},
@@ -55,4 +75,4 @@ def test_event_repository_validation_preserves_configured_case() -> None:
         ("ORG/REPO", 7),
     )
 
-    assert result == ({"org/repo"}, "Org/Repo")
+    assert result == "Org/Repo"

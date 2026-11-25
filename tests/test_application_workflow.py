@@ -87,6 +87,22 @@ async def test_application_sync_groups_by_selected_provider() -> None:
     external.sync_application_pull_requests.assert_awaited_once_with(task)
 
 
+@pytest.mark.asyncio
+async def test_application_sync_deduplicates_shared_provider_by_identity() -> None:
+    task = task_with_scope()
+    task.repositories["api"].pr_number = 10
+    task.repositories["web"].pr_number = 20
+    shared = SimpleNamespace(sync_application_pull_requests=AsyncMock())
+    engine = SimpleNamespace(
+        config=Config(),
+        provider_for_repository=lambda _repository: shared,
+    )
+
+    await ApplicationWorkflow(engine)._sync_application_providers(task)
+
+    shared.sync_application_pull_requests.assert_awaited_once_with(task)
+
+
 def test_integration_revision_fails_closed_for_missing_git(tmp_path: Path) -> None:
     root = tmp_path / "runtime"
     storage = Storage(root)
@@ -168,7 +184,7 @@ def test_github_application_sync_links_all_sibling_prs(tmp_path: Path) -> None:
     config = Config(
         runtime_root=tmp_path / "runtime",
         repositories=[
-            RepositoryConfig(name="api", publish_mode="github"),
+            RepositoryConfig(name="api", publish_mode="local"),
             RepositoryConfig(name="web", publish_mode="github"),
         ],
         applications=[ApplicationConfig(name="shop", repositories=["api", "web"])],

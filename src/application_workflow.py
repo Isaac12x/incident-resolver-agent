@@ -361,13 +361,14 @@ class ApplicationWorkflow:
 
     async def _sync_application_providers(self, task: TaskRecord) -> None:
         """Give each selected provider one chance to refresh the full sibling set."""
-        providers = {
-            id(provider): provider
-            for repository in self.repositories(task)
-            if _value(task, repository, "pr_number")
-            for provider in [self.engine.provider_for_repository(repository)]
-        }
-        for provider in providers.values():
+        seen_provider_ids: set[int] = set()
+        for repository in self.repositories(task):
+            if not _value(task, repository, "pr_number"):
+                continue
+            provider = self.engine.provider_for_repository(repository)
+            if id(provider) in seen_provider_ids:
+                continue
+            seen_provider_ids.add(id(provider))
             if isinstance(provider, ApplicationSyncProvider):
                 await provider.sync_application_pull_requests(task)
 

@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .config import Config, GitHubConfig
+from .config import BUILTIN_PUBLISH_MODES, Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
 from .source_control import ApplicationSyncProvider, HealthCheckProvider, WebhookEvent
 from .storage import Storage
@@ -167,12 +167,12 @@ class GitHubCLIAdapter:
             for repository, state in task.repositories.items()
             if state.pr_number
         }
-        github_repositories = {
+        github_managed = {
             repository: state
             for repository, state in published.items()
-            if self.config.repository(repository).uses_github
+            if self.config.repository(repository).publish_mode in BUILTIN_PUBLISH_MODES
         }
-        if not github_repositories:
+        if not github_managed:
             return
         references = []
         for repository, state in published.items():
@@ -181,7 +181,7 @@ class GitHubCLIAdapter:
                 f"(SHA `{state.pr_head_sha or ''}`)"
             )
         sibling_text = "\n\n## Application pull requests\n\n" + "\n".join(references)
-        for repository, state in github_repositories.items():
+        for repository, state in github_managed.items():
             member = _view(task, repository)
             body = self._body(member) + sibling_text
             self._api(
