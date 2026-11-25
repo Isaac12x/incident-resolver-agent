@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.
