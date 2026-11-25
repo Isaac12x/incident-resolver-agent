@@ -14,7 +14,7 @@ from src.app import Application
 from src.config import ApplicationConfig, Config, RepositoryConfig, save_config
 from src.github import GitHubCLIAdapter, GitHubService
 from src.models import Incident, PullRequestReference, TaskState
-from src.server import create_server
+from src.server import _source_control_health, create_server
 from src.source_control import (
     create_source_control_provider,
     register_source_control_provider,
@@ -163,6 +163,40 @@ def test_publish_mode_is_normalized_and_validated():
     assert repository.publish_mode == "my-provider"
     with pytest.raises(ValidationError, match="provider name"):
         RepositoryConfig(name="org/repo", publish_mode="not a provider")
+
+
+def test_application_build_rejects_unregistered_publish_mode_with_context(tmp_path):
+    config_path = tmp_path / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / "runtime",
+            repositories=[RepositoryConfig(name="org/repo", publish_mode="missing-provider")],
+        ),
+        config_path,
+    )
+
+    with pytest.raises(RuntimeError, match="missing-provider.*org/repo"):
+        Application.build(config_path, agent_backend=AsyncMock())
+
+
+def test_application_build_wraps_provider_factory_failure_with_context(tmp_path):
+    def fail_factory(config, storage):
+        raise ValueError("factory failed")
+
+    register_source_control_provider("broken-provider", fail_factory)
+    config_path = tmp_path / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / "runtime",
+            repositories=[RepositoryConfig(name="org/repo", publish_mode="broken-provider")],
+        ),
+        config_path,
+    )
+
+    with pytest.raises(RuntimeError, match="broken-provider.*org/repo") as error:
+        Application.build(config_path, agent_backend=AsyncMock())
+
+    assert isinstance(error.value.__cause__, ValueError)
 
 
 def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
@@ -384,6 +418,8 @@ def test_registered_webhook_router_is_mounted(tmp_path):
         return {"accepted": application is not None, "task_id": task}
 
     register_webhook_router(router)
+    register_webhook_router(router)
+    assert source_control._webhook_routers.count(router) == 1
     app = create_server(_application_stub(tmp_path), run_worker=False)
 
     response = TestClient(app).post("/hooks/test-provider", json={})
@@ -416,6 +452,19 @@ def test_native_github_route_uses_provider_webhook_contract(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+async def test_health_checks_registered_source_control_providers():
+    provider = SimpleNamespace(
+        check_health=AsyncMock(return_value={"example:org/repo": {"status": "ok"}})
+    )
+    application = SimpleNamespace(source_control={"example": provider})
+
+    assert await _source_control_health(application) == {
+        "example:org/repo": {"status": "ok"}
+    }
+    provider.check_health.assert_awaited_once_with()
+
+
 def test_server_openapi_version_uses_installed_package_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr("src.server.get_version_info", lambda: {"version": "4.5.6"})
 
@@ -429,8 +478,6 @@ def test_provider_registration_rejects_invalid_and_duplicate_names():
 
     with pytest.raises(ValueError, match="cannot be 'auto'"):
         register_source_control_provider("auto", lambda config, storage: object())
-    with pytest.raises(ValueError, match="provider name"):
-        register_source_control_provider("not a provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="provider name"):
         register_source_control_provider("not a provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="already registered"):
@@ -543,8 +590,6 @@ async def test_plugin_deployment_without_repo_field_uses_target_member_in_group(
 
 
 def _application_stub(tmp_path):
-    from types import SimpleNamespace
-
     return SimpleNamespace(
         connectors=SimpleNamespace(start=_noop, stop=_noop, configs={}, health=_empty),
         workflow=SimpleNamespace(

@@ -9,6 +9,7 @@ Configure the agent that investigates production incidents, prepares fixes, and 
 - [Configuration reference](configuration.md): every TOML option, its default, accepted values, and runtime meaning.
 - [Example configuration](configuration-example.toml): a starting point for one GitHub repository and Grafana webhook intake.
 - [Tool extension contract](tool-registry.md): configure an operator-managed tool registry.
+- [Source-control provider extensions](source-control-providers.md): install provider packages and register publication and webhook integrations.
 - [Verification record](https://github.com/Isaac12x/incident-resolver-agent/blob/master/docs/verification.md): historical implementation checks.
 
 ## Choose a configuration file

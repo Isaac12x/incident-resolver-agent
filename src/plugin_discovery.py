@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from importlib.metadata import entry_points
 from threading import RLock
 
@@ -25,14 +26,21 @@ def discover_plugins() -> None:
         if _discovered:
             return
 
+        plugin_name = "<entry-point discovery>"
         try:
             for plugin in entry_points(group="incident_harness.plugins"):
+                plugin_name = plugin.name
                 registrar = plugin.load()
                 if not callable(registrar):
                     raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
                 registrar()
         except Exception as error:
             _failure = error
-            raise
+            logging.getLogger(__name__).exception(
+                "failed to load incident-harness plug-in %s", plugin_name
+            )
+            raise RuntimeError(
+                f"failed to load incident-harness plug-in {plugin_name!r}"
+            ) from error
 
         _discovered = True

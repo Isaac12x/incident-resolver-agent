@@ -927,6 +927,9 @@ GET  /a2a/tasks/{task_id}
 POST /a2a/tasks/{task_id}/cancel
 ```
 
+External source-control provider packages can register their own publication provider and
+webhook routes; see the [provider extension guide](docs/source-control-providers.md).
+
 Fresh configurations include a `grafana` webhook connector. Point the Grafana contact point at
 `http://HOST:8765/hooks/incidents/grafana`. Normalized incident JSON is accepted as before. Native
 Grafana Alerting payloads are also accepted when alert labels contain `repository` (or `repo`) and

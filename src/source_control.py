@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from fastapi import APIRouter
+from fastapi import APIRouter, FastAPI
 
 from .config import Config
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
@@ -45,6 +45,13 @@ class ApplicationSyncProvider(Protocol):
     """Optional capability for refreshing grouped publication metadata."""
 
     async def sync_application_pull_requests(self, task: TaskRecord) -> None: ...
+
+
+@runtime_checkable
+class HealthCheckProvider(Protocol):
+    """Optional capability for provider-specific connection checks."""
+
+    async def check_health(self) -> dict[str, dict[str, str]]: ...
 
 
 @runtime_checkable
@@ -96,10 +103,11 @@ def register_webhook_router(router: APIRouter) -> None:
     """Mount an external provider's FastAPI routes on every core server."""
     if not isinstance(router, APIRouter):
         raise TypeError("webhook router must be a FastAPI APIRouter")
-    _webhook_routers.append(router)
+    if router not in _webhook_routers:
+        _webhook_routers.append(router)
 
 
-def mount_webhook_routers(server: Any) -> None:
+def mount_webhook_routers(server: FastAPI) -> None:
     """Include all routes registered by installed provider packages."""
     for router in _webhook_routers:
         server.include_router(router)

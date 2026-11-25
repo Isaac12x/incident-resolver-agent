@@ -352,6 +352,15 @@ class GitHubService:
     def publish_enabled(self) -> bool:
         return self.api is not None
 
+    async def check_health(self) -> dict[str, dict[str, str]]:
+        """Report GitHub CLI health through the provider boundary."""
+        if self.api is None:
+            return {}
+        check = getattr(self.api, "check_health", None)
+        if not callable(check):
+            return {}
+        return await check()
+
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> None:
         if not self.webhook_secret:
             raise WebhookSignatureError("GitHub webhook secret is not configured")

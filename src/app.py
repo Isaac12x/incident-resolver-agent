@@ -96,9 +96,20 @@ class Application:
         }
         providers: dict[str, SourceControlProvider] = {}
         for provider_name in provider_names:
-            providers[provider_name] = create_source_control_provider(
-                provider_name, config, storage
-            )
+            try:
+                providers[provider_name] = create_source_control_provider(
+                    provider_name, config, storage
+                )
+            except Exception as error:
+                repositories = [
+                    repository.name
+                    for repository in config.repositories
+                    if repository.publish_mode == provider_name
+                ]
+                raise RuntimeError(
+                    f"failed to create source-control provider {provider_name!r} "
+                    f"for repositories: {', '.join(repositories)}"
+                ) from error
         # The reserved registry entry is installed by _github_provider above.
         github = cast(GitHubService, providers["github"])
         backend = agent_backend or (

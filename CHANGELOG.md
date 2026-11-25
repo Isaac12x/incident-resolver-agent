@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Clarify source-control provider configuration and docs, deduplicate webhook router
+  registration, report provider startup failures with context, and run provider health
+  checks through the source-control registry.
+
 ## 0.4.0 - 2026-11-25
 
 - Add per-repository source-control provider registration and webhook route mounting

@@ -53,6 +53,7 @@ def test_discovery_succeeds_with_no_plugins_and_is_idempotent(monkeypatch):
 
 def test_application_build_and_server_start_with_only_builtin_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     config_path = tmp_path / "config.toml"
     save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
 
@@ -62,6 +63,7 @@ def test_application_build_and_server_start_with_only_builtin_provider(tmp_path,
     assert tuple(application.source_control) == ("github",)
     with TestClient(server) as client:
         assert client.get("/openapi.json").status_code == 200
+        assert client.post("/hooks/github", content=b"{}").status_code == 401
 
 
 def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):
@@ -96,7 +98,7 @@ def test_discovery_failure_stops_startup_and_is_not_retried(monkeypatch):
 
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(registrar),))
 
-    with pytest.raises(ValueError, match="registrar failed"):
+    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in 'fixture'"):
         plugin_discovery.discover_plugins()
     with pytest.raises(RuntimeError, match="previously failed"):
         plugin_discovery.discover_plugins()
@@ -107,7 +109,7 @@ def test_discovery_failure_stops_startup_and_is_not_retried(monkeypatch):
 def test_discovery_rejects_non_callable_registrar(monkeypatch):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(None),))
 
-    with pytest.raises(TypeError, match="not callable: fixture"):
+    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in 'fixture'"):
         plugin_discovery.discover_plugins()
 
 
