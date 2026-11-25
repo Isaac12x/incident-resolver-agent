@@ -7,7 +7,6 @@ Read a matching skill before acting; when several skills apply, follow them in l
 | Trigger | Skill |
 |---------|-------|
 | Investigate or reproduce a production incident | `skills/incident-investigation/SKILL.md` |
-| Any Python edit or review | `CODING_STANDARDS.md` |
 | Implement or modify an incident fix | `skills/coding/SKILL.md` |
 | Select or simplify an incident repair | `skills/ponytail/SKILL.md` |
 | Test or verify an incident fix locally | `skills/testing/SKILL.md` |
