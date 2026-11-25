@@ -23,6 +23,7 @@ from .models import (
     TaskRecord,
     TaskState,
 )
+from .source_control import ApplicationSyncProvider
 from .tools import WorkspaceTools
 from .verification_graph import VerificationGraph
 
@@ -362,6 +363,18 @@ class ApplicationWorkflow:
             ),
         )
 
+    async def _sync_application_providers(self, task: TaskRecord) -> None:
+        """Give each selected provider one chance to refresh the full sibling set."""
+        providers = {
+            id(provider): provider
+            for repository in self.repositories(task)
+            if _value(task, repository, "pr_number")
+            for provider in [self.engine.provider_for_repository(repository)]
+        }
+        for provider in providers.values():
+            if isinstance(provider, ApplicationSyncProvider):
+                await provider.sync_application_pull_requests(task)
+
     async def publish(self, task: TaskRecord) -> TaskRecord:
         """Publish changed repositories, checkpointing after each successful target."""
         self.verify_workspaces(task)
@@ -462,9 +475,8 @@ class ApplicationWorkflow:
             self._persist(current)
             self._write_group_artifact(current)
         result = self.storage.load_task(task.task_id)
-        sync = getattr(self.engine.github, "sync_application_pull_requests", None)
-        if sync and result.repositories:
-            await sync(result)
+        if result.repositories:
+            await self._sync_application_providers(result)
         return self.storage.load_task(task.task_id)
 
     def accept_deployment(

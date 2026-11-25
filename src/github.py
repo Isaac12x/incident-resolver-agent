@@ -15,6 +15,7 @@ from typing import Any, cast
 from .config import Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
 from .storage import Storage
+from .tools import WorkspaceTools
 
 
 class WebhookSignatureError(PermissionError):
@@ -361,6 +362,15 @@ class GitHubService:
         if not hmac.compare_digest(provided, expected):
             raise WebhookSignatureError("invalid GitHub webhook signature")
 
+    def authenticate_and_translate(
+        self, headers: Mapping[str, str], body: bytes
+    ) -> tuple[str, dict[str, Any], bool]:
+        self.verify_webhook(headers, body)
+        delivery = headers.get("x-github-delivery", "")
+        if not self.accept_delivery(delivery):
+            return headers.get("x-github-event", ""), {}, True
+        return headers.get("x-github-event", ""), self.decode(body), False
+
     def accept_delivery(self, delivery_id: str) -> bool:
         if not delivery_id or delivery_id in self._delivery_set:
             return False
@@ -414,6 +424,44 @@ class GitHubService:
 
     async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]:
         return dict(await self._call("get_pull_request", task.model_dump(mode="json")))
+
+    async def update_from_worktree(self, task: TaskRecord, worktree: Path) -> PullRequestReference:
+        """Publish a worktree head through the API or the legacy direct-workflow push path."""
+        if self.api is not None:
+            reference = await self.update_pull_request(task)
+            if reference is None:
+                raise RuntimeError(
+                    "source-control provider did not confirm the updated pull request"
+                )
+            return reference
+        if not task.pr_number:
+            raise RuntimeError("cannot update a pull request without its number")
+        if not task.branch:
+            raise RuntimeError("cannot update a pull request without its branch")
+        tools = WorkspaceTools(worktree)
+        result = await tools.shell("git rev-parse HEAD")
+        if result.returncode:
+            raise RuntimeError(result.stderr or "could not determine updated PR head")
+        head = result.stdout.strip()
+        push = await tools.shell(
+            f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
+        )
+        if push.returncode:
+            raise RuntimeError(push.stderr or "could not push the updated pull-request head")
+        updated = task.model_copy(update={"pr_head_sha": head})
+        reference = await self.update_pull_request(updated)
+        return reference or PullRequestReference(
+            repository=task.repository,
+            number=task.pr_number,
+            branch=task.branch,
+            head_sha=head,
+            url=task.pr_url or "",
+        )
+
+    def publishing_enabled(self, mode: str) -> bool:
+        """Honor explicit GitHub selection while allowing auto mode to fall back locally."""
+        normalized = mode.strip().casefold()
+        return normalized == "github" or (normalized == "auto" and self.publish_enabled)
 
     async def publish_verification(self, task: TaskRecord, result: VerificationResult) -> None:
         await self._call(

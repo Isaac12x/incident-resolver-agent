@@ -43,7 +43,6 @@ from .config import (
 )
 from .connectors import ConnectorManager
 from .lifecycle import doctor
-from .source_control import registered_source_control_provider_names
 from .tooling import (
     CommandRunner,
     GitHubRepository,
@@ -983,8 +982,7 @@ class ConfigurationApp(App[None]):
                                 "auto",
                                 "github",
                                 "local",
-                                *registered_source_control_provider_names(),
-                                *(item.publish_mode for item in self.config.repositories),
+                                repository.publish_mode,
                             )
                         )
                     ),

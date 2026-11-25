@@ -8,8 +8,9 @@ optional plug-in dependency.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
-from typing import Any, Protocol
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
 
 from fastapi import APIRouter
 
@@ -30,9 +31,36 @@ class SourceControlProvider(Protocol):
 
     async def publish_verification(self, task: TaskRecord, result: VerificationResult) -> None: ...
 
+    def authenticate_and_translate(
+        self, headers: Mapping[str, str], body: bytes
+    ) -> tuple[str, dict[str, Any], bool]: ...
+
     def repository_and_pr(self, payload: dict[str, Any]) -> tuple[str, int] | None: ...
 
     def review_comment(self, payload: dict[str, Any]) -> ReviewComment | None: ...
+
+
+@runtime_checkable
+class ApplicationSyncProvider(Protocol):
+    """Optional capability for refreshing grouped publication metadata."""
+
+    async def sync_application_pull_requests(self, task: TaskRecord) -> None: ...
+
+
+@runtime_checkable
+class PullRequestPollingProvider(Protocol):
+    """Optional capability for checking a pull request's current state."""
+
+    async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class LocalUpdateProvider(Protocol):
+    """Optional capability for publishing an update from a local checkout."""
+
+    async def update_from_worktree(
+        self, task: TaskRecord, worktree: Path
+    ) -> PullRequestReference: ...
 
 
 ProviderFactory = Callable[[Config, Storage], SourceControlProvider]

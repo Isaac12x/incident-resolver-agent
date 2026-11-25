@@ -39,7 +39,11 @@ from .models import (
     VerificationResult,
 )
 from .operations import OperationBudgetExceeded, OperationLedger
-from .source_control import SourceControlProvider
+from .source_control import (
+    LocalUpdateProvider,
+    PullRequestPollingProvider,
+    SourceControlProvider,
+)
 from .storage import RepositoryBusyError, Storage
 from .tooling import ToolResult
 from .tools import WorkspaceTools
@@ -486,19 +490,28 @@ class WorkflowEngine:
 
     def provider_for_repository(self, repository: str) -> SourceControlProvider:
         """Return the provider selected for one repository, defaulting to GitHub."""
+        name = self.source_control_name_for_repository(repository)
+        providers = getattr(self, "source_control_providers", {})
+        try:
+            return providers[name]
+        except KeyError as error:
+            raise RuntimeError(f"source-control provider is not configured: {name}") from error
+
+    def provider_enabled_for_repository(self, repository: str) -> bool:
+        provider = self.provider_for_repository(repository)
+        try:
+            mode = self.config.repository(repository).publish_mode
+        except KeyError:
+            mode = "auto"
+        enabled = getattr(provider, "publishing_enabled", None)
+        return bool(enabled(mode) if callable(enabled) else provider.publish_enabled)
+
+    def source_control_name_for_repository(self, repository: str) -> str:
         try:
             mode = self.config.repository(repository).publish_mode.strip().casefold()
         except KeyError:
             mode = "auto"
-        providers = getattr(self, "source_control_providers", {})
-        return providers.get(mode, self.github)
-
-    def provider_enabled_for_repository(self, repository: str) -> bool:
-        provider = self.provider_for_repository(repository)
-        if provider is self.github:
-            configured = self.config.repository(repository)
-            return configured.publish_mode != "auto" or provider.publish_enabled
-        return provider.publish_enabled
+        return "github" if mode in {"auto", "local"} else mode
 
     def _is_application(self, task: TaskRecord) -> bool:
         return self.application.is_application(task)
@@ -556,31 +569,8 @@ class WorkflowEngine:
         revision = self._publication_revision(task, worktree)
         with self._operation(task, "publish", revision) as outcome:
             provider = self.provider_for_repository(task.repository)
-            if update and provider is self.github and getattr(self.github, "api", None) is None:
-                if task.pr_number is None:
-                    raise RuntimeError("cannot update a pull request without its number")
-                tools = WorkspaceTools(worktree)
-                result = await tools.shell("git rev-parse HEAD")
-                if result.returncode:
-                    raise RuntimeError(result.stderr or "could not determine updated PR head")
-                if not task.branch:
-                    raise RuntimeError("cannot update a pull request without its branch")
-                push = await tools.shell(
-                    f"git -c remote.origin.mirror=false push origin HEAD:{task.branch}"
-                )
-                if push.returncode:
-                    raise RuntimeError(
-                        push.stderr or "could not push the updated pull-request head"
-                    )
-                updated = task.model_copy(update={"pr_head_sha": result.stdout.strip()})
-                reference = await self.github.update_pull_request(updated)
-                reference = reference or PullRequestReference(
-                    repository=task.repository,
-                    number=task.pr_number,
-                    branch=task.branch,
-                    head_sha=result.stdout.strip(),
-                    url=task.pr_url or "",
-                )
+            if update and isinstance(provider, LocalUpdateProvider):
+                reference = await provider.update_from_worktree(task, worktree)
             else:
                 reference = (
                     await provider.update_pull_request(task)
@@ -2010,33 +2000,29 @@ class WorkflowEngine:
         return task
 
     async def poll_pull_request_conflicts(self) -> None:
-        """Poll GitHub infrequently for base updates that emit no webhook."""
-        if not getattr(self.github, "api", None) or not callable(
-            getattr(self.github, "get_pull_request", None)
-        ):
-            return
+        """Poll providers that expose pull-request reads for base updates without webhooks."""
         for task in self.storage.list_tasks("pending", "active", "waiting"):
             if task.state in TERMINAL_STATES or task.conflict_pending:
                 continue
-            if (
-                not self._is_application(task)
-                and self.provider_for_repository(task.repository) is not self.github
-            ):
-                continue
-            targets = [task]
             if self._is_application(task):
                 targets = [
                     self.application.view(task, repository)
                     for repository in self.application.repositories(task)
                     if application_value(task, repository, "pr_number")
                     and not application_value(task, repository, "merged", False)
-                    and self.provider_for_repository(repository) is self.github
                 ]
+            else:
+                targets = [task]
             for target in targets:
                 if not target.pr_number:
                     continue
+                provider = self.provider_for_repository(target.repository)
+                if not provider.publish_enabled:
+                    continue
+                if not isinstance(provider, PullRequestPollingProvider):
+                    continue
                 try:
-                    pull = await self.github.get_pull_request(target)
+                    pull = await provider.get_pull_request(target)
                 except (
                     OSError,
                     RuntimeError,
@@ -2056,7 +2042,8 @@ class WorkflowEngine:
                     "pull_request": pull,
                 }
                 if self._is_conflicted_pull_request(payload):
-                    await self.handle_github_event("pull_request", payload)
+                    provider_name = self.source_control_name_for_repository(target.repository)
+                    await self.handle_source_control_event(provider_name, "pull_request", payload)
 
     async def recover(self) -> None:
         for task in self.storage.list_tasks("pending", "active", "waiting"):

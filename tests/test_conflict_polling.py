@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.config import Config
+from src.config import Config, RepositoryConfig
 from src.models import TaskRecord, TaskState
 from src.workflow import WorkflowEngine
 
@@ -28,10 +28,11 @@ def polling_engine(tasks, responses):
     engine = object.__new__(WorkflowEngine)
     engine.config = Config()
     engine.storage = SimpleNamespace(list_tasks=lambda *_: list(tasks))
-    engine.github = SimpleNamespace(api=object())
+    engine.github = SimpleNamespace(api=object(), publish_enabled=True)
+    engine.source_control_providers = {"github": engine.github}
     engine.application = SimpleNamespace()
     engine._is_application = lambda task: False
-    engine.handle_github_event = AsyncMock()
+    engine.handle_source_control_event = AsyncMock()
 
     async def get_pull_request(task):
         response = responses[task.pr_number]
@@ -57,8 +58,9 @@ async def test_poll_only_wakes_explicit_dirty_open_prs():
 
     await engine.poll_pull_request_conflicts()
 
-    engine.handle_github_event.assert_awaited_once()
-    assert engine.handle_github_event.await_args.args == (
+    engine.handle_source_control_event.assert_awaited_once()
+    assert engine.handle_source_control_event.await_args.args == (
+        "github",
         "pull_request",
         {
             "action": "synchronize",
@@ -79,8 +81,9 @@ async def test_poll_continues_after_provider_timeout():
 
     await engine.poll_pull_request_conflicts()
 
-    engine.handle_github_event.assert_awaited_once()
-    assert engine.handle_github_event.await_args.args[1]["pull_request"]["head"]["sha"] == "head-2"
+    engine.handle_source_control_event.assert_awaited_once()
+    event = engine.handle_source_control_event.await_args.args
+    assert event[2]["pull_request"]["head"]["sha"] == "head-2"
 
 
 @pytest.mark.asyncio
@@ -90,4 +93,31 @@ async def test_poll_skips_tasks_already_in_recovery():
 
     await engine.poll_pull_request_conflicts()
 
-    engine.handle_github_event.assert_not_awaited()
+    engine.handle_source_control_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_poll_dispatches_through_non_github_provider():
+    task = tracked(1)
+    response = {"state": "open", "head": {"sha": "head-1"}, "mergeable_state": "dirty"}
+    engine = polling_engine([task], {1: response})
+    engine.config = Config(
+        repositories=[RepositoryConfig(name="org/repo", publish_mode="test-provider")]
+    )
+    external = SimpleNamespace(
+        publish_enabled=True,
+        get_pull_request=engine.github.get_pull_request,
+    )
+    engine.source_control_providers["test-provider"] = external
+
+    await engine.poll_pull_request_conflicts()
+
+    engine.handle_source_control_event.assert_awaited_once_with(
+        "test-provider",
+        "pull_request",
+        {
+            "action": "synchronize",
+            "repository": {"full_name": "org/repo"},
+            "pull_request": response,
+        },
+    )
