@@ -380,6 +380,7 @@ def test_registered_router_mutation_after_server_build_cannot_shadow_native_rout
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "test-secret")
     config_path = tmp_path / "config.toml"
     save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
     application = Application.build(config_path, agent_backend=AsyncMock())
@@ -387,7 +388,7 @@ def test_registered_router_mutation_after_server_build_cannot_shadow_native_rout
     source_control.register_webhook_router(router)
     server = create_server(application, run_worker=False)
 
-    # FastAPI snapshots APIRouter routes when include_router is called.
+    # The running server uses the routes that passed its construction-time check.
     router.add_api_route("/hooks/github", lambda: {"plugin": True}, methods=["POST"])
     router.add_api_route("/hooks/late", lambda: {"plugin": True}, methods=["POST"])
 
@@ -396,7 +397,7 @@ def test_registered_router_mutation_after_server_build_cannot_shadow_native_rout
         late = client.post("/hooks/late", content=b"{}")
 
     assert native.status_code == 401
-    assert native.json() == {"detail": "GitHub webhook secret is not configured"}
+    assert native.json() == {"detail": "invalid GitHub webhook signature"}
     assert late.status_code == 404
 
 

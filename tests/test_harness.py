@@ -801,6 +801,11 @@ class FakeAgent:
 
 
 class FakeGitHub(GitHubService):
+    @property
+    def publish_enabled(self) -> bool:
+        """This test provider simulates an available GitHub publishing adapter."""
+        return True
+
     async def create_pull_request(self, task):  # noqa: ANN001, ANN201
         return PullRequestReference(
             repository=task.repository,
