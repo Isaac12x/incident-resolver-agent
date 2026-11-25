@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added a regression replay for GitHub conflict recovery covering dirty and unknown
+  mergeability against the pre-refactor behavior.
+
 ## 0.4.3 - 2026-11-25
 
 - Accept provider-neutral webhook details for repository routing, reviews, merges, conflicts,
