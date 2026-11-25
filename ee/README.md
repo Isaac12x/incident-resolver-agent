@@ -8,7 +8,10 @@
 
 ## Enterprise Edition
 
-Use the public inquiry link above to request commercial terms for your organization. Keep billing and confidential details out of the issue.
+Commercial extensions are distributed separately in a private package; this
+directory contains public licensing information only. Use the public inquiry
+link above to ask about commercial terms and package access for your
+organization. Keep billing and confidential details out of the issue.
 
 > **Commercial license**
 >
