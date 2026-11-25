@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from src import source_control
 from src.app import Application
-from src.config import ApplicationConfig, Config, RepositoryConfig, save_config
+from src.config import ApplicationConfig, Config, RepositoryConfig, load_config, save_config
 from src.github import GitHubCLIAdapter, GitHubService
 from src.models import Incident, PullRequestReference, TaskState
 from src.server import _source_control_health, create_server
@@ -120,7 +120,10 @@ async def test_events_dispatch_to_registered_provider(mixed_provider_application
     application, _, task, _ = mixed_provider_application
     payload = {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 17}}
 
-    assert await application.workflow.handle_github_event("issue_comment", payload) is None
+    assert (
+        await application.workflow.handle_source_control_event("github", "issue_comment", payload)
+        is None
+    )
     result = await application.workflow.handle_source_control_event(
         "test-provider", "issue_comment", payload
     )
@@ -174,24 +177,31 @@ async def test_provider_events_reject_repository_mismatches(mixed_provider_appli
 
 
 def test_publish_mode_is_normalized_and_validated():
+    register_source_control_provider("my-provider", lambda *_: object())
     repository = RepositoryConfig(name="org/repo", publish_mode="  My-Provider  ")
     assert repository.publish_mode == "my-provider"
     with pytest.raises(ValidationError, match="provider name"):
         RepositoryConfig(name="org/repo", publish_mode="not a provider")
 
 
-def test_application_build_rejects_unregistered_publish_mode_with_context(tmp_path):
+def test_config_rejects_unregistered_publish_mode(tmp_path):
     config_path = tmp_path / "config.toml"
-    save_config(
-        Config(
-            runtime_root=tmp_path / "runtime",
-            repositories=[RepositoryConfig(name="org/repo", publish_mode="missing-provider")],
-        ),
-        config_path,
+    config_path.write_text(
+        '[[repositories]]\nname = "org/repo"\npublish_mode = "missing-provider"\n',
+        encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="missing-provider.*org/repo"):
-        Application.build(config_path, agent_backend=AsyncMock())
+    with pytest.raises(ValidationError, match="not registered"):
+        Config(repositories=[RepositoryConfig(name="org/repo", publish_mode="missing-provider")])
+    with pytest.raises(ValidationError, match="not registered"):
+        load_config(config_path, create=False)
+
+
+def test_invalid_repository_container_remains_a_pydantic_error(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("repositories = 2\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="repositories"):
+        load_config(config_path, create=False)
 
 
 def test_application_build_wraps_provider_factory_failure_with_context(tmp_path):
@@ -214,7 +224,7 @@ def test_application_build_wraps_provider_factory_failure_with_context(tmp_path)
     assert isinstance(error.value.__cause__, ValueError)
 
 
-def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
+def test_foreign_provider_github_clone_keeps_git_access_adapter(tmp_path):
     register_source_control_provider("plugin", lambda config, storage: SimpleNamespace())
     config_path = tmp_path / ".agent" / "config.toml"
     save_config(
@@ -233,7 +243,7 @@ def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
 
     application = Application.build(config_path, agent_backend=AsyncMock())
 
-    assert application.github.api is None
+    assert isinstance(application.github.api, GitHubCLIAdapter)
     save_config(
         Config(
             runtime_root=tmp_path / ".agent",
@@ -254,6 +264,14 @@ def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
 
 @pytest.mark.asyncio
 async def test_github_health_skips_plugin_owned_github_clone_urls():
+    register_source_control_provider("plugin", lambda *_: object())
+    plugin_repository = RepositoryConfig(
+        name="org/plugin",
+        clone_url="https://github.com/org/plugin.git",
+        publish_mode="plugin",
+    )
+    assert plugin_repository.needs_github_adapter
+    assert not plugin_repository.github_health_checkable
     config = Config(
         repositories=[
             RepositoryConfig(
@@ -480,12 +498,10 @@ async def test_health_checks_registered_source_control_providers():
     provider.check_health.assert_awaited_once_with()
 
 
-def test_server_openapi_version_uses_installed_package_metadata(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.server.get_version_info", lambda: {"version": "4.5.6"})
-
+def test_server_openapi_version_uses_default_version(tmp_path):
     app = create_server(_application_stub(tmp_path), run_worker=False)
 
-    assert app.version == "4.5.6"
+    assert app.version == "0.1.0"
 
 
 def test_provider_registration_rejects_invalid_and_duplicate_names():
@@ -507,6 +523,7 @@ def test_webhook_registration_requires_fastapi_router():
 
 
 def test_grouped_github_sync_only_updates_github_members(tmp_path):
+    register_source_control_provider("test-provider", lambda *_: object())
     config = Config(
         repositories=[
             RepositoryConfig(name="org/github", publish_mode="github"),
@@ -545,6 +562,7 @@ def test_grouped_github_sync_only_updates_github_members(tmp_path):
 
 @pytest.mark.asyncio
 async def test_plugin_deployment_without_repo_field_uses_target_member_in_group(tmp_path):
+    register_source_control_provider("plugin", lambda *_: object())
     config = Config(
         runtime_root=tmp_path / "runtime",
         repositories=[

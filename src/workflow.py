@@ -505,19 +505,11 @@ class WorkflowEngine:
         if mode == "github":
             return True
         provider = self.provider_for_repository(repository)
-        if mode == "auto" and provider is self.source_control_providers.get("github"):
-            # Keep historical global auto behavior when GitHub is an enabled
-            # publishing destination. If a plugin-selected GitHub clone was the
-            # only reason the shared CLI adapter exists, auto repos stay local.
-            github_is_a_publication_destination = any(
-                item.github_health_checkable for item in self.config.repositories
-            )
-            return provider.publish_enabled and github_is_a_publication_destination
         return provider.publish_enabled
 
     def source_control_name_for_repository(self, repository: str) -> str:
         try:
-            mode = self.config.repository(repository).publish_mode.strip().casefold()
+            mode = self.config.repository(repository).publish_mode
         except KeyError:
             mode = "auto"
         return "github" if mode in {"auto", "local"} else mode
@@ -605,19 +597,13 @@ class WorkflowEngine:
             raise RuntimeError("cannot update a pull request without its number")
         if not task.branch:
             raise RuntimeError("cannot update a pull request without its branch")
-        tools = WorkspaceTools(
-            worktree,
-            timeout=self.config.model.tool_timeout_seconds,
-            permissions=self.config.permissions,
-            execution=self.config.execution,
-        )
+        tools = WorkspaceTools(worktree)
         result = await tools.shell("git rev-parse HEAD")
         if result.returncode:
             raise RuntimeError(result.stderr or "could not determine updated PR head")
         head = result.stdout.strip()
         push = await tools.shell(
-            "git -c remote.origin.mirror=false push origin HEAD:refs/heads/"
-            + shlex.quote(task.branch)
+            "git -c remote.origin.mirror=false push origin HEAD:" + shlex.quote(task.branch)
         )
         if push.returncode:
             raise RuntimeError(push.stderr or "could not push the updated pull-request head")
@@ -1636,10 +1622,6 @@ class WorkflowEngine:
             latest.error = str(error)
             self.storage.save_task(latest)
             return latest
-
-    async def handle_github_event(self, event: str, payload: dict[str, Any]) -> TaskRecord | None:
-        """Handle native GitHub payloads through the shared provider event path."""
-        return await self.handle_source_control_event("github", event, payload)
 
     @staticmethod
     def _event_repositories(

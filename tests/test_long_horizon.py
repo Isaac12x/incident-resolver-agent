@@ -227,7 +227,8 @@ async def test_durable_route_keeps_deployment_verification_and_review_recovery(
     github = _GitHub(config.github)
     agent = IncidentAgent(config, storage, ConnectorManager([]), NoAgentBackend(config))
     workflow = WorkflowEngine(config, storage, agent, github, verifier)
-    deployment = await workflow.handle_github_event(
+    deployment = await workflow.handle_source_control_event(
+        "github",
         "deployment_status",
         {
             "repository": {"full_name": "company/service"},
@@ -255,7 +256,9 @@ async def test_durable_route_keeps_deployment_verification_and_review_recovery(
             "author_association": "OWNER",
         },
     }
-    await workflow.handle_github_event("pull_request_review_comment", review_payload)
+    await workflow.handle_source_control_event(
+        "github", "pull_request_review_comment", review_payload
+    )
     persisted = storage.load_task(task.task_id)
     assert [comment.id for comment in persisted.pending_review_comments] == [44]
     recovered = WorkflowEngine(config, storage, agent, github, verifier)

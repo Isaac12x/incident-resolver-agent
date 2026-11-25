@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend, SubscriptionCLIBackend
 from .bundles import load_active_bundle
-from .config import Config, load_config
+from .config import BUILTIN_PUBLISH_MODES, Config, load_config
 from .connectors import ConnectorManager
 from .github import GitHubCLIAdapter, GitHubService
 from .plugin_discovery import discover_plugins
@@ -85,7 +85,7 @@ class Application:
         provider_names = {"github"} | {
             repository.publish_mode
             for repository in config.repositories
-            if repository.publish_mode not in {"auto", "local", "github"}
+            if repository.publish_mode not in BUILTIN_PUBLISH_MODES
         }
         providers: dict[str, SourceControlProvider] = {}
         for provider_name in provider_names:

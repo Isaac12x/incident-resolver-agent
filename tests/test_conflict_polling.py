@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from src import source_control
 from src.config import Config, RepositoryConfig
 from src.models import TaskRecord, TaskState
 from src.workflow import WorkflowEngine
@@ -97,7 +98,13 @@ async def test_poll_skips_tasks_already_in_recovery():
 
 
 @pytest.mark.asyncio
-async def test_poll_dispatches_through_non_github_provider():
+async def test_poll_dispatches_through_non_github_provider(monkeypatch):
+    monkeypatch.setattr(
+        source_control,
+        "_provider_factories",
+        source_control._provider_factories.copy(),
+    )
+    source_control.register_source_control_provider("test-provider", lambda *_: object())
     task = tracked(1)
     response = {"state": "open", "head": {"sha": "head-1"}, "mergeable_state": "dirty"}
     engine = polling_engine([task], {1: response})

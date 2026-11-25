@@ -8,17 +8,20 @@ from threading import Event
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src import __main__ as cli
 from src import plugin_discovery, source_control
 from src.app import Application
-from src.config import Config, RepositoryConfig, save_config
+from src.config import Config, ModelConfig, RepositoryConfig, load_config, save_config
 from src.server import create_server
 
 
 @pytest.fixture(autouse=True)
 def isolated_discovery_state(monkeypatch):
     monkeypatch.setattr(plugin_discovery, "_discovered", False)
+    monkeypatch.setattr(plugin_discovery, "_discovering", False)
     monkeypatch.setattr(
         source_control, "_provider_factories", source_control._provider_factories.copy()
     )
@@ -50,6 +53,21 @@ def test_discovery_succeeds_with_no_plugins_and_is_idempotent(monkeypatch):
     assert calls == [{"group": "incident_harness.plugins"}]
 
 
+def test_builtin_config_validation_does_not_discover_plugins(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        plugin_discovery,
+        "entry_points",
+        lambda **kwargs: pytest.fail("built-in modes do not need plugin discovery"),
+    )
+    config_path = tmp_path / "config.toml"
+    save_config(
+        Config(repositories=[RepositoryConfig(name="org/repo", publish_mode="github")]),
+        config_path,
+    )
+
+    assert load_config(config_path, create=False).repositories[0].publish_mode == "github"
+
+
 def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
     tmp_path, monkeypatch, caplog
 ):
@@ -57,7 +75,9 @@ def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
 
     def broken_enumeration(**kwargs):
         calls.append(kwargs)
-        raise RuntimeError("metadata unavailable")
+        if len(calls) == 1:
+            raise RuntimeError("metadata unavailable")
+        return ()
 
     monkeypatch.setattr(plugin_discovery, "entry_points", broken_enumeration)
     config_path = tmp_path / "config.toml"
@@ -67,7 +87,7 @@ def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
     plugin_discovery.discover_plugins()
 
     assert tuple(application.source_control) == ("github",)
-    assert calls == [{"group": "incident_harness.plugins"}]
+    assert calls == [{"group": "incident_harness.plugins"}] * 2
     assert "failed to enumerate incident-harness plug-ins" in caplog.text
 
 
@@ -75,15 +95,29 @@ def test_application_build_and_server_start_with_only_builtin_provider(tmp_path,
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
     config_path = tmp_path / "config.toml"
-    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    save_config(
+        Config(
+            runtime_root=tmp_path / ".agent",
+            model=ModelConfig(mode="local", base_url="http://127.0.0.1:1234/v1"),
+        ),
+        config_path,
+    )
+    served = []
 
-    application = Application.build(config_path, agent_backend=AsyncMock())
-    server = create_server(application, run_worker=False)
+    def run_with_testclient(server, *, host, port):
+        served.append((host, port))
+        assert set(server.state.application.source_control) == {"github"}
+        with TestClient(server) as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+            assert health.json()["worker"] == "running"
+            assert client.get("/openapi.json").status_code == 200
+            assert client.post("/hooks/github", content=b"{}").status_code == 401
 
-    assert tuple(application.source_control) == ("github",)
-    with TestClient(server) as client:
-        assert client.get("/openapi.json").status_code == 200
-        assert client.post("/hooks/github", content=b"{}").status_code == 401
+    monkeypatch.setattr(cli.uvicorn, "run", run_with_testclient)
+    cli.main(["--config", str(config_path), "serve"])
+
+    assert len(served) == 1
 
 
 def test_create_server_runs_discovery_for_existing_application(tmp_path, monkeypatch):
@@ -103,6 +137,78 @@ def test_create_server_runs_discovery_for_existing_application(tmp_path, monkeyp
 
     with TestClient(server) as client:
         assert client.get("/hooks/discovered").json() == {"ok": True}
+
+
+@pytest.mark.parametrize("path", ["/hooks/github", "/hooks/{provider}", "/hooks/{rest:path}"])
+def test_external_webhook_routes_cannot_shadow_github(path):
+    server = FastAPI()
+    server.add_api_route("/hooks/github", lambda: {"builtin": True}, methods=["POST"])
+    source_control._webhook_routers.clear()
+    router = source_control.APIRouter()
+    router.add_api_route(path, lambda: {"plugin": True}, methods=["POST"])
+    source_control.register_webhook_router(router)
+
+    with pytest.raises(ValueError, match="overlaps.*hooks/github"):
+        source_control.mount_webhook_routers(server)
+
+
+@pytest.mark.parametrize("path", ["/hooks/{id:int}", "/hooks/{name}.json"])
+def test_external_webhook_routes_keep_disjoint_dynamic_paths(path):
+    server = FastAPI()
+    server.add_api_route("/hooks/github", lambda: {"builtin": True}, methods=["POST"])
+    source_control._webhook_routers.clear()
+    router = source_control.APIRouter()
+    router.add_api_route(path, lambda: {"plugin": True}, methods=["POST"])
+    source_control.register_webhook_router(router)
+
+    source_control.mount_webhook_routers(server)
+    with TestClient(server) as client:
+        sample = "1" if ":int}" in path else "thing.json"
+        response = client.post(f"/hooks/{sample}")
+    assert response.json() == {"plugin": True}
+
+
+def test_nested_webhook_router_prefix_is_checked():
+    server = FastAPI()
+    server.add_api_route("/api/hooks/github", lambda: {"builtin": True}, methods=["POST"])
+    source_control._webhook_routers.clear()
+    child = source_control.APIRouter()
+    child.add_api_route("/hooks/{name}", lambda: {"plugin": True}, methods=["POST"])
+    parent = source_control.APIRouter()
+    parent.include_router(child, prefix="/api")
+    source_control.register_webhook_router(parent)
+
+    with pytest.raises(ValueError, match="overlaps.*api/hooks/github"):
+        source_control.mount_webhook_routers(server)
+
+
+def test_registrar_can_validate_custom_mode_without_recursive_discovery(monkeypatch):
+    calls = []
+
+    def registrar():
+        calls.append("register")
+        plugin_discovery.discover_plugins()
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(registrar),))
+    plugin_discovery.discover_plugins()
+
+    assert calls == ["register"]
+
+
+def test_external_webhook_route_mount_conflicts_are_checked_before_mounting(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    first = source_control.APIRouter()
+    first.add_api_route("/hooks/shared", lambda: {"first": True}, methods=["POST"])
+    second = source_control.APIRouter()
+    second.add_api_route("/hooks/shared", lambda: {"second": True}, methods=["POST"])
+    source_control.register_webhook_router(first)
+    source_control.register_webhook_router(second)
+
+    with pytest.raises(ValueError, match="overlaps.*hooks/shared"):
+        create_server(application, run_worker=False)
 
 
 def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):
@@ -195,12 +301,13 @@ def test_application_build_discovers_installed_entry_point_plugins(tmp_path, mon
     monkeypatch.syspath_prepend(str(tmp_path))
     importlib.invalidate_caches()
     config_path = tmp_path / "config.toml"
-    save_config(
-        Config(
-            runtime_root=tmp_path / ".agent",
-            repositories=[RepositoryConfig(name="org/repo", publish_mode="entrypoint-provider")],
-        ),
-        config_path,
+    config_path.write_text(
+        'runtime_root = "' + str(tmp_path / ".agent") + '"\n'
+        '[[repositories]]\nname = "org/repo"\npublish_mode = "entrypoint-provider"\n',
+        encoding="utf-8",
+    )
+    assert load_config(config_path, create=False).repositories[0].publish_mode == (
+        "entrypoint-provider"
     )
 
     application = Application.build(config_path, agent_backend=AsyncMock())

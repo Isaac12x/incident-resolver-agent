@@ -14,7 +14,7 @@ from typing import Any
 
 from .config import Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
-from .source_control import ApplicationSyncProvider, WebhookEvent
+from .source_control import ApplicationSyncProvider, HealthCheckProvider, WebhookEvent
 from .storage import Storage
 
 
@@ -162,18 +162,20 @@ class GitHubCLIAdapter:
             return
         from .application_workflow import _view
 
-        github_repositories = {
+        published = {
             repository: state
             for repository, state in task.repositories.items()
             if state.pr_number
-            and self.config.repository(repository).uses_github
+        }
+        github_repositories = {
+            repository: state
+            for repository, state in published.items()
+            if self.config.repository(repository).uses_github
         }
         if not github_repositories:
             return
         references = []
-        for repository, state in task.repositories.items():
-            if not state.pr_number:
-                continue
+        for repository, state in published.items():
             references.append(
                 f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
                 f"(SHA `{state.pr_head_sha or ''}`)"
@@ -353,12 +355,9 @@ class GitHubService:
 
     async def check_health(self) -> dict[str, dict[str, str]]:
         """Report GitHub CLI health through the provider boundary."""
-        if self.api is None:
+        if not isinstance(self.api, HealthCheckProvider):
             return {}
-        check = getattr(self.api, "check_health", None)
-        if not callable(check):
-            return {}
-        return await check()
+        return await self.api.check_health()
 
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> None:
         if not self.webhook_secret:

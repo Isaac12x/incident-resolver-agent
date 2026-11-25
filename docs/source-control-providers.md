@@ -68,5 +68,5 @@ Discovery runs once per process and is safe when application builds or server cr
 happen concurrently. Each entry-point registrar runs in its own registration transaction:
 if loading or registration fails, core logs the failure, removes that registrar's partial
 provider and router registrations, and continues with later extensions. Built-in providers
-and routes remain available. A repository configured with a provider that was not registered
-still fails application construction with a clear error.
+and routes remain available. Configuration validation fails before application build if a
+repository selects a provider that was not registered.

@@ -19,30 +19,31 @@ def test_local_mode_disables_provider_even_if_provider_would_publish() -> None:
 
 def test_auto_mode_keeps_legacy_global_github_selection():
     engine = object.__new__(WorkflowEngine)
-    local_auto = SimpleNamespace(publish_mode="auto", github_health_checkable=False)
-    explicit_github = SimpleNamespace(github_health_checkable=True)
-    engine.config = SimpleNamespace(
-        repository=lambda name: local_auto,
-        repositories=[local_auto, explicit_github],
-    )
+    engine.config = SimpleNamespace(repository=lambda name: SimpleNamespace(publish_mode="auto"))
     provider = SimpleNamespace(publish_enabled=True)
     engine.source_control_providers = {"github": provider}
 
     assert engine.provider_enabled_for_repository("auto-local") is True
 
 
-def test_plugin_selected_github_clone_does_not_enable_unrelated_auto_repository():
+def test_explicit_github_mode_keeps_publication_enabled_without_api_adapter():
     engine = object.__new__(WorkflowEngine)
-    auto_repository = SimpleNamespace(publish_mode="auto", github_health_checkable=False)
-    plugin_repository = SimpleNamespace(github_health_checkable=False)
-    engine.config = SimpleNamespace(
-        repository=lambda name: auto_repository,
-        repositories=[auto_repository, plugin_repository],
-    )
-    provider = SimpleNamespace(publish_enabled=True)
-    engine.source_control_providers = {"github": provider}
+    engine.config = SimpleNamespace(repository=lambda name: SimpleNamespace(publish_mode="github"))
+    engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=False)}
 
-    assert engine.provider_enabled_for_repository("auto-local") is False
+    assert engine.provider_enabled_for_repository("repo") is True
+
+
+def test_plugin_mode_selects_its_registered_provider():
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        repository=lambda name: SimpleNamespace(publish_mode="example")
+    )
+    provider = SimpleNamespace(publish_enabled=False)
+    engine.source_control_providers = {"github": object(), "example": provider}
+
+    assert engine.source_control_name_for_repository("plugin-repo") == "example"
+    assert engine.provider_for_repository("plugin-repo") is provider
 
 
 def test_event_repository_validation_preserves_configured_case() -> None:

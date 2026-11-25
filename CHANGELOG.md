@@ -6,11 +6,15 @@
 
 - Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.
 - Clarify source-control provider configuration and documentation, and deduplicate webhook
-  router registration.
+  router registration. Reject conflicting webhook routes before mounting them and retry
+  discovery after an entry-point enumeration failure.
+- Validate repository publish modes against built-in or registered providers during config
+  construction and loading, and discover installed providers before validating custom modes.
 - Report provider startup failures with provider and repository context, roll back partial
   registrations from failed plugin setup, and continue loading other plugins.
 - Run provider health checks through the source-control registry and exclude plugin-owned
-  GitHub clone URLs from native GitHub checks.
+  GitHub clone URLs from native GitHub checks. Preserve the GitHub CLI adapter for all
+  GitHub clone URLs and include every published sibling in grouped PR descriptions.
 
 ## 0.4.0 - 2026-11-25
 

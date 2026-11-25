@@ -18,8 +18,12 @@ from .app import Application
 from .github import WebhookSignatureError
 from .models import Incident
 from .plugin_discovery import discover_plugins
-from .source_control import HealthCheckProvider, mount_webhook_routers, register_webhook_router
-from .version import get_version_info
+from .source_control import (
+    HealthCheckProvider,
+    WebhookEvent,
+    mount_webhook_routers,
+    register_webhook_router,
+)
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_INTELLIGENCE_TEXT_BYTES = 32 * 1024
@@ -42,14 +46,18 @@ async def github_webhook(request: Request) -> JSONResponse:
     application: Application = request.app.state.application
     body = await _bounded_request_body(request)
     try:
-        event, payload, duplicate = application.source_control["github"].authenticate_and_translate(
-            request.headers, body
+        webhook = WebhookEvent(
+            *application.source_control["github"].authenticate_and_translate(
+                request.headers, body
+            )
         )
     except WebhookSignatureError as error:
         raise HTTPException(status_code=401, detail=str(error)) from error
-    if duplicate:
+    if webhook.duplicate:
         return JSONResponse({"duplicate": True}, status_code=status.HTTP_202_ACCEPTED)
-    task = await application.workflow.handle_source_control_event("github", event, payload)
+    task = await application.workflow.handle_source_control_event(
+        "github", webhook.event, webhook.payload
+    )
     return JSONResponse(
         {"accepted": True, "task_id": task.task_id if task else None},
         status_code=status.HTTP_202_ACCEPTED,
@@ -85,7 +93,7 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
 
     server = FastAPI(
         title="Incident Harness",
-        version=get_version_info()["version"] or "unknown",
+        version="0.1.0",
         lifespan=lifespan,
     )
     server.state.application = application

@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from fastapi import APIRouter, FastAPI
+from fastapi.routing import iter_route_contexts
+from starlette.routing import BaseRoute, Mount
 
+from .config import normalize_provider_name
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
-from .provider_names import normalize_provider_name
 from .storage import Storage
 
 if TYPE_CHECKING:
@@ -37,7 +38,7 @@ class SourceControlProvider(Protocol):
 
     def authenticate_and_translate(
         self, headers: Mapping[str, str], body: bytes
-    ) -> tuple[str, dict[str, Any], bool]: ...
+    ) -> WebhookEvent: ...
 
     def repository_and_pr(self, payload: dict[str, Any]) -> tuple[str, int] | None: ...
 
@@ -65,19 +66,25 @@ class PullRequestPollingProvider(Protocol):
     async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]: ...
 
 
-@runtime_checkable
-class LocalUpdateProvider(Protocol):
-    """Optional capability for publishing an update from a local checkout."""
+class WebhookEvent(NamedTuple):
+    """Normalized webhook result; remains tuple-compatible for existing providers."""
 
-    async def update_from_worktree(
-        self, task: TaskRecord, worktree: Path
-    ) -> PullRequestReference: ...
+    event: str
+    payload: dict[str, Any]
+    duplicate: bool
 
 
 ProviderFactory = Callable[["Config", Storage], SourceControlProvider]
 _provider_factories: dict[str, ProviderFactory] = {}
 _webhook_routers: list[APIRouter] = []
 _registry_lock = RLock()
+
+
+class _RouteRecord(NamedTuple):
+    path: str
+    matcher: Any
+    methods: frozenset[str]
+    prefix: bool
 
 
 @contextmanager
@@ -119,6 +126,12 @@ def create_source_control_provider(
     return factory(config, storage)
 
 
+def registered_source_control_providers() -> tuple[str, ...]:
+    """Return a stable snapshot of provider names registered by extensions."""
+    with _registry_lock:
+        return tuple(_provider_factories)
+
+
 def register_webhook_router(router: APIRouter) -> None:
     """Mount an external provider's FastAPI routes on every core server."""
     if not isinstance(router, APIRouter):
@@ -129,8 +142,75 @@ def register_webhook_router(router: APIRouter) -> None:
 
 
 def mount_webhook_routers(server: FastAPI) -> None:
-    """Include all routes registered by installed provider packages."""
+    """Validate and include all routes registered by installed provider packages."""
     with _registry_lock:
         routers = tuple(_webhook_routers)
+    routes = _route_records(server.routes)
+    pending: list[_RouteRecord] = []
+    for router in routers:
+        for route in _route_records(router.routes):
+            conflict = next(
+                (
+                    existing
+                    for existing in (*routes, *pending)
+                    if _routes_conflict(existing, route)
+                ),
+                None,
+            )
+            if conflict is not None:
+                raise ValueError(
+                    "webhook route conflicts with an existing route: "
+                    f"{sorted(route.methods)} {route.path} overlaps "
+                    f"{sorted(conflict.methods)} {conflict.path}"
+                )
+            pending.append(route)
     for router in routers:
         server.include_router(router)
+
+
+def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:
+    records = []
+    for context in iter_route_contexts(routes):
+        route = context.original_route
+        path = context.path or getattr(route, "path", "")
+        regex = context.path_regex or getattr(route, "path_regex", None)
+        methods = set(context.methods or ())
+        if isinstance(route, Mount):
+            methods.update({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
+        if "GET" in methods:
+            methods.add("HEAD")
+        records.append(_RouteRecord(path, regex, frozenset(methods), isinstance(route, Mount)))
+    return records
+
+
+def _routes_conflict(left: _RouteRecord, right: _RouteRecord) -> bool:
+    if not left.methods & right.methods:
+        return False
+    return _compiled_paths_overlap(left, right)
+
+
+def _compiled_paths_overlap(left: _RouteRecord, right: _RouteRecord) -> bool:
+    """Check each route against the other's path using Starlette's compiled matcher."""
+    import re
+
+    if not left.matcher or not right.matcher:
+        return False
+    left_matches = left.matcher.match if left.prefix else left.matcher.fullmatch
+    right_matches = right.matcher.match if right.prefix else right.matcher.fullmatch
+    if left_matches(right.path) or right_matches(left.path):
+        return True
+
+    def normalize_parameters(pattern: str) -> str:
+        return re.sub(r"\(\?P<[^>]+>", "(?P<param>", pattern)
+
+    left_pattern = normalize_parameters(left.matcher.pattern)
+    right_pattern = normalize_parameters(right.matcher.pattern)
+    if left_pattern == right_pattern:
+        return True
+    left_prefix, _, left_tail = left_pattern.partition("(?P<param>")
+    right_prefix, _, right_tail = right_pattern.partition("(?P<param>")
+    left_catchall = left_tail.startswith(".*)")
+    right_catchall = right_tail.startswith(".*)")
+    return (left_catchall or right_catchall) and (
+        left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+    )

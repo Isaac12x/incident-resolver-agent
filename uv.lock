@@ -965,7 +965,7 @@ requires-dist = [
     { name = "a2a-sdk" },
     { name = "code-review-graph" },
     { name = "faiss-cpu", marker = "extra == 'intelligence'" },
-    { name = "fastapi" },
+    { name = "fastapi", specifier = ">=0.141.1" },
     { name = "fastmcp", specifier = ">=3.2,<4" },
     { name = "httpx" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.26,<2" },

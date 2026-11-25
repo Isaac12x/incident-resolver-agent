@@ -10,6 +10,7 @@ from .source_control import registration_transaction
 
 _lock = RLock()
 _discovered = False
+_discovering = False
 
 
 def discover_plugins() -> None:
@@ -19,28 +20,33 @@ def discover_plugins() -> None:
     not register extensions more than once. Each registrar is isolated and failed registrations
     are rolled back, allowing later extensions and core startup to continue.
     """
-    global _discovered
+    global _discovered, _discovering
 
     with _lock:
-        if _discovered:
+        if _discovered or _discovering:
             return
+        _discovering = True
         try:
-            plugins = entry_points(group="incident_harness.plugins")
-        except Exception:
-            logging.getLogger(__name__).exception("failed to enumerate incident-harness plug-ins")
-            _discovered = True
-            return
-        for plugin in plugins:
-            plugin_name = plugin.name
             try:
-                with registration_transaction():
-                    registrar = plugin.load()
-                    if not callable(registrar):
-                        raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
-                    registrar()
+                plugins = entry_points(group="incident_harness.plugins")
             except Exception:
                 logging.getLogger(__name__).exception(
-                    "failed to load incident-harness plug-in %s; skipping", plugin_name
+                    "failed to enumerate incident-harness plug-ins"
                 )
+                return
+            for plugin in plugins:
+                plugin_name = plugin.name
+                try:
+                    with registration_transaction():
+                        registrar = plugin.load()
+                        if not callable(registrar):
+                            raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
+                        registrar()
+                except Exception:
+                    logging.getLogger(__name__).exception(
+                        "failed to load incident-harness plug-in %s; skipping", plugin_name
+                    )
 
-        _discovered = True
+            _discovered = True
+        finally:
+            _discovering = False
