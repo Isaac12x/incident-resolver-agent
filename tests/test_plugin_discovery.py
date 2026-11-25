@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import importlib
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
 
 from src import __main__ as cli
 from src import plugin_discovery, source_control
@@ -76,9 +78,13 @@ def test_direct_custom_repository_config_does_not_discover_plugins(monkeypatch):
         lambda **kwargs: pytest.fail("direct model construction must not discover plugins"),
     )
 
-    with pytest.raises(ValidationError, match="publish mode provider is not registered"):
-        RepositoryConfig(name="org/repo", publish_mode="entrypoint-provider")
+    source_control.register_source_control_provider(
+        "entrypoint-provider", cast(source_control.ProviderFactory, lambda *_: object())
+    )
 
+    repository = RepositoryConfig(name="org/repo", publish_mode="entrypoint-provider")
+
+    assert repository.publish_mode == "entrypoint-provider"
     assert plugin_discovery._discovered is False
 
 
@@ -103,6 +109,41 @@ def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
     assert tuple(application.source_control) == ("github",)
     assert calls == [{"group": "incident_harness.plugins"}] * 2
     assert "failed to enumerate incident-harness plug-ins" in caplog.text
+
+
+def test_partial_entry_point_enumeration_does_not_run_registrars_before_retry(monkeypatch):
+    registrar_calls = []
+    enumeration_calls = []
+
+    def registrar():
+        registrar_calls.append("registered")
+        source_control.register_source_control_provider(
+            "retry-safe-provider", lambda config, storage: object()
+        )
+
+    def broken_enumeration(**kwargs):
+        enumeration_calls.append(kwargs)
+        if len(enumeration_calls) == 1:
+            def partial_results():
+                yield EntryPoint(registrar)
+                raise RuntimeError("metadata iteration failed")
+
+            return partial_results()
+        return (EntryPoint(registrar),)
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", broken_enumeration)
+
+    plugin_discovery.discover_plugins()
+    assert registrar_calls == []
+    assert "retry-safe-provider" not in source_control.registered_source_control_providers()
+
+    plugin_discovery.discover_plugins()
+
+    assert registrar_calls == ["registered"]
+    assert source_control.registered_source_control_providers() == (
+        "github",
+        "retry-safe-provider",
+    )
 
 
 def test_application_build_and_server_start_with_only_builtin_provider(tmp_path, monkeypatch):
@@ -132,6 +173,41 @@ def test_application_build_and_server_start_with_only_builtin_provider(tmp_path,
     cli.main(["--config", str(config_path), "serve"])
 
     assert len(served) == 1
+
+
+def test_built_server_authenticates_real_github_webhook_with_empty_plugin_registry(
+    tmp_path, monkeypatch
+):
+    secret = "test-github-secret"
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    application.workflow.handle_source_control_event = AsyncMock(return_value=None)
+
+    server = create_server(application, run_worker=False)
+    body = b'{"zen":"Keep it logically awesome."}'
+    signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    assert source_control.registered_source_control_providers() == ("github",)
+    assert source_control._webhook_routers == []
+    with TestClient(server) as client:
+        response = client.post(
+            "/hooks/github",
+            content=body,
+            headers={
+                "x-hub-signature-256": f"sha256={signature}",
+                "x-github-event": "ping",
+                "x-github-delivery": "delivery-1",
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True, "task_id": None}
+    application.workflow.handle_source_control_event.assert_awaited_once_with(
+        "github", "ping", {"zen": "Keep it logically awesome."}
+    )
 
 
 def test_create_server_runs_discovery_for_existing_application(tmp_path, monkeypatch):
@@ -283,6 +359,97 @@ def test_create_server_preflights_plugins_against_native_github_route(tmp_path, 
 
     with pytest.raises(ValueError, match="overlaps.*hooks/github"):
         create_server(application, run_worker=False)
+
+
+def test_router_routes_added_after_registration_are_checked_before_server_mount(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    router = source_control.APIRouter()
+    source_control.register_webhook_router(router)
+    router.add_api_route("/hooks/github", lambda: {"plugin": True}, methods=["POST"])
+
+    with pytest.raises(ValueError, match="overlaps.*hooks/github"):
+        create_server(application, run_worker=False)
+
+
+def test_registered_router_mutation_after_server_build_cannot_shadow_native_route(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    router = source_control.APIRouter()
+    source_control.register_webhook_router(router)
+    server = create_server(application, run_worker=False)
+
+    # FastAPI snapshots APIRouter routes when include_router is called.
+    router.add_api_route("/hooks/github", lambda: {"plugin": True}, methods=["POST"])
+    router.add_api_route("/hooks/late", lambda: {"plugin": True}, methods=["POST"])
+
+    with TestClient(server) as client:
+        native = client.post("/hooks/github", content=b"{}")
+        late = client.post("/hooks/late", content=b"{}")
+
+    assert native.status_code == 401
+    assert native.json() == {"detail": "GitHub webhook secret is not configured"}
+    assert late.status_code == 404
+
+
+def test_child_router_mutation_after_server_build_does_not_add_unchecked_route(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    child = source_control.APIRouter()
+    parent = source_control.APIRouter()
+    parent.include_router(child, prefix="/provider")
+    source_control.register_webhook_router(parent)
+    server = create_server(application, run_worker=False)
+
+    child.add_api_route("/hooks/late", lambda: {"plugin": True}, methods=["POST"])
+
+    with TestClient(server) as client:
+        response = client.post("/provider/hooks/late", content=b"{}")
+
+    assert response.status_code == 404
+
+
+def test_nested_router_snapshot_preserves_route_options_and_dependencies(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    dependency_calls = []
+
+    def authenticate():
+        dependency_calls.append("checked")
+
+    child = source_control.APIRouter()
+    child.add_api_route(
+        "/event",
+        lambda: {"accepted": True},
+        methods=["POST"],
+        status_code=202,
+        dependencies=[Depends(authenticate)],
+    )
+    parent = source_control.APIRouter()
+    parent.include_router(child, prefix="/provider")
+    source_control.register_webhook_router(parent)
+    server = create_server(application, run_worker=False)
+
+    with TestClient(server) as client:
+        response = client.post("/provider/event")
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True}
+    assert dependency_calls == ["checked"]
 
 
 def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):

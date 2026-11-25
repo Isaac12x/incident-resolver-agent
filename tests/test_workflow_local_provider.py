@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from src.config import RepositoryConfig
 from src.workflow import WorkflowEngine
 
 
@@ -39,12 +40,12 @@ def test_unconfigured_task_keeps_legacy_auto_provider_selection():
     assert engine.provider_enabled_for_repository("legacy-task") is True
 
 
-def test_explicit_github_mode_keeps_publication_enabled_without_api_adapter():
+def test_explicit_github_mode_honors_provider_disabled_state():
     engine = object.__new__(WorkflowEngine)
     engine.config = SimpleNamespace(repository=lambda name: SimpleNamespace(publish_mode="github"))
     engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=False)}
 
-    assert engine.provider_enabled_for_repository("repo") is True
+    assert engine.provider_enabled_for_repository("repo") is False
 
 
 def test_plugin_mode_selects_its_registered_provider():
@@ -60,7 +61,7 @@ def test_plugin_mode_selects_its_registered_provider():
 
 
 def test_event_repository_validation_preserves_configured_case() -> None:
-    repository = SimpleNamespace(name="Org/Repo", clone_url=None, publish_mode="github")
+    repository = RepositoryConfig(name="Org/Repo", publish_mode="github")
     engine = object.__new__(WorkflowEngine)
     engine.config = SimpleNamespace(
         repositories=[repository],

@@ -10,11 +10,13 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
+from copy import copy
+from dataclasses import replace
 from threading import RLock
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from fastapi import APIRouter, FastAPI
-from fastapi.routing import iter_route_contexts
+from fastapi.routing import _IncludedRouter, iter_route_contexts
 from starlette.routing import BaseRoute, Mount
 
 from .config import normalize_provider_name
@@ -145,7 +147,10 @@ def register_webhook_router(router: APIRouter) -> None:
 def mount_webhook_routers(server: FastAPI) -> None:
     """Validate and include all routes registered by installed provider packages."""
     with _registry_lock:
-        routers = tuple(_webhook_routers)
+        # FastAPI may retain an included APIRouter and resolve its routes later.
+        # Mount a shallow router copy with a copied route list so a package cannot
+        # add unvalidated routes to an already constructed server.
+        routers = tuple(_router_snapshot(router) for router in _webhook_routers)
     existing = _route_records(server.routes)
     for router in routers:
         for route in _route_records(router.routes):
@@ -161,6 +166,26 @@ def mount_webhook_routers(server: FastAPI) -> None:
             existing.append(route)
     for router in routers:
         server.include_router(router)
+
+
+def _router_snapshot(router: APIRouter) -> APIRouter:
+    snapshot = copy(router)
+    routes = []
+    for route in router.routes:
+        if isinstance(route, _IncludedRouter):
+            child_snapshot = _router_snapshot(route.original_router)
+            copied_context = replace(route.include_context, included_router=child_snapshot)
+            # A fresh include node gets independent FastAPI route caches and lock.
+            routes.append(
+                _IncludedRouter(
+                    original_router=child_snapshot,
+                    include_context=copied_context,
+                )
+            )
+        else:
+            routes.append(route)
+    snapshot.routes = routes
+    return snapshot
 
 
 def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:

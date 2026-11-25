@@ -368,6 +368,34 @@ async def test_review_repairs_republish_then_verify(restore_task_state, workflow
 
 
 @pytest.mark.asyncio
+async def test_open_pr_preserves_existing_pr_when_explicit_provider_is_disabled(
+    restore_task_state, workflow, monkeypatch
+):
+    engine, task, worktree = workflow
+    engine.config.code_review.enabled = False
+    engine.config.repositories[0].publish_mode = "github"
+    engine.github.publish_enabled = False
+    task = restore_task_state(
+        engine.storage,
+        task.task_id,
+        TaskState.TESTING_LOCAL,
+        pr_number=7,
+        pr_url="https://github.test/pr/7",
+        pr_head_sha="existing-head",
+    )
+    publish = AsyncMock(side_effect=AssertionError("disabled provider was called"))
+    monkeypatch.setattr(engine, "_publish", publish)
+
+    with pytest.raises(RuntimeError, match="publishing is disabled"):
+        await _TaskLifecycle(engine, task.task_id, worktree).open_pr("fix")
+
+    updated = engine.storage.load_task(task.task_id)
+    assert updated.pr_url == "https://github.test/pr/7"
+    assert updated.pr_head_sha == "existing-head"
+    publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_readonly_and_uncommitted_review_mutations(restore_task_state, workflow, monkeypatch):
     engine, task, worktree = workflow
     (worktree / "fix.py").write_text("fixed = True")

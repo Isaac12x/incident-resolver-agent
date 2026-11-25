@@ -28,7 +28,10 @@ def discover_plugins() -> None:
         _discovering = True
         try:
             try:
-                plugins = entry_points(group="incident_harness.plugins")
+                # Read the complete metadata index before running any registrar. If a
+                # lazy index fails partway through, a later discovery retry cannot
+                # invoke registrars that already ran during the failed enumeration.
+                plugins = tuple(entry_points(group="incident_harness.plugins"))
             except Exception:
                 logging.getLogger(__name__).exception(
                     "failed to enumerate incident-harness plug-ins"

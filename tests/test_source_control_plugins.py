@@ -115,6 +115,27 @@ def test_application_build_dispatches_to_registered_provider(mixed_provider_appl
     assert isinstance(application.github, GitHubService)
 
 
+def test_application_build_honors_disabled_explicit_github_provider(tmp_path, monkeypatch):
+    monkeypatch.setitem(
+        source_control._provider_factories,
+        "github",
+        lambda config, storage: GitHubService(config.github),
+    )
+    config_path = tmp_path / ".agent" / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / ".agent",
+            repositories=[RepositoryConfig(name="org/repo", publish_mode="github")],
+        ),
+        config_path,
+    )
+
+    application = Application.build(config_path, agent_backend=AsyncMock())
+
+    assert application.github.publish_enabled is False
+    assert application.workflow.provider_enabled_for_repository("org/repo") is False
+
+
 @pytest.mark.asyncio
 async def test_events_dispatch_to_registered_provider(mixed_provider_application):
     application, _, task, _ = mixed_provider_application
@@ -128,6 +149,22 @@ async def test_events_dispatch_to_registered_provider(mixed_provider_application
         "test-provider", "issue_comment", payload
     )
     assert result is not None and result.task_id == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_legacy_handle_github_event_delegates_to_provider_handler(
+    mixed_provider_application,
+):
+    application, _, _, github_task = mixed_provider_application
+    payload = {
+        "repository": {"full_name": "org/github-repo"},
+        "pull_request": {"repository": "org/github-repo", "number": 23},
+    }
+
+    result = await application.workflow.handle_github_event("pull_request", payload)
+
+    assert result is not None
+    assert result.task_id == github_task.task_id
 
 
 @pytest.mark.asyncio
@@ -301,6 +338,26 @@ def test_publish_mode_is_normalized_and_validated():
     assert repository.publish_mode == "my-provider"
     with pytest.raises(ValidationError, match="provider name"):
         RepositoryConfig(name="org/repo", publish_mode="not a provider")
+
+
+def test_workflow_normalizes_provider_mapping_keys(tmp_path):
+    register_source_control_provider("my-provider", lambda *_: object())
+    config = Config(
+        runtime_root=tmp_path,
+        repositories=[RepositoryConfig(name="org/repo", publish_mode="my-provider")],
+    )
+    provider = SimpleNamespace(publish_enabled=False)
+    workflow = WorkflowEngine(
+        config,
+        Storage(tmp_path),
+        object(),
+        GitHubService(config.github),
+        object(),
+        source_control_providers={"  My-Provider  ": provider},
+    )
+
+    assert workflow.provider_for_repository("org/repo") is provider
+    assert workflow.provider_enabled_for_repository("org/repo") is False
 
 
 def test_config_rejects_unregistered_publish_mode(tmp_path):

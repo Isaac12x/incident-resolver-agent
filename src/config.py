@@ -7,6 +7,7 @@ import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -305,6 +306,25 @@ class RepositoryConfig(BaseModel):
     def needs_github_adapter(self) -> bool:
         """Whether GitHub tooling is needed for configured repository access."""
         return self.publish_mode == "github" or "github.com" in (self.clone_url or "")
+
+    @property
+    def clone_identity(self) -> str | None:
+        """Return the owner/repository identity encoded by a remote clone URL."""
+        value = (self.clone_url or "").strip().rstrip("/")
+        if not value:
+            return None
+        if value.startswith("git@") and ":" in value:
+            path = value.split(":", 1)[1]
+        else:
+            try:
+                parsed = urlsplit(value)
+            except ValueError:
+                return None
+            path = parsed.path if parsed.scheme and parsed.netloc else ""
+        identity = path.strip("/").removesuffix(".git")
+        if not identity or any(part in {".", ".."} for part in identity.split("/")):
+            return None
+        return identity
 
     @field_validator("name")
     @classmethod

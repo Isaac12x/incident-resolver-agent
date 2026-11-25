@@ -41,6 +41,11 @@ class _GitHub(GitHubService):
     def __init__(self, config):  # noqa: ANN001
         super().__init__(config)
         self.updated: list[str] = []
+        self._publishing_enabled = True
+
+    @property
+    def publish_enabled(self):
+        return self._publishing_enabled
 
     async def create_pull_request(self, task):  # noqa: ANN001, ANN201
         return PullRequestReference(
@@ -84,7 +89,7 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
     config.repositories.append(
         RepositoryConfig(
             name="company/service",
-            publish_mode="github",
+            publish_mode="auto",
             clone_url="https://example.invalid/service.git",
         )
     )
@@ -158,6 +163,9 @@ async def test_real_agent_path_uses_lifecycle_tools_in_one_resumable_task_sessio
     assert (await workflow.process(task.task_id)).state == TaskState.COLLECTING_CONTEXT
     task = await workflow.process(task.task_id)
     assert task.state == TaskState.WAITING_FOR_DEPLOYMENT
+    # Simulate an API that was available for the original PR but is now disabled;
+    # auto mode retains the established direct worktree update path for this PR.
+    github._publishing_enabled = False  # noqa: SLF001
     assert len(calls) == 1
     assert calls[0].session_id == task.agent_session_id
     assert storage.read_task_memory(task.task_id).count("Investigation") == 1

@@ -4,6 +4,12 @@
 
 ## 0.4.2 - 2026-11-25
 
+- Restore the legacy `handle_github_event` workflow entry point. Log why a webhook
+  was ignored when its repository identity or task match is ambiguous.
+- Honor provider availability for explicit GitHub publication. Build webhook servers
+  from checked router snapshots so later route additions require a new server.
+- Read the entire plug-in metadata index before invoking registrars, allowing retries
+  after enumeration failures without repeating registration.
 - Route source-control webhooks to the configured repository when its local name differs
   from the full name sent by the provider. Reject conflicting repository identities.
 - Refresh existing GitHub pull requests for local-mode application members and include

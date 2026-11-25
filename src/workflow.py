@@ -14,7 +14,6 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 from .agent import IncidentAgent
@@ -374,7 +373,12 @@ class _TaskLifecycle:
         self.workflow.storage.append_task_memory(
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
-        if task.pr_number and self.workflow.provider_enabled_for_repository(task.repository):
+        if task.pr_number and (
+            self.workflow.provider_enabled_for_repository(task.repository)
+            or self.workflow._publish_mode_for_repository(task.repository) == "auto"
+        ):
+            # Legacy auto-mode tasks can still update a previously opened PR through
+            # the direct worktree transport when provider APIs are unavailable.
             reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
                 raise RuntimeError(
@@ -390,15 +394,10 @@ class _TaskLifecycle:
                 conflict_base_branch=None,
             )
         elif task.pr_number:
-            reference = await self.workflow._publish(task, self.worktree, update=True)
-            task = self.workflow.storage.transition(
-                self.task_id,
-                TaskState.WAITING_FOR_DEPLOYMENT,
-                pr_head_sha=reference.head_sha,
-                pr_url=reference.url,
-                conflict_pending=False,
-                conflict_merge_pending=False,
-                conflict_base_branch=None,
+            # Keep the existing remote reference intact when this repository cannot
+            # publish updates through its explicitly selected provider.
+            raise RuntimeError(
+                f"cannot update pull request for {task.repository}: publishing is disabled"
             )
         elif not self.workflow.provider_enabled_for_repository(task.repository):
             if task.state != TaskState.PUBLISHING_PR:
@@ -461,7 +460,7 @@ class WorkflowEngine:
         self.agent = agent
         self.github = github
         self.source_control_providers = {
-            name.casefold(): provider
+            normalize_provider_name(name): provider
             for name, provider in (source_control_providers or {"github": github}).items()
         }
         self.source_control_providers.setdefault("github", github)
@@ -498,8 +497,6 @@ class WorkflowEngine:
         mode = self._publish_mode_for_repository(repository)
         if mode == "local":
             return False
-        if mode == "github":
-            return True
         return self.provider_for_repository(repository).publish_enabled
 
     def _publish_mode_for_repository(self, repository: str) -> str:
@@ -1641,6 +1638,9 @@ class WorkflowEngine:
             return None
         repositories = {str(name).casefold() for name in resolved}
         if len(repositories) > 1:
+            logging.getLogger(__name__).warning(
+                "Ignoring %s webhook with conflicting repository identities", provider_name
+            )
             return None
         return next(iter(resolved), "")
 
@@ -1650,18 +1650,9 @@ class WorkflowEngine:
         matches: list[RepositoryConfig] = []
         for repository in self.config.repositories:
             identities = {repository.name.casefold()}
-            clone_url = (repository.clone_url or "").strip()
-            if clone_url.startswith("git@") and ":" in clone_url:
-                path = clone_url.split(":", 1)[1]
-            else:
-                try:
-                    parsed = urlsplit(clone_url)
-                except ValueError:
-                    parsed = None
-                path = parsed.path if parsed and parsed.scheme and parsed.netloc else ""
-            path = path.strip("/").removesuffix(".git")
-            if path and not any(part in {".", ".."} for part in path.split("/")):
-                identities.add(path.casefold())
+            clone_identity = repository.clone_identity
+            if clone_identity:
+                identities.add(clone_identity.casefold())
             if candidate in identities:
                 matches.append(repository)
         provider_matches = [
@@ -1671,6 +1662,9 @@ class WorkflowEngine:
         if provider_matches:
             matches = provider_matches
         if len(matches) > 1:
+            logging.getLogger(__name__).warning(
+                "Ignoring %s webhook: configured repository identity is ambiguous", provider_name
+            )
             return None
         return matches[0].name if matches else name
 
@@ -1687,6 +1681,14 @@ class WorkflowEngine:
         if event_repository is None:
             return None
         if event_repository and self.provider_for_repository(event_repository) is not provider:
+            if any(
+                repo.name.casefold() == event_repository.casefold()
+                for repo in self.config.repositories
+            ):
+                logging.getLogger(__name__).warning(
+                    "Ignoring %s webhook: repository is assigned to a different provider",
+                    normalized_provider,
+                )
             return None
         if target:
             target = (event_repository, target[1])
@@ -1705,6 +1707,11 @@ class WorkflowEngine:
                         break
             if len(candidates) == 1:
                 task = candidates[0]
+            elif len(candidates) > 1:
+                logging.getLogger(__name__).warning(
+                    "%s webhook pull request matches multiple active tasks",
+                    normalized_provider,
+                )
         deployment_repository = event_repository
         deployment_data = payload.get("deployment", payload)
         deployment_status = payload.get("deployment_status", {})
@@ -1741,6 +1748,11 @@ class WorkflowEngine:
                         break
             if len(matches) == 1:
                 task = matches[0]
+            elif len(matches) > 1:
+                logging.getLogger(__name__).warning(
+                    "Ignoring %s webhook: deployment matches multiple active tasks",
+                    normalized_provider,
+                )
         if not task:
             return None
         if task.state in TERMINAL_STATES:
@@ -1799,6 +1811,10 @@ class WorkflowEngine:
                 await self.wake(task.task_id)
             return task
         return task
+
+    async def handle_github_event(self, event: str, payload: dict[str, Any]) -> TaskRecord | None:
+        """Preserve the legacy entry point for callers handling native GitHub events."""
+        return await self.handle_source_control_event("github", event, payload)
 
     @staticmethod
     def _is_conflicted_pull_request(payload: dict[str, Any]) -> bool:

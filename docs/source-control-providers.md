@@ -71,6 +71,11 @@ configuration reads do not import provider packages. `Application.build` and
 when the server is created from an existing application. Mounted handlers can access
 the built application as `request.app.state.application`. Core keeps
 `/hooks/github`, event handling, and conflict polling on the registered GitHub provider.
+Webhook routers are checked for route conflicts when `create_server` mounts them. Add
+routes to a registered router before creating the server. The server mounts a checked
+snapshot of the router tree; later changes to the original routers do not add routes to
+that server. Registering a router or changing it after server creation requires building
+a new server to take effect.
 
 Discovery runs once per process and is safe when application builds or server creation
 happen concurrently. Each entry-point registrar runs in its own registration transaction:

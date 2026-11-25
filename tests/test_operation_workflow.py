@@ -212,3 +212,113 @@ async def test_registered_pr_merge_completes_during_deployment_wait(
         },
     )
     assert result.state == TaskState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_webhook_repository_is_diagnosed_without_payload_data(
+    tmp_path, config, incident, caplog
+):
+    from src.config import RepositoryConfig
+
+    config.repositories.append(
+        RepositoryConfig(
+            name="second-alias",
+            clone_url="https://example.invalid/company/application.git",
+        )
+    )
+    workflow, _, _ = _workflow(tmp_path, config, incident)
+
+    result = await workflow.handle_source_control_event(
+        "github",
+        "pull_request",
+        {
+            "repository": {"full_name": "company/application"},
+            "pull_request": {"number": 99},
+            "secret": "must-not-be-logged",
+        },
+    )
+
+    assert result is None
+    assert "configured repository identity is ambiguous" in caplog.text
+    assert "must-not-be-logged" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_conflicting_webhook_repository_identity_is_diagnosed(
+    tmp_path, config, incident, caplog
+):
+    workflow, _, _ = _workflow(tmp_path, config, incident)
+
+    result = await workflow.handle_source_control_event(
+        "github",
+        "deployment_status",
+        {
+            "repository": {"full_name": "company/application"},
+            "deployment": {
+                "repository": {"full_name": "elsewhere/other"},
+                "sha": "sha-1",
+            },
+        },
+    )
+
+    assert result is None
+    assert "conflicting repository identities" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unmatched_webhook_repository_stays_silent(tmp_path, config, incident, caplog):
+    workflow, _, _ = _workflow(tmp_path, config, incident)
+    workflow.source_control_providers["unconfigured-provider"] = FakeGitHub(config.github)
+
+    result = await workflow.handle_source_control_event(
+        "unconfigured-provider",
+        "pull_request",
+        {"repository": {"full_name": "unconfigured/repo"}},
+    )
+
+    assert result is None
+    assert not caplog.records
+
+
+@pytest.mark.asyncio
+async def test_provider_mismatched_webhook_is_diagnosed(tmp_path, config, incident, caplog):
+    config.repositories[0].publish_mode = "custom-provider"
+    workflow, _, _ = _workflow(tmp_path, config, incident)
+    workflow.source_control_providers["custom-provider"] = object()
+
+    result = await workflow.handle_source_control_event(
+        "github", "pull_request", {"repository": {"full_name": "company/application"}}
+    )
+
+    assert result is None
+    assert "assigned to a different provider" in caplog.text
+
+
+def test_repository_config_preserves_nested_remote_clone_identity():
+    from src.config import RepositoryConfig
+
+    repository = RepositoryConfig(
+        name="division/team/repo",
+        clone_url="https://git.example.invalid/division/team/repo.git",
+    )
+
+    assert repository.clone_identity == "division/team/repo"
+
+
+def test_nested_clone_identity_does_not_collapse_shared_repository_suffixes(
+    tmp_path, config, incident
+):
+    from src.config import RepositoryConfig
+
+    config.repositories = [
+        RepositoryConfig(
+            name="first-alias", clone_url="https://git.example.invalid/division/team/repo.git"
+        ),
+        RepositoryConfig(
+            name="second-alias", clone_url="https://git.example.invalid/another/team/repo.git"
+        ),
+    ]
+    workflow, _, _ = _workflow(tmp_path, config, incident)
+
+    assert workflow._resolve_event_repository("division/team/repo", "github") == "first-alias"
+    assert workflow._resolve_event_repository("another/team/repo", "github") == "second-alias"
