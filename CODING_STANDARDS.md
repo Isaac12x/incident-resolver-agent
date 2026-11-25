@@ -1,6 +1,6 @@
 # Coding Standards
 
-Two parts. Part 1 is normative for all new and changed code. Part 2 adds what is specific to incident-harness. Lint-enforced rules (ruff) are not repeated.
+Two parts. Part 1 is normative for all new and changed code. Part 2 adds what is specific to incident-harness.
 
 # Part 1: Generic standards
 
@@ -19,9 +19,9 @@ Two parts. Part 1 is normative for all new and changed code. Part 2 adds what is
 
 ## Functions and classes
 - Small, single responsibility. Split a function that mixes parsing, I/O, and formatting.
-- Flag long or branchy functions that resist unit testing; extract until each piece is testable.
+- Flag long or branchy functions that resist unit testing; extract until each piece is unit-testable.
 - Docstrings on every public module, class, function, and method with `Args`, `Returns`, `Raises`. Document side effects (file writes, network, subprocess, mutation).
-- Member order in a class: class variables, `__init__`, public methods, private methods, properties (unless the codebase defines another order).
+- Member order in a class: class variables, `__init__`, public methods, private methods, properties.
 - Pass dependencies in (constructor args) so tests can inject fakes.
 
 ## Types
@@ -32,6 +32,7 @@ Two parts. Part 1 is normative for all new and changed code. Part 2 adds what is
 ## Errors
 - Raise the narrowest specific exception. Catch specific exceptions; never a bare `except`.
 - `except Exception` only at an application boundary (worker loop, request handler), and always log with context.
+- Inside `except`, log with `logger.exception(...)`.
 - Messages give context, the expected state, and guidance. Chain with `raise ... from error`.
 
 ```python
@@ -39,7 +40,7 @@ Two parts. Part 1 is normative for all new and changed code. Part 2 adds what is
 raise ValueError("bad config")
 # After
 raise ConfigError(
-    f"Config file {path} is missing 'connectors'. Expected a mapping of name to settings; add one and retry."
+    f"Config file {path} is missing 'timeout'. Expected an integer number of seconds; add one and retry."
 )
 ```
 
@@ -48,7 +49,7 @@ raise ConfigError(
 ```python
 class AppError(Exception): ...
 class ConfigError(AppError): ...
-class ValidationError(AppError): ...
+class InputError(AppError): ...
 ```
 
 ## Security
@@ -62,22 +63,14 @@ Each ban pairs with its replacement.
 - Tokens, credentialed URLs, and response bodies stay out of logs, errors, and test output.
 - Least privilege: request only the access the task needs; no write path where read suffices.
 
-## Maintainability
-- Self-documenting names first; comments explain why, not what.
-- Structured logging via `logging` (lazy `%s` args). `print` only for CLI user output.
-
-## Architectural fit
-- Follow existing patterns and layers; put code in the module where the same concern already lives.
-
 ## Design principles
-- **DRY:** first use stays inline; the second concrete use triggers a shared helper.
-- **Simplest implementation:** add an abstraction at the second concrete use, not before.
+- **Maintainability:** comments explain why, not what. Use `logging` with lazy `%s` args; `print` only for CLI user output.
+- **Architectural fit:** follow existing patterns and layers; put code in the module where the same concern already lives.
+- **DRY and simplest implementation:** first use stays inline; the second concrete use triggers a shared helper or abstraction, not before.
 - **Surgical changes:** every changed line traces to the task's purpose. Flag unrelated cleanups separately; do them in another change.
 - **Verify before deleting:** "unused" code may be a protocol method, hook, public API, entry point, or name-loaded plugin. Grep code, config, entry points, and docs first.
-- **Proportionality:** match solution size to problem size.
 
 ## Ponytail
-Full version: `skills/ponytail/SKILL.md`.
 - **Ladder; stop at the first rung that holds:** (1) does it need to exist (YAGNI)? (2) already in the codebase: reuse; (3) stdlib; (4) native platform feature (DB constraint over app code); (5) already-installed dependency; (6) one line; (7) minimum new code. A few lines beat a new dependency.
 - **Understand first:** read the task and trace the real flow before picking a rung.
 - **Root cause:** grep every caller of the function you touch; fix once in the shared function.
@@ -95,15 +88,15 @@ Python >=3.12, ruff (`E F I UP B SIM`, line length 100), pytest + `pytest-asynci
 - Start each module that has annotations with `from __future__ import annotations` (empty `__init__.py` exempt).
 - Timestamps: `models.utc_now()`.
 - Config stores environment variable *names* in `*_env` fields (`api_token_env`, `webhook_secret_env`); never values. A new connector credential needs an `*_env` field and a message in `connector_errors.py` that omits URL and secret. Route user-facing failure text through `connector_error_message` / `tui_errors.py`.
-- Logger form: `logging.getLogger(__name__)` (used inline in `app.py`, `workflow.py`); `.exception(...)` inside `except`.
-- Print is allowed only in CLI/user-facing modules: `__main__.py`, `dashboard/cli.py`, `dashboard/routing.py`, `executions.py`, `agent.py`.
+- Inline `logging.getLogger(__name__)` sites: `app.py`, `workflow.py`.
+- Modules where `print` is allowed: `__main__.py`, `dashboard/cli.py`, `dashboard/routing.py`, `executions.py`, `agent.py`.
 - External commands: `subprocess_json.run_bounded_json(command, payload, *, timeout_seconds=20, max_bytes=...)`; failures return data (`{"available": False, "reason": ...}`); keep that shape.
 - Secret-bearing files: `os.open(..., 0o600)` with `O_EXCL` where creating new (`storage.py`, `dashboard/web.py`); `dashboard/process.py` and `dashboard/routing.py` also use `0o600`; write atomically.
-- `compare_digest` sites: bearer token and webhook signature (`server.py`), `github.py`, `agent.py`, `dashboard/web.py`. Use it for any new secret comparison.
+- `compare_digest` sites: bearer token and webhook signature (`server.py`), `github.py`, `agent.py`, `dashboard/web.py`.
 - Layers: config `config.py`; wire/persisted models `models.py`; persistence `storage.py`; HTTP `server.py`; connector lifecycle `connectors.py`.
-- Existing exceptions (reuse before adding; subclass the built-in callers catch): `ToolError` (`tools.py`), `ConnectorHTTPError` (`connector_errors.py`), `RoutingError` (`dashboard/routing.py`), `DashboardError` (`dashboard/process.py`), `RegistryError` (`extensions.py`), `OperationBudgetExceeded` (`operations.py`), `InvalidLifecycleTransition(ValueError)`, `RepositoryBusyError(FileExistsError)`, `WebhookSignatureError(PermissionError)`. When the application base exception is introduced, define `AppError` in one shared module and re-parent these.
+- No `AppError` exists yet. Interim rule: new domain exceptions subclass the built-in that callers catch, and move under an `AppError` base once one is added. Existing exceptions (reuse before adding): `ToolError` (`tools.py`), `ConnectorHTTPError` (`connector_errors.py`), `RoutingError` (`dashboard/routing.py`), `DashboardError` (`dashboard/process.py`), `RegistryError` (`extensions.py`), `OperationBudgetExceeded` (`operations.py`), `InvalidLifecycleTransition(ValueError)`, `RepositoryBusyError(FileExistsError)`, `WebhookSignatureError(PermissionError)`.
 - Before deleting "unused" code, also grep `skills/`, `pyproject.toml` (`force-include`), and `README.md`; plugins, skills, and connectors load by name.
-- Skills: `skills/coding/SKILL.md` (do not weaken validation, permissions, or tests to silence an alert), `skills/testing/SKILL.md` (verify order: narrowest regression test, suite, lint, build, diff review).
+- Skills: `skills/coding/SKILL.md`, `skills/testing/SKILL.md`, `skills/ponytail/SKILL.md` (full Ponytail ladder).
 
 ## Testing and coverage
 - Coverage: total `--cov-fail-under=90` (`pyproject.toml`) plus a per-file floor of 90% in `tests/conftest.py`, applied to top-level `src/*.py` only (not `src/dashboard/`). New code keeps both green.
@@ -113,13 +106,14 @@ Python >=3.12, ruff (`E F I UP B SIM`, line length 100), pytest + `pytest-asynci
 
 ## Known gaps
 Current code falls short of Part 1 in these places:
-- About 300 `Any` uses across `src/`.
+- 300+ `Any` uses across `src/`.
 - No application base exception; domain errors derive from built-ins.
+- `server.py` uses `nonlocal` (line 48).
 - Most docstrings are one-liners without `Args` / `Returns` / `Raises`.
 - No PEP 695 usage.
 - No type checker configured (`mypy` / `pyright` absent from `pyproject.toml`).
 
-New and changed code meets Part 1. Fix gaps opportunistically, within the scope of the change you are making; no drive-by cleanup.
+New and changed code meets Part 1. Fix gaps opportunistically, within the scope of the change you are making.
 
 # Pre-merge checklist
 
@@ -134,12 +128,13 @@ git diff                                  # final inspection
 
 - [ ] Gate commands pass; report only commands you ran.
 - [ ] Regression test fails without the fix, passes with it; security changes have a negative test.
-- [ ] Public APIs typed and documented (`Args` / `Returns` / `Raises`, side effects).
-- [ ] Specific exceptions with context + guidance; no bare `except`; broad catch only at a boundary, logged.
-- [ ] No secrets, tokens, URLs, or bodies in code, logs, errors, fixtures.
+- [ ] Names and imports follow convention; tz-aware `datetime`, `pathlib`, no `global` / `nonlocal`.
+- [ ] Public APIs typed and documented (`Args` / `Returns` / `Raises`, side effects); `Any` only in thin wrappers.
+- [ ] Specific exceptions with context + guidance, existing ones reused; no bare `except`; broad catch only at a boundary, logged.
+- [ ] No secrets, tokens, URLs, or bodies in code, logs, errors, fixtures; `compare_digest` for secrets; least privilege.
 - [ ] No `shell=True`, `eval`/`exec`/`pickle`; SQL parameterised; user paths contained.
 - [ ] Logging in library code; `print` only in CLI modules.
-- [ ] Code sits in the right layer; existing helpers reused.
+- [ ] Code sits in the right layer; existing helpers reused; Ponytail ladder followed, no speculative abstraction.
 - [ ] Every changed line traces to the task; unrelated cleanup listed separately.
 - [ ] Removed code was grepped (code, tests, skills, config, entry points, docs).
 - [ ] `from __future__ import annotations` in new modules; `models.utc_now()` for timestamps.
