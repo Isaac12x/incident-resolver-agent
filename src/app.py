@@ -7,6 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
@@ -98,7 +99,8 @@ class Application:
             providers[provider_name] = create_source_control_provider(
                 provider_name, config, storage
             )
-        github = providers["github"]
+        # The reserved registry entry is installed by _github_provider above.
+        github = cast(GitHubService, providers["github"])
         backend = agent_backend or (
             SubscriptionCLIBackend(config)
             if config.model.runtime == "subscription-cli"

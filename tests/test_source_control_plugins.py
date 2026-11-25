@@ -19,7 +19,6 @@ from src.source_control import (
     create_source_control_provider,
     register_source_control_provider,
     register_webhook_router,
-    registered_source_control_provider_names,
 )
 from src.storage import Storage
 from src.workflow import WorkflowEngine
@@ -87,7 +86,6 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
     assert application.workflow.provider_for_repository("org/repo") is provider
     assert application.workflow.provider_for_repository("org/github-repo") is application.github
     assert isinstance(application.github, GitHubService)
-    assert "test-provider" in registered_source_control_provider_names()
     task = application.storage.create_task(
         Incident(
             external_id="issue-1",

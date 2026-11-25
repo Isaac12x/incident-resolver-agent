@@ -64,11 +64,6 @@ def create_source_control_provider(
     return factory(config, storage)
 
 
-def registered_source_control_provider_names() -> tuple[str, ...]:
-    """Return registered names for configuration editors and diagnostics."""
-    return tuple(sorted(_provider_factories))
-
-
 def register_webhook_router(router: APIRouter) -> None:
     """Mount an external provider's FastAPI routes on every core server."""
     if not isinstance(router, APIRouter):
