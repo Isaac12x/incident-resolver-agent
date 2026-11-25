@@ -19,7 +19,6 @@ from src.server import create_server
 @pytest.fixture(autouse=True)
 def isolated_discovery_state(monkeypatch):
     monkeypatch.setattr(plugin_discovery, "_discovered", False)
-    monkeypatch.setattr(plugin_discovery, "_failure", None)
     monkeypatch.setattr(
         source_control, "_provider_factories", source_control._provider_factories.copy()
     )
@@ -66,6 +65,25 @@ def test_application_build_and_server_start_with_only_builtin_provider(tmp_path,
         assert client.post("/hooks/github", content=b"{}").status_code == 401
 
 
+def test_create_server_runs_discovery_for_existing_application(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    router = source_control.APIRouter()
+    router.add_api_route("/hooks/discovered", lambda: {"ok": True}, methods=["GET"])
+
+    def register():
+        source_control.register_webhook_router(router)
+
+    monkeypatch.setattr(plugin_discovery, "_discovered", False)
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(register),))
+    server = create_server(application, run_worker=False)
+
+    with TestClient(server) as client:
+        assert client.get("/hooks/discovered").json() == {"ok": True}
+
+
 def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):
     entered = Event()
     release = Event()
@@ -89,28 +107,50 @@ def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):
     assert calls == ["registered"]
 
 
-def test_discovery_failure_stops_startup_and_is_not_retried(monkeypatch):
+def test_failed_registrar_rolls_back_and_later_registrar_runs(monkeypatch, caplog):
     calls = []
 
     def registrar():
         calls.append("called")
+        source_control.register_source_control_provider("partial-provider", lambda *_: None)
         raise ValueError("registrar failed")
 
-    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(registrar),))
+    def later():
+        calls.append("later")
+        source_control.register_source_control_provider("later-provider", lambda *_: None)
 
-    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in 'fixture'"):
-        plugin_discovery.discover_plugins()
-    with pytest.raises(RuntimeError, match="previously failed"):
-        plugin_discovery.discover_plugins()
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (
+        EntryPoint(registrar), EntryPoint(later)
+    ))
 
-    assert calls == ["called"]
+    plugin_discovery.discover_plugins()
+    plugin_discovery.discover_plugins()
+
+    assert calls == ["called", "later"]
+    assert "partial-provider" not in source_control._provider_factories
+    assert "later-provider" in source_control._provider_factories
+    assert "skipping" in caplog.text
+
+
+def test_failed_plugin_import_rolls_back_registrations(monkeypatch):
+    class ImportFailure:
+        name = "broken-import"
+
+        def load(self):
+            source_control.register_source_control_provider("import-partial", lambda *_: None)
+            raise ImportError("broken extension import")
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (ImportFailure(),))
+
+    plugin_discovery.discover_plugins()
+
+    assert "import-partial" not in source_control._provider_factories
 
 
 def test_discovery_rejects_non_callable_registrar(monkeypatch):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(None),))
-
-    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in 'fixture'"):
-        plugin_discovery.discover_plugins()
+    plugin_discovery.discover_plugins()
+    assert plugin_discovery._discovered
 
 
 def test_application_build_discovers_installed_entry_point_plugins(tmp_path, monkeypatch):

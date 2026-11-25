@@ -6,41 +6,41 @@ import logging
 from importlib.metadata import entry_points
 from threading import RLock
 
+from .source_control import registration_transaction
+
 _lock = RLock()
 _discovered = False
-_failure: Exception | None = None
 
 
 def discover_plugins() -> None:
     """Load and run installed ``incident_harness.plugins`` zero-argument registrars.
 
     Discovery is process-wide and serialized so repeated and concurrent application builds do
-    not register extensions more than once. A failed registrar leaves startup failed for the
-    lifetime of the process; retrying a partially completed registrar could duplicate its work.
+    not register extensions more than once. Each registrar is isolated and failed registrations
+    are rolled back, allowing later extensions and core startup to continue.
     """
-    global _discovered, _failure
+    global _discovered
 
     with _lock:
-        if _failure is not None:
-            raise RuntimeError("installed plug-in discovery previously failed") from _failure
         if _discovered:
             return
-
-        plugin_name = "<entry-point discovery>"
         try:
-            for plugin in entry_points(group="incident_harness.plugins"):
-                plugin_name = plugin.name
-                registrar = plugin.load()
-                if not callable(registrar):
-                    raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
-                registrar()
-        except Exception as error:
-            _failure = error
-            logging.getLogger(__name__).exception(
-                "failed to load incident-harness plug-in %s", plugin_name
-            )
-            raise RuntimeError(
-                f"failed to load incident-harness plug-in {plugin_name!r}"
-            ) from error
+            plugins = entry_points(group="incident_harness.plugins")
+        except Exception:
+            logging.getLogger(__name__).exception("failed to enumerate incident-harness plug-ins")
+            _discovered = True
+            return
+        for plugin in plugins:
+            plugin_name = plugin.name
+            try:
+                with registration_transaction():
+                    registrar = plugin.load()
+                    if not callable(registrar):
+                        raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
+                    registrar()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "failed to load incident-harness plug-in %s; skipping", plugin_name
+                )
 
         _discovered = True

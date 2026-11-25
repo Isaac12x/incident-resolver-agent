@@ -7,16 +7,20 @@ optional plug-in dependency.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from threading import RLock
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from fastapi import APIRouter, FastAPI
 
-from .config import Config
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
+from .provider_names import normalize_provider_name
 from .storage import Storage
+
+if TYPE_CHECKING:
+    from .config import Config
 
 
 class SourceControlProvider(Protocol):
@@ -70,32 +74,48 @@ class LocalUpdateProvider(Protocol):
     ) -> PullRequestReference: ...
 
 
-ProviderFactory = Callable[[Config, Storage], SourceControlProvider]
+ProviderFactory = Callable[["Config", Storage], SourceControlProvider]
 _provider_factories: dict[str, ProviderFactory] = {}
 _webhook_routers: list[APIRouter] = []
+_registry_lock = RLock()
+
+
+@contextmanager
+def registration_transaction():
+    """Make one registrar's provider and router registrations atomic."""
+    with _registry_lock:
+        providers = _provider_factories.copy()
+        routers = _webhook_routers.copy()
+        try:
+            yield
+        except Exception:
+            _provider_factories.clear()
+            _provider_factories.update(providers)
+            _webhook_routers[:] = routers
+            raise
 
 
 def register_source_control_provider(name: str, factory: ProviderFactory) -> None:
     """Register a provider factory under the ``RepositoryConfig.publish_mode`` name."""
-    normalized = name.strip().casefold()
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized):
-        raise ValueError("provider name must be a non-empty provider name")
+    normalized = normalize_provider_name(name)
     if normalized in {"auto", "local"}:
         raise ValueError("provider name cannot be 'auto' or 'local'")
-    if normalized in _provider_factories:
-        raise ValueError(f"source-control provider is already registered: {normalized}")
-    _provider_factories[normalized] = factory
+    with _registry_lock:
+        if normalized in _provider_factories:
+            raise ValueError(f"source-control provider is already registered: {normalized}")
+        _provider_factories[normalized] = factory
 
 
 def create_source_control_provider(
     name: str, config: Config, storage: Storage
 ) -> SourceControlProvider:
     """Build a previously registered provider, passing core config and storage."""
-    normalized = name.strip().casefold()
-    try:
-        factory = _provider_factories[normalized]
-    except KeyError as error:
-        raise ValueError(f"source-control provider is not registered: {normalized}") from error
+    normalized = normalize_provider_name(name)
+    with _registry_lock:
+        try:
+            factory = _provider_factories[normalized]
+        except KeyError as error:
+            raise ValueError(f"source-control provider is not registered: {normalized}") from error
     return factory(config, storage)
 
 
@@ -103,11 +123,14 @@ def register_webhook_router(router: APIRouter) -> None:
     """Mount an external provider's FastAPI routes on every core server."""
     if not isinstance(router, APIRouter):
         raise TypeError("webhook router must be a FastAPI APIRouter")
-    if router not in _webhook_routers:
-        _webhook_routers.append(router)
+    with _registry_lock:
+        if router not in _webhook_routers:
+            _webhook_routers.append(router)
 
 
 def mount_webhook_routers(server: FastAPI) -> None:
     """Include all routes registered by installed provider packages."""
-    for router in _webhook_routers:
+    with _registry_lock:
+        routers = tuple(_webhook_routers)
+    for router in routers:
         server.include_router(router)
