@@ -50,6 +50,27 @@ def test_discovery_succeeds_with_no_plugins_and_is_idempotent(monkeypatch):
     assert calls == [{"group": "incident_harness.plugins"}]
 
 
+def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
+    tmp_path, monkeypatch, caplog
+):
+    calls = []
+
+    def broken_enumeration(**kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", broken_enumeration)
+    config_path = tmp_path / "config.toml"
+    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
+
+    application = Application.build(config_path, agent_backend=AsyncMock())
+    plugin_discovery.discover_plugins()
+
+    assert tuple(application.source_control) == ("github",)
+    assert calls == [{"group": "incident_harness.plugins"}]
+    assert "failed to enumerate incident-harness plug-ins" in caplog.text
+
+
 def test_application_build_and_server_start_with_only_builtin_provider(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
     monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
