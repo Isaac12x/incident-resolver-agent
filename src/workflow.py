@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import shlex
 import subprocess
 import threading
 import time
@@ -40,7 +41,6 @@ from .models import (
 )
 from .operations import OperationBudgetExceeded, OperationLedger
 from .source_control import (
-    LocalUpdateProvider,
     PullRequestPollingProvider,
     SourceControlProvider,
 )
@@ -495,14 +495,25 @@ class WorkflowEngine:
 
     def provider_enabled_for_repository(self, repository: str) -> bool:
         try:
-            mode = self.config.repository(repository).publish_mode
+            configured = self.config.repository(repository)
+            mode = configured.publish_mode
         except KeyError:
+            configured = None
             mode = "auto"
         if mode == "local":
             return False
+        if mode == "github":
+            return True
         provider = self.provider_for_repository(repository)
-        enabled = getattr(provider, "publishing_enabled", None)
-        return bool(enabled(mode) if callable(enabled) else provider.publish_enabled)
+        if mode == "auto" and provider is self.source_control_providers.get("github"):
+            # Keep historical global auto behavior when GitHub is an enabled
+            # publishing destination. If a plugin-selected GitHub clone was the
+            # only reason the shared CLI adapter exists, auto repos stay local.
+            github_is_a_publication_destination = any(
+                item.github_health_checkable for item in self.config.repositories
+            )
+            return provider.publish_enabled and github_is_a_publication_destination
+        return provider.publish_enabled
 
     def source_control_name_for_repository(self, repository: str) -> str:
         try:
@@ -567,8 +578,12 @@ class WorkflowEngine:
         revision = self._publication_revision(task, worktree)
         with self._operation(task, "publish", revision) as outcome:
             provider = self.provider_for_repository(task.repository)
-            if update and isinstance(provider, LocalUpdateProvider):
-                reference = await provider.update_from_worktree(task, worktree)
+            if (
+                update
+                and provider is self.source_control_providers.get("github")
+                and not provider.publish_enabled
+            ):
+                reference = await self._update_pull_request_from_worktree(provider, task, worktree)
             else:
                 reference = (
                     await provider.update_pull_request(task)
@@ -581,6 +596,40 @@ class WorkflowEngine:
                     )
             outcome.update(reference.model_dump(mode="json"))
             return reference
+
+    async def _update_pull_request_from_worktree(
+        self, provider: SourceControlProvider, task: TaskRecord, worktree: Path
+    ) -> PullRequestReference:
+        """Push a locally managed PR head, then let the provider refresh its metadata."""
+        if not task.pr_number:
+            raise RuntimeError("cannot update a pull request without its number")
+        if not task.branch:
+            raise RuntimeError("cannot update a pull request without its branch")
+        tools = WorkspaceTools(
+            worktree,
+            timeout=self.config.model.tool_timeout_seconds,
+            permissions=self.config.permissions,
+            execution=self.config.execution,
+        )
+        result = await tools.shell("git rev-parse HEAD")
+        if result.returncode:
+            raise RuntimeError(result.stderr or "could not determine updated PR head")
+        head = result.stdout.strip()
+        push = await tools.shell(
+            "git -c remote.origin.mirror=false push origin HEAD:refs/heads/"
+            + shlex.quote(task.branch)
+        )
+        if push.returncode:
+            raise RuntimeError(push.stderr or "could not push the updated pull-request head")
+        updated = task.model_copy(update={"pr_head_sha": head})
+        reference = await provider.update_pull_request(updated)
+        return reference or PullRequestReference(
+            repository=task.repository,
+            number=task.pr_number,
+            branch=task.branch,
+            head_sha=head,
+            url=task.pr_url or "",
+        )
 
     def _current_history_signature(self) -> tuple[tuple[str, str | None], ...]:
         return tuple(

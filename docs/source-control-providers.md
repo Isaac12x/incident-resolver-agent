@@ -6,7 +6,11 @@ routes. A zero-argument registrar can be discovered from the
 `incident_harness.plugins` entry-point group:
 
 ```python
-from src.source_control import register_source_control_provider, register_webhook_router
+from src.source_control import (
+    WebhookEvent,
+    register_source_control_provider,
+    register_webhook_router,
+)
 
 
 def register():
@@ -41,14 +45,13 @@ deployment fields. Implement this synchronous webhook contract on the provider u
 by the route:
 
 ```python
-def authenticate_and_translate(
-    headers: Mapping[str, str], body: bytes
-) -> tuple[str, dict[str, Any], bool]: ...
+def authenticate_and_translate(headers: Mapping[str, str], body: bytes) -> WebhookEvent: ...
 ```
 
-The return values are the normalized event name, normalized object payload, and a
-duplicate flag. Verify authentication against the exact raw body before decoding or
-translating it. Raise `WebhookSignatureError` for missing or invalid credentials.
+`WebhookEvent` is a named tuple with `event`, `payload`, and `duplicate` fields, so it
+also remains compatible with tuple unpacking. Verify authentication against the exact
+raw body before decoding or translating it. Raise `WebhookSignatureError` for missing
+or invalid credentials.
 Each provider's HTTP route owns its request-size limit and status mapping. The native
 `/hooks/github` route caps bodies at 1 MiB, maps authentication failures to HTTP 401,
 and acknowledges duplicates with HTTP 202 and `{"duplicate": true}` without dispatch.

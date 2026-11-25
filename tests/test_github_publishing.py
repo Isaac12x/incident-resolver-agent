@@ -9,7 +9,7 @@ import pytest
 
 from src.app import Application
 from src.config import Config, RepositoryConfig, save_config
-from src.github import GitHubCLIAdapter, GitHubService
+from src.github import GitHubCLIAdapter
 from src.models import Incident, PullRequestReference, TaskEvent, TaskState, VerificationResult
 from src.storage import Storage
 from src.systemd_env import build_systemd_environment
@@ -156,25 +156,28 @@ async def test_update_commits_and_tracks_exact_head(restore_task_state, publicat
 
 
 @pytest.mark.asyncio
-async def test_worktree_update_uses_api_before_inspecting_git(publication, monkeypatch):
+async def test_local_worktree_update_is_workflow_owned(publication, monkeypatch):
     _, _, task, worktree, _, _ = publication
-    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix"})
-    reference = PullRequestReference(
-        repository=task.repository,
-        number=7,
-        url="https://github.com/company/application/pull/7",
-        head_sha="adapter-head",
-        branch=task.branch,
-    )
-    service = GitHubService(Config().github, api=lambda *_: None)
-    service.update_pull_request = AsyncMock(return_value=reference)
-    monkeypatch.setattr(
-        "src.github.WorkspaceTools",
-        lambda _: pytest.fail("API-backed updates must not inspect the worktree"),
-    )
+    from src.workflow import WorkflowEngine
 
-    assert await service.update_from_worktree(task, worktree) == reference
-    service.update_pull_request.assert_awaited_once_with(task)
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix"})
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5),
+        permissions=None,
+        execution=None,
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock(return_value=None))
+
+    class FakeTools:
+        async def shell(self, command):
+            assert command.startswith("git ")
+            return ToolResult((), 0, "worktree-head", "")
+
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
+    reference = await engine._update_pull_request_from_worktree(provider, task, worktree)
+    assert reference.head_sha == "worktree-head"
+    assert provider.update_pull_request.await_args.args[0].pr_head_sha == "worktree-head"
 
 
 @pytest.mark.asyncio
@@ -191,37 +194,49 @@ async def test_worktree_update_uses_api_before_inspecting_git(publication, monke
         ),
     ],
 )
-async def test_worktree_update_reports_local_precondition_and_git_failures(
+async def test_workflow_local_update_reports_precondition_and_git_failures(
     publication, monkeypatch, task_updates, results, message
 ):
     _, _, task, worktree, _, _ = publication
     task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", **task_updates})
-    service = GitHubService(Config().github)
+    from src.workflow import WorkflowEngine
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5), permissions=None, execution=None
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock())
 
     class FakeTools:
         async def shell(self, command):
             return results.pop(0)
 
-    monkeypatch.setattr("src.github.WorkspaceTools", lambda _: FakeTools())
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
     with pytest.raises(RuntimeError, match=message):
-        await service.update_from_worktree(task, worktree)
+        await engine._update_pull_request_from_worktree(provider, task, worktree)
 
 
 @pytest.mark.asyncio
-async def test_worktree_update_returns_local_reference_when_adapter_is_absent(
+async def test_workflow_local_update_returns_reference_when_provider_has_no_update_result(
     publication, monkeypatch
 ):
     _, _, task, worktree, _, _ = publication
     task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", "pr_url": "url"})
-    service = GitHubService(Config().github)
+    from src.workflow import WorkflowEngine
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5), permissions=None, execution=None
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock(return_value=None))
 
     class FakeTools:
         async def shell(self, command):
             return ToolResult((), 0, "worktree-head", "")
 
-    monkeypatch.setattr("src.github.WorkspaceTools", lambda _: FakeTools())
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
 
-    reference = await service.update_from_worktree(task, worktree)
+    reference = await engine._update_pull_request_from_worktree(provider, task, worktree)
 
     assert reference == PullRequestReference(
         repository=task.repository,
