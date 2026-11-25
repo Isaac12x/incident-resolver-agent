@@ -15,9 +15,15 @@ from fastapi import APIRouter, FastAPI, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .app import Application
-from .github import GitHubCLIAdapter, WebhookSignatureError
+from .github import WebhookSignatureError
 from .models import Incident
-from .source_control import mount_webhook_routers, register_webhook_router
+from .plugin_discovery import discover_plugins
+from .source_control import (
+    HealthCheckProvider,
+    WebhookEvent,
+    mount_webhook_routers,
+    register_webhook_router,
+)
 
 MAX_WEBHOOK_BODY_BYTES = 1_048_576
 MAX_INTELLIGENCE_TEXT_BYTES = 32 * 1024
@@ -40,15 +46,18 @@ async def github_webhook(request: Request) -> JSONResponse:
     application: Application = request.app.state.application
     body = await _bounded_request_body(request)
     try:
-        application.github.verify_webhook(request.headers, body)
+        webhook = WebhookEvent(
+            *application.source_control["github"].authenticate_and_translate(
+                request.headers, body
+            )
+        )
     except WebhookSignatureError as error:
         raise HTTPException(status_code=401, detail=str(error)) from error
-    delivery = request.headers.get("x-github-delivery", "")
-    if not application.github.accept_delivery(delivery):
+    if webhook.duplicate:
         return JSONResponse({"duplicate": True}, status_code=status.HTTP_202_ACCEPTED)
-    payload = application.github.decode(body)
-    event = request.headers.get("x-github-event", "")
-    task = await application.workflow.handle_github_event(event, payload)
+    task = await application.workflow.handle_source_control_event(
+        "github", webhook.event, webhook.payload
+    )
     return JSONResponse(
         {"accepted": True, "task_id": task.task_id if task else None},
         status_code=status.HTTP_202_ACCEPTED,
@@ -68,6 +77,7 @@ def _intelligence_text(payload: dict[str, Any], *keys: str) -> str:
 
 
 def create_server(application: Application, *, run_worker: bool = True) -> FastAPI:
+    discover_plugins()
     worker_task: asyncio.Task[None] | None = None
 
     @asynccontextmanager
@@ -81,7 +91,11 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
             await worker_task
         await application.connectors.stop()
 
-    server = FastAPI(title="Incident Harness", version="0.1.0", lifespan=lifespan)
+    server = FastAPI(
+        title="Incident Harness",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
     server.state.application = application
 
     @server.middleware("http")
@@ -131,11 +145,9 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
     async def health() -> JSONResponse:
         connector_errors = dict(application.connectors.errors)
         connections: dict[str, dict[str, str]] = {}
-        results, github_results = await asyncio.gather(
+        results, provider_results = await asyncio.gather(
             application.connectors.health(),
-            application.github.api.check_health()
-            if isinstance(application.github.api, GitHubCLIAdapter)
-            else asyncio.sleep(0, result={}),
+            _source_control_health(application),
         )
         for name, result in results.items():
             connections[name] = {"status": "ok" if result.connected else "failed"}
@@ -144,8 +156,8 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
             else:
                 connector_errors[name] = result.message
                 connections[name]["error"] = result.message
-        connections.update(github_results)
-        for name, result in github_results.items():
+        connections.update(provider_results)
+        for name, result in provider_results.items():
             if result["status"] != "ok":
                 connector_errors[name] = result["error"]
         worker_status = "external"
@@ -340,3 +352,15 @@ def create_server(application: Application, *, run_worker: bool = True) -> FastA
 
     mount_webhook_routers(server)
     return server
+
+
+async def _source_control_health(application: Application) -> dict[str, dict[str, str]]:
+    checks = [
+        provider.check_health()
+        for provider in application.source_control.values()
+        if isinstance(provider, HealthCheckProvider)
+    ]
+    if not checks:
+        return {}
+    results = await asyncio.gather(*checks)
+    return {name: result for provider_result in results for name, result in provider_result.items()}

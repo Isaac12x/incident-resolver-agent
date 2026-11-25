@@ -198,7 +198,7 @@ TOML header: `[[repositories]]`.
 | `name` | string | Required | Required repository identity, normally owner/repository. Configuration lookup is case-insensitive. |
 | `clone_url` | string or null | Unset | Optional remote clone URL. |
 | `local_path` | string or null | Unset | Optional local repository path. |
-| `publish_mode` | `auto`, `github`, `local` | `"auto"` | github publishes a GitHub PR; local keeps publication local; auto falls back to local publication when the GitHub adapter is unavailable. |
+| `publish_mode` | `auto`, `github`, `local`, or a registered provider name | `"auto"` | Selects the provider for this repository. `auto` uses GitHub for GitHub clone URLs when available and otherwise publishes locally; `local` always publishes locally. See [source-control provider extensions](source-control-providers.md) to install and register additional providers. |
 | `base_branch` | string | `"main"` | Branch used as the incident baseline and PR base. Set this explicitly for repositories whose default branch is master. |
 | `responsibility_paths` | array of string | `["."]` | Nonempty list of repository-relative paths the agent owns. Entries must be nonblank, with no absolute paths or .. components. |
 | `incident_environments` | array of string | `["production"]` | Environments allowed to create incident tasks for this repository. |

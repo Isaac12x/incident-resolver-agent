@@ -1,5 +1,9 @@
 # Source plugins and connections
 
+External source-control providers use Python package entry points, independently of the
+built-in incident-source adapters documented below. See [source-control provider
+extensions](source-control-providers.md) for provider registration and webhook routing.
+
 `incident-agent plugins` (or `incident-agent plugins list`) lists the source adapters that are built into the
 harness. Listing is local and has no network side effects:
 

@@ -857,7 +857,7 @@ async def test_workflow_lifecycle_event_routing_and_restart_recovery(
             "environment_url": "https://preview.example.test",
         },
     }
-    task = await workflow.handle_github_event("deployment_status", payload)
+    task = await workflow.handle_source_control_event("github", "deployment_status", payload)
     assert task and task.state == TaskState.TESTING_DEPLOYMENT
     task = await workflow.process(task.task_id)
     assert task.state == TaskState.WAITING_FOR_REVIEW
@@ -872,7 +872,7 @@ async def test_workflow_lifecycle_event_routing_and_restart_recovery(
             "author_association": "OWNER",
         },
     }
-    await workflow.handle_github_event("pull_request_review_comment", review)
+    await workflow.handle_source_control_event("github", "pull_request_review_comment", review)
     task = await workflow.process(task.task_id)
     assert task.state == TaskState.IMPLEMENTING and task.pr_head_sha == "review-sha"
     assert (await workflow.process(task.task_id)).state == TaskState.TESTING_LOCAL
@@ -904,7 +904,8 @@ async def test_workflow_merge_cancel_and_rejections(
     task = storage.create_task(incident)
     task.pr_number = 42
     restore_task_state(storage, task.task_id, TaskState.WAITING_FOR_REVIEW, pr_number=42)
-    merged = await workflow.handle_github_event(
+    merged = await workflow.handle_source_control_event(
+        "github",
         "pull_request",
         {
             "action": "closed",
@@ -2754,7 +2755,7 @@ async def test_workflow_retry_block_and_error_paths(
     # No worktree and an unusable clone URL causes a caught processing failure.
     result = await workflow.process(errored.task_id)
     assert result.state == TaskState.FAILED and result.error
-    assert await workflow.handle_github_event("ping", {}) is None
+    assert await workflow.handle_source_control_event("github", "ping", {}) is None
 
 
 @pytest.mark.asyncio
@@ -3030,7 +3031,8 @@ async def test_remaining_workflow_retry_and_routing_paths(
     restore_task_state(storage, waiting.task_id, TaskState.WAITING_FOR_REVIEW)
     assert (await workflow.process(waiting.task_id)).state == TaskState.WAITING_FOR_REVIEW
     assert (
-        await workflow.handle_github_event(
+        await workflow.handle_source_control_event(
+            "github",
             "issue_comment",
             {
                 "repository": {"full_name": incident.repository},

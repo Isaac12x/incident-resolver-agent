@@ -89,7 +89,7 @@ async def test_recovery_merges_actual_base_and_leaves_conflict_for_session(tmp_p
             "mergeable_state": "dirty",
         },
     }
-    result = await engine.handle_github_event("pull_request", payload)
+    result = await engine.handle_source_control_event("github", "pull_request", payload)
     assert result.conflict_pending
     assert result.conflict_base_branch == "main"
     assert result.conflict_recovery_attempts == 1

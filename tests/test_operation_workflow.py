@@ -188,8 +188,8 @@ async def test_duplicate_terminal_webhook_is_idempotent(
         "repository": {"full_name": task.repository},
         "pull_request": {"number": 12, "merged": True},
     }
-    first = await workflow.handle_github_event("pull_request", payload)
-    second = await workflow.handle_github_event("pull_request", payload)
+    first = await workflow.handle_source_control_event("github", "pull_request", payload)
+    second = await workflow.handle_source_control_event("github", "pull_request", payload)
     assert first and second
     assert first.state == TaskState.COMPLETED
     assert second.state == TaskState.COMPLETED
@@ -202,7 +202,8 @@ async def test_registered_pr_merge_completes_during_deployment_wait(
 ):
     workflow, storage, task = _workflow(tmp_path, config, incident)
     restore_task_state(storage, task.task_id, state, pr_number=12, pr_head_sha="sha-1")
-    result = await workflow.handle_github_event(
+    result = await workflow.handle_source_control_event(
+        "github",
         "pull_request",
         {
             "action": "closed",

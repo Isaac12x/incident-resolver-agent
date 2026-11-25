@@ -87,11 +87,11 @@ async def test_conflict_event_leaves_real_merge_for_agent_and_loads_skills(tmp_p
         },
     }
 
-    recovered = await engine.handle_github_event("pull_request", payload)
+    recovered = await engine.handle_source_control_event("github", "pull_request", payload)
     assert recovered.conflict_pending
     assert recovered.conflict_recovery_attempts == 1
     assert git(worktree, "diff", "--name-only", "--diff-filter=U") == "value.txt"
-    repeated = await engine.handle_github_event("pull_request", payload)
+    repeated = await engine.handle_source_control_event("github", "pull_request", payload)
     assert repeated.conflict_recovery_attempts == 1
 
     captured: dict[str, str] = {}
@@ -170,7 +170,7 @@ async def test_stale_conflict_webhook_does_not_touch_checkout(tmp_path: Path) ->
         },
     }
 
-    result = await engine.handle_github_event("pull_request", payload)
+    result = await engine.handle_source_control_event("github", "pull_request", payload)
 
     assert not result.conflict_pending
     assert git(worktree, "diff", "--name-only", "--diff-filter=U") == ""

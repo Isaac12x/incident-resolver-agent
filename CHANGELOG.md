@@ -4,8 +4,26 @@
 
 - Allow installed extensions to supply an Agents SDK model for a configured provider name.
 
+## 0.4.1 - 2026-11-25
+
+- Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.
+- Clarify source-control provider configuration and documentation, and deduplicate webhook
+  router registration. Reject conflicting webhook routes before mounting them and retry
+  discovery after an entry-point enumeration failure.
+- Validate repository publish modes against built-in or registered providers during config
+  construction and loading, and discover installed providers before validating custom modes.
+- Report provider startup failures with provider and repository context, roll back partial
+  registrations from failed plugin setup, and continue loading other plugins.
+- Run provider health checks through the source-control registry and exclude plugin-owned
+  GitHub clone URLs from native GitHub checks. Preserve the GitHub CLI adapter for all
+  GitHub clone URLs and include every published sibling in grouped PR descriptions.
+
+## 0.4.0 - 2026-11-25
+
 - Add per-repository source-control provider registration and webhook route mounting
-  for external packages while preserving the core GitHub integration.
+  for external packages while routing native GitHub webhooks through the provider
+  authentication and translation contract. Discover zero-argument plugin registrars
+  from the `incident_harness.plugins` entry-point group.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.

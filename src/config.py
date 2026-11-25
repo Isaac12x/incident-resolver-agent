@@ -10,6 +10,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+BUILTIN_PUBLISH_MODES = ("auto", "github", "local")
+
+
+def normalize_provider_name(name: str) -> str:
+    """Normalize and validate a source-control provider name."""
+    normalized = name.strip().casefold()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized):
+        raise ValueError("provider name must be a non-empty provider name")
+    return normalized
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are the durable lead agent for one production incident. Turn incident evidence into the "
     "smallest safe, reviewable, and verified code change that restores the intended behavior.\n\n"
@@ -274,10 +285,34 @@ class RepositoryConfig(BaseModel):
     def safe_publish_mode(cls, value: Any) -> str:
         if not isinstance(value, str):
             raise ValueError("publish mode must be a provider name")
-        value = value.strip().casefold()
-        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", value):
-            raise ValueError("publish mode must be a non-empty provider name")
-        return value
+        try:
+            normalized = normalize_provider_name(value)
+        except ValueError:
+            raise ValueError("publish mode must be a non-empty provider name") from None
+        if normalized not in BUILTIN_PUBLISH_MODES:
+            from .plugin_discovery import discover_plugins
+            from .source_control import registered_source_control_providers
+
+            if normalized not in registered_source_control_providers():
+                discover_plugins()
+                if normalized not in registered_source_control_providers():
+                    raise ValueError(f"publish mode provider is not registered: {normalized}")
+        return normalized
+
+    @property
+    def uses_github(self) -> bool:
+        """Whether GitHub is the selected publication provider for this repository."""
+        return self.publish_mode in {"auto", "github"}
+
+    @property
+    def github_health_checkable(self) -> bool:
+        """Whether configured GitHub operations should appear in health checks."""
+        return self.uses_github and self.needs_github_adapter
+
+    @property
+    def needs_github_adapter(self) -> bool:
+        """Whether GitHub tooling is needed for configured repository access."""
+        return self.publish_mode == "github" or "github.com" in (self.clone_url or "")
 
     @field_validator("name")
     @classmethod
@@ -605,7 +640,8 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
             save_config(config, path)
         return config
     with path.open("rb") as handle:
-        config = Config.model_validate(tomllib.load(handle))
+        data = tomllib.load(handle)
+    config = Config.model_validate(data)
     if upgrade_model(config.model) and create:
         save_config(config, path)
     return config

@@ -7,14 +7,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv
 
 from .agent import AgentBackend, IncidentAgent, OpenAIAgentsBackend, SubscriptionCLIBackend
 from .bundles import load_active_bundle
-from .config import Config, load_config
+from .config import BUILTIN_PUBLISH_MODES, Config, load_config
 from .connectors import ConnectorManager
 from .github import GitHubCLIAdapter, GitHubService
+from .plugin_discovery import discover_plugins
 from .source_control import (
     SourceControlProvider,
     create_source_control_provider,
@@ -26,24 +28,17 @@ from .verify import DeploymentVerifier
 from .workflow import WorkflowEngine
 
 
-def _github_provider(config: Config, storage: Storage) -> GitHubService:
+def _create_github_service(config: Config, storage: Storage) -> GitHubService:
     return GitHubService(
         config.github,
         webhook_secret=os.getenv(config.github.webhook_secret_env),
         api=GitHubCLIAdapter(config, storage)
-        if any(
-            repository.publish_mode == "github"
-            or (
-                repository.publish_mode in {"auto", "local"}
-                and "github.com" in (repository.clone_url or "")
-            )
-            for repository in config.repositories
-        )
+        if any(repository.needs_github_adapter for repository in config.repositories)
         else None,
     )
 
 
-register_source_control_provider("github", _github_provider)
+register_source_control_provider("github", _create_github_service)
 
 
 @dataclass
@@ -55,12 +50,11 @@ class Application:
     agent: IncidentAgent
     verifier: DeploymentVerifier
     workflow: WorkflowEngine
-    source_control_providers: dict[str, SourceControlProvider] | None = None
 
     @property
-    def source_control(self):
+    def source_control(self) -> dict[str, SourceControlProvider]:
         """Registered providers keyed by their ``publish_mode`` values."""
-        return self.source_control_providers or {"github": self.github}
+        return self.workflow.source_control_providers
 
     @classmethod
     def build(
@@ -69,6 +63,7 @@ class Application:
         *,
         agent_backend: AgentBackend | None = None,
     ) -> Application:
+        discover_plugins()
         load_dotenv(Path(config_path).resolve().parent / ".env", override=False)
         load_dotenv(Path.cwd() / ".env", override=False)
         config = load_config(Path(config_path))
@@ -87,17 +82,29 @@ class Application:
                 config.applications[0].name if len(config.applications) == 1 else None
             ),
         )
-        provider_names = {
-            repository.publish_mode.strip().casefold()
+        provider_names = {"github"} | {
+            repository.publish_mode
             for repository in config.repositories
-            if repository.publish_mode.strip().casefold() not in {"auto", "local", "github"}
+            if repository.publish_mode not in BUILTIN_PUBLISH_MODES
         }
-        github = _github_provider(config, storage)
-        providers: dict[str, SourceControlProvider] = {"github": github}
+        providers: dict[str, SourceControlProvider] = {}
         for provider_name in provider_names:
-            providers[provider_name] = create_source_control_provider(
-                provider_name, config, storage
-            )
+            try:
+                providers[provider_name] = create_source_control_provider(
+                    provider_name, config, storage
+                )
+            except Exception as error:
+                repositories = [
+                    repository.name
+                    for repository in config.repositories
+                    if repository.publish_mode == provider_name
+                ]
+                raise RuntimeError(
+                    f"failed to create source-control provider {provider_name!r} "
+                    f"for repositories: {', '.join(repositories)}"
+                ) from error
+        # The reserved registry entry is installed by _create_github_service above.
+        github = cast(GitHubService, providers["github"])
         backend = agent_backend or (
             SubscriptionCLIBackend(config)
             if config.model.runtime == "subscription-cli"
@@ -151,4 +158,4 @@ class Application:
             )
 
         workflow.reload_model = reload_model
-        return cls(config, storage, connectors, github, agent, verifier, workflow, providers)
+        return cls(config, storage, connectors, github, agent, verifier, workflow)

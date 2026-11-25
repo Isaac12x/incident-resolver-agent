@@ -30,6 +30,7 @@ from textual.widgets import (
 from .cli_help import GROUPS, format_cli_help, overview_next_steps
 from .code_review import provision
 from .config import (
+    BUILTIN_PUBLISH_MODES,
     ApplicationConfig,
     CodeReviewConfig,
     Config,
@@ -43,7 +44,6 @@ from .config import (
 )
 from .connectors import ConnectorManager
 from .lifecycle import doctor
-from .source_control import registered_source_control_provider_names
 from .tooling import (
     CommandRunner,
     GitHubRepository,
@@ -952,6 +952,14 @@ class ConfigurationApp(App[None]):
         source = (
             "github" if repository.clone_url and "github.com" in repository.clone_url else "url"
         )
+        publish_modes = tuple(
+            dict.fromkeys(
+                (
+                    *BUILTIN_PUBLISH_MODES,
+                    repository.publish_mode,
+                )
+            )
+        )
         return Vertical(
             Label(repository.name or "New repository", classes="card-title"),
             self._pair(
@@ -977,17 +985,7 @@ class ConfigurationApp(App[None]):
                 self._select(
                     repository.publish_mode,
                     f"{prefix}-publish-mode",
-                    tuple(
-                        dict.fromkeys(
-                            (
-                                "auto",
-                                "github",
-                                "local",
-                                *registered_source_control_provider_names(),
-                                *(item.publish_mode for item in self.config.repositories),
-                            )
-                        )
-                    ),
+                    publish_modes,
                 ),
                 "Base branch",
                 self._input(repository.base_branch, f"{prefix}-base-branch"),

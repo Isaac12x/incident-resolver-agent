@@ -3,17 +3,17 @@
 import json
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.app import Application
 from src.config import Config, RepositoryConfig, save_config
 from src.github import GitHubCLIAdapter
-from src.models import Incident, TaskEvent, TaskState, VerificationResult
+from src.models import Incident, PullRequestReference, TaskEvent, TaskState, VerificationResult
 from src.storage import Storage
 from src.systemd_env import build_systemd_environment
-from src.tooling import install_configured_repositories, repository_candidates
+from src.tooling import ToolResult, install_configured_repositories, repository_candidates
 from src.workflow import _TaskLifecycle
 
 
@@ -153,6 +153,98 @@ async def test_update_commits_and_tracks_exact_head(restore_task_state, publicat
         result = await _TaskLifecycle(workflow, task.task_id, worktree).open_pr("Verified fix")
     assert result["state"] == TaskState.WAITING_FOR_DEPLOYMENT
     assert storage.load_task(task.task_id).pr_head_sha == git(worktree, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_local_worktree_update_is_workflow_owned(publication, monkeypatch):
+    _, _, task, worktree, _, _ = publication
+    from src.workflow import WorkflowEngine
+
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix"})
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5),
+        permissions=None,
+        execution=None,
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock(return_value=None))
+
+    class FakeTools:
+        async def shell(self, command):
+            assert command.startswith("git ")
+            return ToolResult((), 0, "worktree-head", "")
+
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
+    reference = await engine._update_pull_request_from_worktree(provider, task, worktree)
+    assert reference.head_sha == "worktree-head"
+    assert provider.update_pull_request.await_args.args[0].pr_head_sha == "worktree-head"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_updates", "results", "message"),
+    [
+        ({"pr_number": None}, [], "without its number"),
+        ({"branch": None}, [], "without its branch"),
+        ({}, [ToolResult((), 1, "", "rev failed")], "rev failed"),
+        (
+            {},
+            [ToolResult((), 0, "worktree-head", ""), ToolResult((), 1, "", "push failed")],
+            "push failed",
+        ),
+    ],
+)
+async def test_workflow_local_update_reports_precondition_and_git_failures(
+    publication, monkeypatch, task_updates, results, message
+):
+    _, _, task, worktree, _, _ = publication
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", **task_updates})
+    from src.workflow import WorkflowEngine
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5), permissions=None, execution=None
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock())
+
+    class FakeTools:
+        async def shell(self, command):
+            return results.pop(0)
+
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
+    with pytest.raises(RuntimeError, match=message):
+        await engine._update_pull_request_from_worktree(provider, task, worktree)
+
+
+@pytest.mark.asyncio
+async def test_workflow_local_update_returns_reference_when_provider_has_no_update_result(
+    publication, monkeypatch
+):
+    _, _, task, worktree, _, _ = publication
+    task = task.model_copy(update={"pr_number": 7, "branch": "incident/fix", "pr_url": "url"})
+    from src.workflow import WorkflowEngine
+
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(
+        model=SimpleNamespace(tool_timeout_seconds=5), permissions=None, execution=None
+    )
+    provider = SimpleNamespace(update_pull_request=AsyncMock(return_value=None))
+
+    class FakeTools:
+        async def shell(self, command):
+            return ToolResult((), 0, "worktree-head", "")
+
+    monkeypatch.setattr("src.workflow.WorkspaceTools", lambda *_args, **_kwargs: FakeTools())
+
+    reference = await engine._update_pull_request_from_worktree(provider, task, worktree)
+
+    assert reference == PullRequestReference(
+        repository=task.repository,
+        number=7,
+        url="url",
+        head_sha="worktree-head",
+        branch="incident/fix",
+    )
 
 
 @pytest.mark.asyncio

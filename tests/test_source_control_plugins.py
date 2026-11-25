@@ -11,15 +11,14 @@ from pydantic import ValidationError
 
 from src import source_control
 from src.app import Application
-from src.config import ApplicationConfig, Config, RepositoryConfig, save_config
+from src.config import ApplicationConfig, Config, RepositoryConfig, load_config, save_config
 from src.github import GitHubCLIAdapter, GitHubService
 from src.models import Incident, PullRequestReference, TaskState
-from src.server import create_server
+from src.server import _source_control_health, create_server
 from src.source_control import (
     create_source_control_provider,
     register_source_control_provider,
     register_webhook_router,
-    registered_source_control_provider_names,
 )
 from src.storage import Storage
 from src.workflow import WorkflowEngine
@@ -35,33 +34,34 @@ def isolated_plugin_registry(monkeypatch):
     monkeypatch.setattr(source_control, "_webhook_routers", source_control._webhook_routers.copy())
 
 
-@pytest.mark.asyncio
-async def test_application_build_dispatches_to_registered_provider(tmp_path):
-    class Provider:
-        api = object()
-        publish_enabled = True
+class _TestProvider:
+    api = object()
+    publish_enabled = True
 
-        async def create_pull_request(self, task):
-            raise NotImplementedError
+    async def create_pull_request(self, task):
+        raise NotImplementedError
 
-        async def update_pull_request(self, task):
-            raise NotImplementedError
+    async def update_pull_request(self, task):
+        raise NotImplementedError
 
-        async def publish_verification(self, task, result):
-            raise NotImplementedError
+    async def publish_verification(self, task, result):
+        raise NotImplementedError
 
-        def repository_and_pr(self, payload):
-            pull_request = payload.get("pull_request", {})
-            repository = pull_request.get("repository") or payload.get("repository", {}).get(
-                "full_name"
-            )
-            number = pull_request.get("number")
-            return (repository, number) if repository and number else None
+    def repository_and_pr(self, payload):
+        pull_request = payload.get("pull_request", {})
+        repository = pull_request.get("repository") or payload.get("repository", {}).get(
+            "full_name"
+        )
+        number = pull_request.get("number")
+        return (repository, number) if repository and number else None
 
-        def review_comment(self, payload):
-            return None
+    def review_comment(self, payload):
+        return None
 
-    provider = Provider()
+
+@pytest.fixture
+def mixed_provider_application(tmp_path):
+    provider = _TestProvider()
     register_source_control_provider("test-provider", lambda config, storage: provider)
     config_path = tmp_path / ".agent" / "config.toml"
     provider_config = Config(
@@ -81,13 +81,6 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
     )
 
     application = Application.build(config_path, agent_backend=AsyncMock())
-
-    assert application.source_control["test-provider"] is provider
-    assert application.github.api is not None
-    assert application.workflow.provider_for_repository("org/repo") is provider
-    assert application.workflow.provider_for_repository("org/github-repo") is application.github
-    assert isinstance(application.github, GitHubService)
-    assert "test-provider" in registered_source_control_provider_names()
     task = application.storage.create_task(
         Incident(
             external_id="issue-1",
@@ -99,13 +92,47 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
     )
     task.pr_number = 17
     application.storage.save_task(task)
+    github_task = application.storage.create_task(
+        Incident(
+            external_id="issue-github",
+            source="test",
+            repository="org/github-repo",
+            environment="production",
+            summary="GitHub incident",
+        )
+    )
+    github_task.pr_number = 23
+    application.storage.save_task(github_task)
+    return application, provider, task, github_task
+
+
+def test_application_build_dispatches_to_registered_provider(mixed_provider_application):
+    application, provider, _, _ = mixed_provider_application
+    assert application.source_control["test-provider"] is provider
+    assert application.github.api is not None
+    assert application.workflow.provider_for_repository("org/repo") is provider
+    assert application.workflow.provider_for_repository("org/github-repo") is application.github
+    assert isinstance(application.github, GitHubService)
+
+
+@pytest.mark.asyncio
+async def test_events_dispatch_to_registered_provider(mixed_provider_application):
+    application, _, task, _ = mixed_provider_application
     payload = {"repository": {"full_name": "org/repo"}, "pull_request": {"number": 17}}
 
-    assert await application.workflow.handle_github_event("issue_comment", payload) is None
+    assert (
+        await application.workflow.handle_source_control_event("github", "issue_comment", payload)
+        is None
+    )
     result = await application.workflow.handle_source_control_event(
         "test-provider", "issue_comment", payload
     )
     assert result is not None and result.task_id == task.task_id
+
+
+@pytest.mark.asyncio
+async def test_provider_events_reject_repository_mismatches(mixed_provider_application):
+    application, _, _, github_task = mixed_provider_application
     mismatched_deployment = {
         "repository": {"full_name": "org/github-repo"},
         "pull_request": {"repository": "org/repo", "number": 17},
@@ -136,17 +163,6 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
         )
         is None
     )
-    github_task = application.storage.create_task(
-        Incident(
-            external_id="issue-github",
-            source="test",
-            repository="org/github-repo",
-            environment="production",
-            summary="GitHub incident",
-        )
-    )
-    github_task.pr_number = 23
-    application.storage.save_task(github_task)
     foreign_provider_event = {
         "repository": {"full_name": "org/github-repo"},
         "pull_request": {"repository": "org/github-repo", "number": 23},
@@ -161,13 +177,54 @@ async def test_application_build_dispatches_to_registered_provider(tmp_path):
 
 
 def test_publish_mode_is_normalized_and_validated():
+    register_source_control_provider("my-provider", lambda *_: object())
     repository = RepositoryConfig(name="org/repo", publish_mode="  My-Provider  ")
     assert repository.publish_mode == "my-provider"
     with pytest.raises(ValidationError, match="provider name"):
         RepositoryConfig(name="org/repo", publish_mode="not a provider")
 
 
-def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
+def test_config_rejects_unregistered_publish_mode(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[repositories]]\nname = "org/repo"\npublish_mode = "missing-provider"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="not registered"):
+        Config(repositories=[RepositoryConfig(name="org/repo", publish_mode="missing-provider")])
+    with pytest.raises(ValidationError, match="not registered"):
+        load_config(config_path, create=False)
+
+
+def test_invalid_repository_container_remains_a_pydantic_error(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("repositories = 2\n", encoding="utf-8")
+    with pytest.raises(ValidationError, match="repositories"):
+        load_config(config_path, create=False)
+
+
+def test_application_build_wraps_provider_factory_failure_with_context(tmp_path):
+    def fail_factory(config, storage):
+        raise ValueError("factory failed")
+
+    register_source_control_provider("broken-provider", fail_factory)
+    config_path = tmp_path / "config.toml"
+    save_config(
+        Config(
+            runtime_root=tmp_path / "runtime",
+            repositories=[RepositoryConfig(name="org/repo", publish_mode="broken-provider")],
+        ),
+        config_path,
+    )
+
+    with pytest.raises(RuntimeError, match="broken-provider.*org/repo") as error:
+        Application.build(config_path, agent_backend=AsyncMock())
+
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_foreign_provider_github_clone_keeps_git_access_adapter(tmp_path):
     register_source_control_provider("plugin", lambda config, storage: SimpleNamespace())
     config_path = tmp_path / ".agent" / "config.toml"
     save_config(
@@ -186,7 +243,7 @@ def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
 
     application = Application.build(config_path, agent_backend=AsyncMock())
 
-    assert application.github.api is None
+    assert isinstance(application.github.api, GitHubCLIAdapter)
     save_config(
         Config(
             runtime_root=tmp_path / ".agent",
@@ -207,6 +264,14 @@ def test_foreign_provider_github_clone_does_not_enable_github_api(tmp_path):
 
 @pytest.mark.asyncio
 async def test_github_health_skips_plugin_owned_github_clone_urls():
+    register_source_control_provider("plugin", lambda *_: object())
+    plugin_repository = RepositoryConfig(
+        name="org/plugin",
+        clone_url="https://github.com/org/plugin.git",
+        publish_mode="plugin",
+    )
+    assert plugin_repository.needs_github_adapter
+    assert not plugin_repository.github_health_checkable
     config = Config(
         repositories=[
             RepositoryConfig(
@@ -386,6 +451,8 @@ def test_registered_webhook_router_is_mounted(tmp_path):
         return {"accepted": application is not None, "task_id": task}
 
     register_webhook_router(router)
+    register_webhook_router(router)
+    assert source_control._webhook_routers.count(router) == 1
     app = create_server(_application_stub(tmp_path), run_worker=False)
 
     response = TestClient(app).post("/hooks/test-provider", json={})
@@ -394,13 +461,54 @@ def test_registered_webhook_router_is_mounted(tmp_path):
     assert response.json() == {"accepted": True, "task_id": "translated"}
 
 
+def test_native_github_route_uses_provider_webhook_contract(tmp_path):
+    provider = SimpleNamespace(
+        authenticate_and_translate=lambda headers, body: (
+            "pull_request",
+            {"number": 17},
+            False,
+        )
+    )
+    application = _application_stub(tmp_path)
+    application.source_control = {"github": provider}
+    application.workflow.handle_source_control_event = AsyncMock(
+        return_value=SimpleNamespace(task_id="translated")
+    )
+    app = create_server(application, run_worker=False)
+
+    response = TestClient(app).post("/hooks/github", content=b"raw-body")
+
+    assert response.status_code == 202
+    assert response.json() == {"accepted": True, "task_id": "translated"}
+    application.workflow.handle_source_control_event.assert_awaited_once_with(
+        "github", "pull_request", {"number": 17}
+    )
+
+
+@pytest.mark.asyncio
+async def test_health_checks_registered_source_control_providers():
+    provider = SimpleNamespace(
+        check_health=AsyncMock(return_value={"example:org/repo": {"status": "ok"}})
+    )
+    application = SimpleNamespace(source_control={"example": provider})
+
+    assert await _source_control_health(application) == {
+        "example:org/repo": {"status": "ok"}
+    }
+    provider.check_health.assert_awaited_once_with()
+
+
+def test_server_openapi_version_uses_default_version(tmp_path):
+    app = create_server(_application_stub(tmp_path), run_worker=False)
+
+    assert app.version == "0.1.0"
+
+
 def test_provider_registration_rejects_invalid_and_duplicate_names():
     register_source_control_provider("duplicate-provider", lambda config, storage: object())
 
     with pytest.raises(ValueError, match="cannot be 'auto'"):
         register_source_control_provider("auto", lambda config, storage: object())
-    with pytest.raises(ValueError, match="provider name"):
-        register_source_control_provider("not a provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="provider name"):
         register_source_control_provider("not a provider", lambda config, storage: object())
     with pytest.raises(ValueError, match="already registered"):
@@ -415,6 +523,7 @@ def test_webhook_registration_requires_fastapi_router():
 
 
 def test_grouped_github_sync_only_updates_github_members(tmp_path):
+    register_source_control_provider("test-provider", lambda *_: object())
     config = Config(
         repositories=[
             RepositoryConfig(name="org/github", publish_mode="github"),
@@ -453,6 +562,7 @@ def test_grouped_github_sync_only_updates_github_members(tmp_path):
 
 @pytest.mark.asyncio
 async def test_plugin_deployment_without_repo_field_uses_target_member_in_group(tmp_path):
+    register_source_control_provider("plugin", lambda *_: object())
     config = Config(
         runtime_root=tmp_path / "runtime",
         repositories=[
@@ -513,8 +623,6 @@ async def test_plugin_deployment_without_repo_field_uses_target_member_in_group(
 
 
 def _application_stub(tmp_path):
-    from types import SimpleNamespace
-
     return SimpleNamespace(
         connectors=SimpleNamespace(start=_noop, stop=_noop, configs={}, health=_empty),
         workflow=SimpleNamespace(
