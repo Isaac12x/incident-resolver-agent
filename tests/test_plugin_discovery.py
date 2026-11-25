@@ -194,6 +194,41 @@ def test_conflicting_catchall_and_dynamic_plugin_routes_are_rejected():
         source_control.mount_webhook_routers(server)
 
 
+@pytest.mark.parametrize(
+    ("builtin_path", "plugin_path", "conflicts"),
+    [
+        ("/hooks/{id:int}", "/hooks/{value:float}", True),
+        ("/hooks/{id:int}", "/hooks/{value:uuid}", True),
+        ("/hooks/{id:int}/{repo:int}", "/hooks/{org:float}/{number:int}", True),
+        ("/hooks/{id:int}/left", "/hooks/{org:float}/right", False),
+    ],
+)
+def test_converter_route_overlap_uses_segment_types(builtin_path, plugin_path, conflicts):
+    server = FastAPI()
+    server.add_api_route(builtin_path, lambda: {"builtin": True}, methods=["POST"])
+    source_control._webhook_routers.clear()
+    router = source_control.APIRouter()
+    router.add_api_route(plugin_path, lambda: {"plugin": True}, methods=["POST"])
+    source_control.register_webhook_router(router)
+
+    if conflicts:
+        with pytest.raises(ValueError, match="webhook route conflicts"):
+            source_control.mount_webhook_routers(server)
+    else:
+        source_control.mount_webhook_routers(server)
+
+
+def test_get_route_does_not_claim_unregistered_head_method():
+    server = FastAPI()
+    server.add_api_route("/hooks/shared", lambda: {"builtin": True}, methods=["GET"])
+    source_control._webhook_routers.clear()
+    router = source_control.APIRouter()
+    router.add_api_route("/hooks/shared", lambda: {"plugin": True}, methods=["HEAD"])
+    source_control.register_webhook_router(router)
+
+    source_control.mount_webhook_routers(server)
+
+
 def test_registrar_can_validate_custom_mode_without_recursive_discovery(monkeypatch):
     calls = []
 

@@ -177,8 +177,6 @@ def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:
         methods = set(context.methods or ())
         if isinstance(route, Mount):
             methods.update({"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"})
-        if "GET" in methods:
-            methods.add("HEAD")
         records.append(_RouteRecord(path, regex, frozenset(methods), isinstance(route, Mount)))
     return records
 
@@ -199,18 +197,9 @@ def _compiled_paths_overlap(left: _RouteRecord, right: _RouteRecord) -> bool:
     right_matches = right.matcher.match if right.prefix else right.matcher.fullmatch
     if left_matches(right.path) or right_matches(left.path):
         return True
-
-    def normalize_parameters(pattern: str) -> str:
-        return re.sub(r"\(\?P<[^>]+>", "(?P<param>", pattern)
-
-    left_pattern = normalize_parameters(left.matcher.pattern)
-    right_pattern = normalize_parameters(right.matcher.pattern)
-    if left_pattern == right_pattern:
-        return True
-    left_prefix, _, left_tail = left_pattern.partition("(?P<param>")
-    right_prefix, _, right_tail = right_pattern.partition("(?P<param>")
-    left_catchall = left_tail.startswith(".*)")
-    right_catchall = right_tail.startswith(".*)")
-    return (left_catchall or right_catchall) and (
-        left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+    # All built-in Starlette converters accept a hyphenless, 32-digit UUID.
+    candidates = (
+        re.sub(r"\{[^{}]+\}", "0" * 32, left.path),
+        re.sub(r"\{[^{}]+\}", "0" * 32, right.path),
     )
+    return any(left_matches(path) and right_matches(path) for path in candidates)
