@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Validate finalized webhook routers at server construction using public FastAPI APIs.
+  Extensions must finish defining their routes before starting the server.
+- Describe the provider webhook return type as a plain tuple containing the event, payload and
+  duplicate flag. A custom provider configuration now reports when a plug-in metadata
+  failure prevented its name from being checked.
+
 ## 0.4.2 - 2026-11-25
 
 - Restore the legacy `handle_github_event` workflow entry point. Log why a webhook

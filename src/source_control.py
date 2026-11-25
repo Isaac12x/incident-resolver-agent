@@ -10,13 +10,11 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from copy import copy
-from dataclasses import replace
 from threading import RLock
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from fastapi import APIRouter, FastAPI
-from fastapi.routing import _IncludedRouter, iter_route_contexts
+from fastapi.routing import iter_route_contexts
 from starlette.routing import BaseRoute, Mount
 
 from .config import normalize_provider_name
@@ -41,7 +39,20 @@ class SourceControlProvider(Protocol):
 
     def authenticate_and_translate(
         self, headers: Mapping[str, str], body: bytes
-    ) -> WebhookEvent: ...
+    ) -> tuple[str, dict[str, Any], bool]:
+        """Authenticate raw request bytes and return event, payload, and duplicate flag.
+
+        Args:
+            headers: Request headers used for provider-specific authentication and metadata.
+            body: Exact raw request body, before decoding or translation.
+
+        Returns:
+            Event name, translated payload, and whether this delivery is a duplicate.
+
+        Raises:
+            WebhookSignatureError: If required credentials are missing or invalid.
+        """
+        ...
 
     def repository_and_pr(self, payload: dict[str, Any]) -> tuple[str, int] | None: ...
 
@@ -136,7 +147,21 @@ def registered_source_control_providers() -> tuple[str, ...]:
 
 
 def register_webhook_router(router: APIRouter) -> None:
-    """Mount an external provider's FastAPI routes on every core server."""
+    """Register a finalized external FastAPI router for core servers.
+
+    Args:
+        router: Router whose routes, nested routers, and dependencies are finalized.
+
+    Returns:
+        None.
+
+    Raises:
+        TypeError: If ``router`` is not a FastAPI ``APIRouter``.
+
+    Side effects:
+        Adds the router to the process-wide provider router registry. Mutating it after
+        server creation is unsupported; changes require creating a new server.
+    """
     if not isinstance(router, APIRouter):
         raise TypeError("webhook router must be a FastAPI APIRouter")
     with _registry_lock:
@@ -145,12 +170,24 @@ def register_webhook_router(router: APIRouter) -> None:
 
 
 def mount_webhook_routers(server: FastAPI) -> None:
-    """Validate and include all routes registered by installed provider packages."""
+    """Validate and include all routes registered by installed provider packages.
+
+    Args:
+        server: FastAPI server receiving the registered routers.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If a provider route conflicts with a route already on the server or
+            another registered provider route.
+
+    Side effects:
+        Adds registered routes to ``server``. Routers must be finalized before this call;
+        later mutation is unsupported.
+    """
     with _registry_lock:
-        # FastAPI may retain an included APIRouter and resolve its routes later.
-        # Mount a shallow router copy with a copied route list so a package cannot
-        # add unvalidated routes to an already constructed server.
-        routers = tuple(_router_snapshot(router) for router in _webhook_routers)
+        routers = tuple(_webhook_routers)
     existing = _route_records(server.routes)
     for router in routers:
         for route in _route_records(router.routes):
@@ -166,26 +203,6 @@ def mount_webhook_routers(server: FastAPI) -> None:
             existing.append(route)
     for router in routers:
         server.include_router(router)
-
-
-def _router_snapshot(router: APIRouter) -> APIRouter:
-    snapshot = copy(router)
-    routes = []
-    for route in router.routes:
-        if isinstance(route, _IncludedRouter):
-            child_snapshot = _router_snapshot(route.original_router)
-            copied_context = replace(route.include_context, included_router=child_snapshot)
-            # A fresh include node gets independent FastAPI route caches and lock.
-            routes.append(
-                _IncludedRouter(
-                    original_router=child_snapshot,
-                    include_context=copied_context,
-                )
-            )
-        else:
-            routes.append(route)
-    snapshot.routes = routes
-    return snapshot
 
 
 def _route_records(routes: list[BaseRoute]) -> list[_RouteRecord]:

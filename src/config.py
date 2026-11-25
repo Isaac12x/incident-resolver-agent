@@ -638,6 +638,22 @@ class Config(BaseModel):
 
 
 def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True) -> Config:
+    """Load and validate configuration, discovering extensions for selected providers.
+
+    Args:
+        path: TOML configuration file path.
+        create: Whether to write generated defaults or an upgraded model back to disk.
+
+    Returns:
+        The validated configuration.
+
+    Raises:
+        ValueError: If TOML data is invalid or a selected provider cannot be validated.
+        OSError: If the configuration file cannot be read or written.
+
+    Side effects:
+        May load installed plug-ins and, when requested, write default or upgraded configuration.
+    """
     if not path.exists() or path.stat().st_size == 0:
         from .tooling import host_subscription_cli_ready
 
@@ -656,15 +672,36 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
     # Discover extensions only when this configuration selects a non-builtin
     # publication mode. Builtin-only config reads must stay free of plug-in imports.
     repositories = data.get("repositories", [])
-    if isinstance(repositories, list) and any(
-        isinstance(repository, dict)
-        and isinstance(repository.get("publish_mode"), str)
-        and repository["publish_mode"].strip().casefold() not in BUILTIN_PUBLISH_MODES
-        for repository in repositories
-    ):
+    selected_custom_providers: set[str] = set()
+    if isinstance(repositories, list):
+        for repository in repositories:
+            if not isinstance(repository, dict) or not isinstance(
+                repository.get("publish_mode"), str
+            ):
+                continue
+            try:
+                provider_name = normalize_provider_name(repository["publish_mode"])
+            except ValueError:
+                continue
+            if provider_name not in BUILTIN_PUBLISH_MODES:
+                selected_custom_providers.add(provider_name)
+
+    if selected_custom_providers:
         from .plugin_discovery import discover_plugins
 
-        discover_plugins()
+        if not discover_plugins():
+            from .source_control import registered_source_control_providers
+
+            unavailable = selected_custom_providers.difference(
+                registered_source_control_providers()
+            )
+            if unavailable:
+                provider_name = sorted(unavailable)[0]
+                raise ValueError(
+                    f"publish mode provider {provider_name!r} could not be checked because "
+                    "plug-in metadata could not be enumerated; check the installed plug-in "
+                    "package and retry"
+                )
     config = Config.model_validate(data)
     if upgrade_model(config.model) and create:
         save_config(config, path)

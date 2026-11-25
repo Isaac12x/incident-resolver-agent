@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -393,6 +394,41 @@ async def test_open_pr_preserves_existing_pr_when_explicit_provider_is_disabled(
     assert updated.pr_url == "https://github.test/pr/7"
     assert updated.pr_head_sha == "existing-head"
     publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_pr_keeps_legacy_auto_update_when_provider_is_disabled(
+    restore_task_state, workflow, monkeypatch
+):
+    engine, task, worktree = workflow
+    engine.config.code_review.enabled = False
+    engine.config.repositories[0].publish_mode = "auto"
+    engine.source_control_providers = {
+        "github": SimpleNamespace(publish_enabled=False)
+    }
+    task = restore_task_state(
+        engine.storage,
+        task.task_id,
+        TaskState.TESTING_LOCAL,
+        pr_number=7,
+        pr_url="https://github.test/pr/7",
+        pr_head_sha="existing-head",
+        branch="feature-branch",
+    )
+    reference = PullRequestReference(
+        repository=task.repository,
+        number=7,
+        branch="feature-branch",
+        head_sha="updated-head",
+        url="https://github.test/pr/7",
+    )
+    legacy_update = AsyncMock(return_value=reference)
+    monkeypatch.setattr(engine, "_update_pull_request_from_worktree", legacy_update)
+
+    result = await _TaskLifecycle(engine, task.task_id, worktree).open_pr("fix")
+
+    assert result["head_sha"] == "updated-head"
+    legacy_update.assert_awaited_once()
 
 
 @pytest.mark.asyncio

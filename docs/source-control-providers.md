@@ -7,7 +7,6 @@ routes. A zero-argument registrar can be discovered from the
 
 ```python
 from src.source_control import (
-    WebhookEvent,
     register_source_control_provider,
     register_webhook_router,
 )
@@ -50,13 +49,20 @@ distinguish repositories that use the same provider.
 Implement this synchronous webhook contract on the provider used by the route:
 
 ```python
-def authenticate_and_translate(headers: Mapping[str, str], body: bytes) -> WebhookEvent: ...
+from collections.abc import Mapping
+from typing import Any
+
+
+def authenticate_and_translate(
+    headers: Mapping[str, str], body: bytes
+) -> tuple[str, dict[str, Any], bool]: ...
 ```
 
-`WebhookEvent` is a named tuple with `event`, `payload`, and `duplicate` fields, so it
-also remains compatible with tuple unpacking. Verify authentication against the exact
-raw body before decoding or translating it. Raise `WebhookSignatureError` for missing
-or invalid credentials.
+The contract accepts a three-item tuple of event name, payload, and duplicate flag.
+Core's `WebhookEvent` named tuple remains available for existing providers and is
+compatible with that return shape, but plugins do not need to import a core event type.
+Verify authentication against the exact raw body before decoding or translating it.
+Raise `WebhookSignatureError` for missing or invalid credentials.
 Each provider's HTTP route owns its request-size limit and status mapping. The native
 `/hooks/github` route caps bodies at 1 MiB, maps authentication failures to HTTP 401,
 and acknowledges duplicates with HTTP 202 and `{"duplicate": true}` without dispatch.
@@ -71,11 +77,9 @@ configuration reads do not import provider packages. `Application.build` and
 when the server is created from an existing application. Mounted handlers can access
 the built application as `request.app.state.application`. Core keeps
 `/hooks/github`, event handling, and conflict polling on the registered GitHub provider.
-Webhook routers are checked for route conflicts when `create_server` mounts them. Add
-routes to a registered router before creating the server. The server mounts a checked
-snapshot of the router tree; later changes to the original routers do not add routes to
-that server. Registering a router or changing it after server creation requires building
-a new server to take effect.
+Webhook routers are checked for route conflicts when `create_server` mounts them. Finish
+adding routes, nested routers, and dependencies before creating the server. Router
+mutation after server creation is unsupported; build a new server after changing routes.
 
 Discovery runs once per process and is safe when application builds or server creation
 happen concurrently. Each entry-point registrar runs in its own registration transaction:

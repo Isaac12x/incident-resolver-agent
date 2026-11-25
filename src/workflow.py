@@ -373,12 +373,10 @@ class _TaskLifecycle:
         self.workflow.storage.append_task_memory(
             self.task_id, f"## Verified fix\n\n{summary.strip()}\n"
         )
-        if task.pr_number and (
-            self.workflow.provider_enabled_for_repository(task.repository)
-            or self.workflow._publish_mode_for_repository(task.repository) == "auto"
-        ):
-            # Legacy auto-mode tasks can still update a previously opened PR through
-            # the direct worktree transport when provider APIs are unavailable.
+        can_publish = self.workflow.provider_enabled_for_repository(
+            task.repository, existing_pull_request=bool(task.pr_number)
+        )
+        if task.pr_number and can_publish:
             reference = await self.workflow._publish(task, self.worktree, update=True)
             if reference is None:
                 raise RuntimeError(
@@ -399,7 +397,7 @@ class _TaskLifecycle:
             raise RuntimeError(
                 f"cannot update pull request for {task.repository}: publishing is disabled"
             )
-        elif not self.workflow.provider_enabled_for_repository(task.repository):
+        elif not can_publish:
             if task.state != TaskState.PUBLISHING_PR:
                 task = self.workflow.storage.transition(self.task_id, TaskState.PUBLISHING_PR)
             task = self.workflow._local_publish(task, self.worktree)
@@ -493,10 +491,26 @@ class WorkflowEngine:
         except KeyError as error:
             raise RuntimeError(f"source-control provider is not configured: {name}") from error
 
-    def provider_enabled_for_repository(self, repository: str) -> bool:
+    def provider_enabled_for_repository(
+        self, repository: str, *, existing_pull_request: bool = False
+    ) -> bool:
+        """Return whether publication is enabled for the requested operation.
+
+        Args:
+            repository: Configured repository name.
+            existing_pull_request: Whether this operation updates an existing PR.
+
+        Returns:
+            Whether publication is enabled.
+
+        Raises:
+            RuntimeError: If the configured provider is unavailable.
+        """
         mode = self._publish_mode_for_repository(repository)
         if mode == "local":
             return False
+        if existing_pull_request and mode == "auto":
+            return True
         return self.provider_for_repository(repository).publish_enabled
 
     def _publish_mode_for_repository(self, repository: str) -> str:
@@ -561,17 +575,24 @@ class WorkflowEngine:
         ).hexdigest()
 
     async def _publish(
-        self, task: TaskRecord, worktree: Path, *, update: bool = False
+        self,
+        task: TaskRecord,
+        worktree: Path,
+        *,
+        update: bool = False,
     ) -> PullRequestReference:
         revision = self._publication_revision(task, worktree)
         with self._operation(task, "publish", revision) as outcome:
-            provider_name = self.source_control_name_for_repository(task.repository)
-            provider = self.provider_for_repository(task.repository)
-            if (
-                update
-                and provider_name == "github"
-                and not provider.publish_enabled
+            if not self.provider_enabled_for_repository(
+                task.repository, existing_pull_request=update
             ):
+                raise RuntimeError(
+                    f"cannot {'update' if update else 'create'} pull request for "
+                    f"{task.repository}: publishing is disabled"
+                )
+            provider = self.provider_for_repository(task.repository)
+            # Eligibility permits a disabled provider only for an existing auto-mode PR.
+            if update and not provider.publish_enabled:
                 reference = await self._update_pull_request_from_worktree(provider, task, worktree)
             else:
                 reference = (

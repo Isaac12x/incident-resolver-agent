@@ -111,6 +111,39 @@ def test_entry_point_enumeration_failure_logs_and_keeps_builtin_startup(
     assert "failed to enumerate incident-harness plug-ins" in caplog.text
 
 
+def test_custom_provider_config_explains_metadata_enumeration_failure(tmp_path, monkeypatch):
+    def broken_enumeration(**kwargs):
+        raise RuntimeError("private metadata detail")
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", broken_enumeration)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[repositories]]\nname = "org/repo"\npublish_mode = "entrypoint-provider"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as error:
+        load_config(config_path, create=False)
+
+    message = str(error.value)
+    assert "entrypoint-provider" in message
+    assert "plug-in metadata" in message
+    assert "check the installed plug-in package and retry" in message
+    assert "private metadata detail" not in message
+
+
+def test_custom_provider_typo_still_reports_unregistered_provider(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[[repositories]]\nname = "org/repo"\npublish_mode = "entrypoint-proivder"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="provider is not registered: entrypoint-proivder"):
+        load_config(config_path, create=False)
+
+
 def test_partial_entry_point_enumeration_does_not_run_registrars_before_retry(monkeypatch):
     registrar_calls = []
     enumeration_calls = []
@@ -376,53 +409,7 @@ def test_router_routes_added_after_registration_are_checked_before_server_mount(
         create_server(application, run_worker=False)
 
 
-def test_registered_router_mutation_after_server_build_cannot_shadow_native_route(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "test-secret")
-    config_path = tmp_path / "config.toml"
-    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
-    application = Application.build(config_path, agent_backend=AsyncMock())
-    router = source_control.APIRouter()
-    source_control.register_webhook_router(router)
-    server = create_server(application, run_worker=False)
-
-    # The running server uses the routes that passed its construction-time check.
-    router.add_api_route("/hooks/github", lambda: {"plugin": True}, methods=["POST"])
-    router.add_api_route("/hooks/late", lambda: {"plugin": True}, methods=["POST"])
-
-    with TestClient(server) as client:
-        native = client.post("/hooks/github", content=b"{}")
-        late = client.post("/hooks/late", content=b"{}")
-
-    assert native.status_code == 401
-    assert native.json() == {"detail": "invalid GitHub webhook signature"}
-    assert late.status_code == 404
-
-
-def test_child_router_mutation_after_server_build_does_not_add_unchecked_route(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
-    config_path = tmp_path / "config.toml"
-    save_config(Config(runtime_root=tmp_path / ".agent"), config_path)
-    application = Application.build(config_path, agent_backend=AsyncMock())
-    child = source_control.APIRouter()
-    parent = source_control.APIRouter()
-    parent.include_router(child, prefix="/provider")
-    source_control.register_webhook_router(parent)
-    server = create_server(application, run_worker=False)
-
-    child.add_api_route("/hooks/late", lambda: {"plugin": True}, methods=["POST"])
-
-    with TestClient(server) as client:
-        response = client.post("/provider/hooks/late", content=b"{}")
-
-    assert response.status_code == 404
-
-
-def test_nested_router_snapshot_preserves_route_options_and_dependencies(tmp_path, monkeypatch):
+def test_nested_webhook_router_preserves_route_options_and_dependencies(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: ())
     config_path = tmp_path / "config.toml"
     save_config(Config(runtime_root=tmp_path / ".agent"), config_path)

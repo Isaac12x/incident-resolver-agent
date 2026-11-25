@@ -13,18 +13,27 @@ _discovered = False
 _discovering = False
 
 
-def discover_plugins() -> None:
+def discover_plugins() -> bool:
     """Load and run installed ``incident_harness.plugins`` zero-argument registrars.
 
     Discovery is process-wide and serialized so repeated and concurrent application builds do
     not register extensions more than once. Each registrar is isolated and failed registrations
     are rolled back, allowing later extensions and core startup to continue.
+
+    Returns:
+        Whether entry-point enumeration completed. A call during active discovery returns True;
+        the active caller owns the eventual result.
+
+    Side effects:
+        Loads installed entry points, may register providers and routes, and logs failures.
     """
     global _discovered, _discovering
 
     with _lock:
-        if _discovered or _discovering:
-            return
+        if _discovered:
+            return True
+        if _discovering:
+            return True
         _discovering = True
         try:
             try:
@@ -36,7 +45,7 @@ def discover_plugins() -> None:
                 logging.getLogger(__name__).exception(
                     "failed to enumerate incident-harness plug-ins"
                 )
-                return
+                return False
             for plugin in plugins:
                 plugin_name = plugin.name
                 try:
@@ -51,5 +60,6 @@ def discover_plugins() -> None:
                     )
 
             _discovered = True
+            return True
         finally:
             _discovering = False

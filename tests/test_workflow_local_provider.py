@@ -38,6 +38,9 @@ def test_unconfigured_task_keeps_legacy_auto_provider_selection():
     assert engine._publish_mode_for_repository("legacy-task") == "auto"
     assert engine.source_control_name_for_repository("legacy-task") == "github"
     assert engine.provider_enabled_for_repository("legacy-task") is True
+    assert engine.provider_enabled_for_repository(
+        "legacy-task", existing_pull_request=True
+    ) is True
 
 
 def test_explicit_github_mode_honors_provider_disabled_state():
@@ -46,6 +49,16 @@ def test_explicit_github_mode_honors_provider_disabled_state():
     engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=False)}
 
     assert engine.provider_enabled_for_repository("repo") is False
+    assert engine.provider_enabled_for_repository("repo", existing_pull_request=True) is False
+
+
+def test_auto_mode_keeps_legacy_existing_pr_eligibility_when_provider_is_disabled():
+    engine = object.__new__(WorkflowEngine)
+    engine.config = SimpleNamespace(repository=lambda _name: SimpleNamespace(publish_mode="auto"))
+    engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=False)}
+
+    assert engine.provider_enabled_for_repository("repo") is False
+    assert engine.provider_enabled_for_repository("repo", existing_pull_request=True) is True
 
 
 def test_plugin_mode_selects_its_registered_provider():
