@@ -369,12 +369,12 @@ async def test_review_repairs_republish_then_verify(restore_task_state, workflow
 
 
 @pytest.mark.asyncio
-async def test_open_pr_preserves_existing_pr_when_explicit_provider_is_disabled(
+async def test_open_pr_refuses_existing_pr_update_in_local_mode(
     restore_task_state, workflow, monkeypatch
 ):
     engine, task, worktree = workflow
     engine.config.code_review.enabled = False
-    engine.config.repositories[0].publish_mode = "github"
+    engine.config.repositories[0].publish_mode = "local"
     engine.github.publish_enabled = False
     task = restore_task_state(
         engine.storage,
@@ -397,12 +397,13 @@ async def test_open_pr_preserves_existing_pr_when_explicit_provider_is_disabled(
 
 
 @pytest.mark.asyncio
-async def test_open_pr_keeps_legacy_auto_update_when_provider_is_disabled(
-    restore_task_state, workflow, monkeypatch
+@pytest.mark.parametrize("publish_mode", ["auto", "github"])
+async def test_open_pr_keeps_existing_github_update_when_provider_is_disabled(
+    publish_mode, restore_task_state, workflow, monkeypatch
 ):
     engine, task, worktree = workflow
     engine.config.code_review.enabled = False
-    engine.config.repositories[0].publish_mode = "auto"
+    engine.config.repositories[0].publish_mode = publish_mode
     engine.source_control_providers = {
         "github": SimpleNamespace(publish_enabled=False)
     }

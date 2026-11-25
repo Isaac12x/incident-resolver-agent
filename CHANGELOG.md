@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve worktree updates for existing GitHub pull requests when the publisher is disabled.
+- Match the GitHub webhook result annotation to the provider tuple protocol and use the
+  configured module logger during plug-in discovery.
+- Distinguish active plug-in discovery from metadata enumeration failure during reentrant loads.
 - Validate finalized webhook routers at server construction using public FastAPI APIs.
   Extensions must finish defining their routes before starting the server.
 - Describe the provider webhook return type as a plain tuple containing the event, payload and

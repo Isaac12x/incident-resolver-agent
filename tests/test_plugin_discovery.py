@@ -463,6 +463,22 @@ def test_discovery_registers_plugins_once_across_concurrent_calls(monkeypatch):
     assert calls == ["registered"]
 
 
+def test_reentrant_discovery_reports_in_progress(monkeypatch):
+    nested_results = []
+
+    def registrar():
+        nested_results.append(plugin_discovery.discover_plugins())
+
+    monkeypatch.setattr(
+        plugin_discovery, "entry_points", lambda **_kwargs: (EntryPoint(registrar),)
+    )
+
+    result = plugin_discovery.discover_plugins()
+
+    assert result is plugin_discovery.DiscoveryState.COMPLETE
+    assert nested_results == [plugin_discovery.DiscoveryState.IN_PROGRESS]
+
+
 def test_failed_registrar_rolls_back_and_later_registrar_runs(monkeypatch, caplog):
     calls = []
 

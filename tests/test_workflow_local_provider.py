@@ -43,13 +43,13 @@ def test_unconfigured_task_keeps_legacy_auto_provider_selection():
     ) is True
 
 
-def test_explicit_github_mode_honors_provider_disabled_state():
+def test_explicit_github_mode_allows_existing_pr_update_when_provider_is_disabled():
     engine = object.__new__(WorkflowEngine)
     engine.config = SimpleNamespace(repository=lambda name: SimpleNamespace(publish_mode="github"))
     engine.source_control_providers = {"github": SimpleNamespace(publish_enabled=False)}
 
     assert engine.provider_enabled_for_repository("repo") is False
-    assert engine.provider_enabled_for_repository("repo", existing_pull_request=True) is False
+    assert engine.provider_enabled_for_repository("repo", existing_pull_request=True) is True
 
 
 def test_auto_mode_keeps_legacy_existing_pr_eligibility_when_provider_is_disabled():

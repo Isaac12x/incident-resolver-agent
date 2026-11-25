@@ -509,7 +509,7 @@ class WorkflowEngine:
         mode = self._publish_mode_for_repository(repository)
         if mode == "local":
             return False
-        if existing_pull_request and mode == "auto":
+        if existing_pull_request and mode in {"auto", "github"}:
             return True
         return self.provider_for_repository(repository).publish_enabled
 

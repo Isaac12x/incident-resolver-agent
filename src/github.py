@@ -14,7 +14,7 @@ from typing import Any
 
 from .config import BUILTIN_PUBLISH_MODES, Config, GitHubConfig
 from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
-from .source_control import ApplicationSyncProvider, HealthCheckProvider, WebhookEvent
+from .source_control import ApplicationSyncProvider, HealthCheckProvider
 from .storage import Storage
 
 
@@ -369,12 +369,14 @@ class GitHubService:
         if not hmac.compare_digest(provided, expected):
             raise WebhookSignatureError("invalid GitHub webhook signature")
 
-    def authenticate_and_translate(self, headers: Mapping[str, str], body: bytes) -> WebhookEvent:
+    def authenticate_and_translate(
+        self, headers: Mapping[str, str], body: bytes
+    ) -> tuple[str, dict[str, Any], bool]:
         self.verify_webhook(headers, body)
         delivery = headers.get("x-github-delivery", "")
         if not self.accept_delivery(delivery):
-            return WebhookEvent(headers.get("x-github-event", ""), {}, True)
-        return WebhookEvent(headers.get("x-github-event", ""), self.decode(body), False)
+            return headers.get("x-github-event", ""), {}, True
+        return headers.get("x-github-event", ""), self.decode(body), False
 
     def accept_delivery(self, delivery_id: str) -> bool:
         if not delivery_id or delivery_id in self._delivery_set:

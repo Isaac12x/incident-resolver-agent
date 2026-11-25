@@ -80,14 +80,6 @@ class PullRequestPollingProvider(Protocol):
     async def get_pull_request(self, task: TaskRecord) -> dict[str, Any]: ...
 
 
-class WebhookEvent(NamedTuple):
-    """Normalized webhook result; remains tuple-compatible for existing providers."""
-
-    event: str
-    payload: dict[str, Any]
-    duplicate: bool
-
-
 ProviderFactory = Callable[["Config", Storage], SourceControlProvider]
 _provider_factories: dict[str, ProviderFactory] = {}
 _webhook_routers: list[APIRouter] = []

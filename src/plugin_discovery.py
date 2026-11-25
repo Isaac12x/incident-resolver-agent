@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 import logging
+from enum import Enum, auto
 from importlib.metadata import entry_points
 from threading import RLock
 
 from .source_control import registration_transaction
+
+logger = logging.getLogger(__name__)
 
 _lock = RLock()
 _discovered = False
 _discovering = False
 
 
-def discover_plugins() -> bool:
+class DiscoveryState(Enum):
+    """Outcome of process-wide plug-in discovery."""
+
+    COMPLETE = auto()
+    FAILED = auto()
+    IN_PROGRESS = auto()
+
+
+def discover_plugins() -> DiscoveryState:
     """Load and run installed ``incident_harness.plugins`` zero-argument registrars.
 
     Discovery is process-wide and serialized so repeated and concurrent application builds do
@@ -21,8 +32,7 @@ def discover_plugins() -> bool:
     are rolled back, allowing later extensions and core startup to continue.
 
     Returns:
-        Whether entry-point enumeration completed. A call during active discovery returns True;
-        the active caller owns the eventual result.
+        Whether discovery completed, failed to enumerate metadata, or is already in progress.
 
     Side effects:
         Loads installed entry points, may register providers and routes, and logs failures.
@@ -31,9 +41,9 @@ def discover_plugins() -> bool:
 
     with _lock:
         if _discovered:
-            return True
+            return DiscoveryState.COMPLETE
         if _discovering:
-            return True
+            return DiscoveryState.IN_PROGRESS
         _discovering = True
         try:
             try:
@@ -42,10 +52,8 @@ def discover_plugins() -> bool:
                 # invoke registrars that already ran during the failed enumeration.
                 plugins = tuple(entry_points(group="incident_harness.plugins"))
             except Exception:
-                logging.getLogger(__name__).exception(
-                    "failed to enumerate incident-harness plug-ins"
-                )
-                return False
+                logger.exception("failed to enumerate incident-harness plug-ins")
+                return DiscoveryState.FAILED
             for plugin in plugins:
                 plugin_name = plugin.name
                 try:
@@ -55,11 +63,11 @@ def discover_plugins() -> bool:
                             raise TypeError(f"plug-in registrar is not callable: {plugin.name}")
                         registrar()
                 except Exception:
-                    logging.getLogger(__name__).exception(
+                    logger.exception(
                         "failed to load incident-harness plug-in %s; skipping", plugin_name
                     )
 
             _discovered = True
-            return True
+            return DiscoveryState.COMPLETE
         finally:
             _discovering = False

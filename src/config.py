@@ -687,9 +687,10 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
                 selected_custom_providers.add(provider_name)
 
     if selected_custom_providers:
-        from .plugin_discovery import discover_plugins
+        from .plugin_discovery import DiscoveryState, discover_plugins
 
-        if not discover_plugins():
+        discovery_state = discover_plugins()
+        if discovery_state is not DiscoveryState.COMPLETE:
             from .source_control import registered_source_control_providers
 
             unavailable = selected_custom_providers.difference(
@@ -697,10 +698,14 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
             )
             if unavailable:
                 provider_name = sorted(unavailable)[0]
+                reason = (
+                    "plug-in discovery is still in progress"
+                    if discovery_state is DiscoveryState.IN_PROGRESS
+                    else "plug-in metadata could not be enumerated"
+                )
                 raise ValueError(
                     f"publish mode provider {provider_name!r} could not be checked because "
-                    "plug-in metadata could not be enumerated; check the installed plug-in "
-                    "package and retry"
+                    f"{reason}; check the installed plug-in package and retry"
                 )
     config = Config.model_validate(data)
     if upgrade_model(config.model) and create:
