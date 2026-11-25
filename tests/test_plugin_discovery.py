@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src import __main__ as cli
-from src import plugin_discovery, source_control
+from src import model_providers, plugin_discovery, source_control
 from src.app import Application
 from src.config import Config, ModelConfig, RepositoryConfig, load_config, save_config
 from src.server import create_server
@@ -22,6 +22,12 @@ from src.server import create_server
 def isolated_discovery_state(monkeypatch):
     monkeypatch.setattr(plugin_discovery, "_discovered", False)
     monkeypatch.setattr(plugin_discovery, "_discovering", False)
+    monkeypatch.setattr(plugin_discovery, "_discovery_error", None)
+    monkeypatch.setattr(
+        model_providers,
+        "_model_provider_factories",
+        model_providers._model_provider_factories.copy(),
+    )
     monkeypatch.setattr(
         source_control, "_provider_factories", source_control._provider_factories.copy()
     )
@@ -319,6 +325,48 @@ def test_failed_plugin_import_rolls_back_registrations(monkeypatch):
     plugin_discovery.discover_plugins()
 
     assert "import-partial" not in source_control._provider_factories
+
+
+def test_failed_plugin_rolls_back_model_provider_registration(monkeypatch):
+    def registrar():
+        model_providers.register_model_provider("partial-model", lambda config: None)
+        source_control.register_source_control_provider("partial-provider", lambda *_: None)
+        raise RuntimeError("registrar failed")
+
+    monkeypatch.setattr(plugin_discovery, "entry_points", lambda **kwargs: (EntryPoint(registrar),))
+
+    plugin_discovery.discover_plugins()
+
+    assert model_providers.get_model_provider("partial-model") is None
+    assert "partial-provider" not in source_control._provider_factories
+
+
+def test_strict_discovery_rolls_back_and_caches_failed_pass(monkeypatch):
+    calls = []
+
+    def first():
+        calls.append("first")
+
+    def broken():
+        calls.append("broken")
+        model_providers.register_model_provider("strict-partial", lambda config: None)
+        raise RuntimeError("registrar failed")
+
+    monkeypatch.setattr(
+        plugin_discovery,
+        "entry_points",
+        lambda **kwargs: (EntryPoint(first), EntryPoint(broken)),
+    )
+
+    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in fixture"):
+        plugin_discovery.discover_plugins(strict=True)
+
+    assert plugin_discovery._discovered
+    assert model_providers.get_model_provider("strict-partial") is None
+    assert calls == ["first", "broken"]
+    with pytest.raises(RuntimeError, match="failed to load incident-harness plug-in fixture"):
+        plugin_discovery.discover_plugins(strict=True)
+    assert calls == ["first", "broken"]
 
 
 def test_discovery_rejects_non_callable_registrar(monkeypatch):

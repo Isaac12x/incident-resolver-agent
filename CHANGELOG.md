@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow installed extensions to supply an Agents SDK model for a configured provider name.
+
 ## 0.4.1 - 2026-11-25
 
 - Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.

@@ -47,7 +47,7 @@ TOML header: `[model]`.
 | `auto_upgrade` | boolean | `true` | Apply the shipped model upgrade policy on configuration load. Only matching OpenAI models without a custom endpoint and outside local mode are upgraded; set false to pin the model and reasoning. |
 | `runtime` | `agents-sdk`, `subscription-cli` | `"agents-sdk"` | Execution backend: agents-sdk uses the API; subscription-cli uses a host-authenticated Codex CLI. |
 | `mode` | `local`, `remote` | `"remote"` | Select remote or local model hosting. Local agents-sdk mode requires base_url. |
-| `provider` | string | `"openai"` | Provider label used by the upgrade policy. Changing this alone does not select a different SDK protocol; use base_url for an OpenAI-compatible endpoint. |
+| `provider` | string | `"openai"` | Selects an installed model provider registered for the Agents SDK. Other names retain the built-in OpenAI or OpenAI-compatible endpoint behavior. The upgrade policy also uses this label. |
 | `base_url` | string or null | Unset | Optional OpenAI-compatible endpoint. A custom endpoint selects the SDK chat-completions client. |
 | `api_key_env` | string | `"OPENAI_API_KEY"` | Environment variable containing the model API key. Local endpoints can run without a real key. Subscription CLI authentication is managed by the CLI. |
 | `organization_env` | string or null | Unset | Optional environment variable containing an OpenAI organization identifier. |
