@@ -15,6 +15,7 @@ from .bundles import load_active_bundle
 from .config import Config, load_config
 from .connectors import ConnectorManager
 from .github import GitHubCLIAdapter, GitHubService
+from .plugin_discovery import discover_plugins
 from .source_control import (
     SourceControlProvider,
     create_source_control_provider,
@@ -55,12 +56,11 @@ class Application:
     agent: IncidentAgent
     verifier: DeploymentVerifier
     workflow: WorkflowEngine
-    source_control_providers: dict[str, SourceControlProvider] | None = None
 
     @property
-    def source_control(self):
+    def source_control(self) -> dict[str, SourceControlProvider]:
         """Registered providers keyed by their ``publish_mode`` values."""
-        return self.source_control_providers or {"github": self.github}
+        return self.workflow.source_control_providers
 
     @classmethod
     def build(
@@ -69,6 +69,7 @@ class Application:
         *,
         agent_backend: AgentBackend | None = None,
     ) -> Application:
+        discover_plugins()
         load_dotenv(Path(config_path).resolve().parent / ".env", override=False)
         load_dotenv(Path.cwd() / ".env", override=False)
         config = load_config(Path(config_path))
@@ -87,17 +88,17 @@ class Application:
                 config.applications[0].name if len(config.applications) == 1 else None
             ),
         )
-        provider_names = {
+        provider_names = {"github"} | {
             repository.publish_mode.strip().casefold()
             for repository in config.repositories
             if repository.publish_mode.strip().casefold() not in {"auto", "local", "github"}
         }
-        github = _github_provider(config, storage)
-        providers: dict[str, SourceControlProvider] = {"github": github}
+        providers: dict[str, SourceControlProvider] = {}
         for provider_name in provider_names:
             providers[provider_name] = create_source_control_provider(
                 provider_name, config, storage
             )
+        github = providers["github"]
         backend = agent_backend or (
             SubscriptionCLIBackend(config)
             if config.model.runtime == "subscription-cli"
@@ -151,4 +152,4 @@ class Application:
             )
 
         workflow.reload_model = reload_model
-        return cls(config, storage, connectors, github, agent, verifier, workflow, providers)
+        return cls(config, storage, connectors, github, agent, verifier, workflow)
