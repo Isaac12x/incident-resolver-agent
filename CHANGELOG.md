@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow installed extensions to supply an Agents SDK model for a configured provider name.
+
 - Add per-repository source-control provider registration and webhook route mounting
   for external packages while preserving the core GitHub integration.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability

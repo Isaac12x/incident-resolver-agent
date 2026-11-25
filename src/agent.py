@@ -22,6 +22,7 @@ from .config import Config
 from .context import discover_documentation, render_documentation_context
 from .extensions import TrustedToolRegistry
 from .file_session import FileSession
+from .model_providers import get_model_provider
 from .models import (
     FixResult,
     InvestigationResult,
@@ -37,6 +38,7 @@ from .tooling import stable_hash, subscription_cli_command
 from .tools import WorkspaceTools
 
 AgentBackend = Callable[[str, str, WorkspaceTools, list[Any]], Awaitable[dict[str, Any]]]
+_MODEL_UNSET = object()
 
 
 class AgentLifecycle(Protocol):
@@ -315,6 +317,7 @@ class OpenAIAgentsBackend:
     def __init__(self, config: Config) -> None:
         self.config = config
         self._compatible_client: Any | None = None
+        self._registered_model: Any = _MODEL_UNSET
 
     def _uses_compatible_client(self) -> bool:
         model = self.config.model
@@ -325,6 +328,11 @@ class OpenAIAgentsBackend:
     def _model(self, agents_module: Any) -> str | Any:
         """Build the SDK model for any OpenAI-compatible chat-completions endpoint."""
         model_config = self.config.model
+        provider_factory = get_model_provider(model_config.provider)
+        if provider_factory is not None:
+            if self._registered_model is _MODEL_UNSET:
+                self._registered_model = provider_factory(model_config)
+            return self._registered_model
         if not self._uses_compatible_client():
             return model_config.name
 
@@ -683,7 +691,7 @@ class OpenAIAgentsBackend:
             parallel_tool_calls=self.config.model.parallel_tool_calls,
             reasoning=reasoning,
         )
-        model = self._model(agents_module) if agents_module else self.config.model.name
+        model = self._model(agents_module)
         session: Any | None = None
         if run_context is not None:
 
