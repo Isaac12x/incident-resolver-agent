@@ -255,7 +255,8 @@ async def test_partial_publication_restart_and_two_pr_completion(tmp_path, fail_
         }
 
     assert (
-        await engine.handle_github_event(
+        await engine.handle_source_control_event(
+            "github",
             "deployment_status",
             deployment("shop/api", "stale-sha"),
         )
@@ -263,13 +264,16 @@ async def test_partial_publication_restart_and_two_pr_completion(tmp_path, fail_
     )
     for name in names:
         state = task.repositories[name]
-        await engine.handle_github_event("deployment_status", deployment(name, state.pr_head_sha))
+        await engine.handle_source_control_event(
+            "github", "deployment_status", deployment(name, state.pr_head_sha)
+        )
         task = await engine.process(task.task_id)
         assert task.error is None, task.error
         assert task.state in {TaskState.WAITING_FOR_DEPLOYMENT, TaskState.WAITING_FOR_REVIEW}
     assert task.state == TaskState.WAITING_FOR_REVIEW
     for index, name in enumerate(names):
-        task = await engine.handle_github_event(
+        task = await engine.handle_source_control_event(
+            "github",
             "pull_request",
             {
                 "action": "closed",

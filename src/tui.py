@@ -30,7 +30,9 @@ from textual.widgets import (
 from .cli_help import GROUPS, format_cli_help, overview_next_steps
 from .code_review import provision
 from .config import (
+    BUILTIN_PUBLISH_MODES,
     ApplicationConfig,
+    BuiltinPublishMode,
     CodeReviewConfig,
     Config,
     ConnectorConfig,
@@ -939,7 +941,7 @@ class ConfigurationApp(App[None]):
                 name="",
                 clone_url=None,
                 local_path=None,
-                publish_mode="auto",
+                publish_mode=BuiltinPublishMode.AUTO,
                 base_branch="main",
                 incident_environments=["production"],
                 verification_environment="preview",
@@ -950,6 +952,14 @@ class ConfigurationApp(App[None]):
         prefix = f"repo-{key}"
         source = (
             "github" if repository.clone_url and "github.com" in repository.clone_url else "url"
+        )
+        publish_modes = tuple(
+            dict.fromkeys(
+                (
+                    *BUILTIN_PUBLISH_MODES,
+                    repository.publish_mode,
+                )
+            )
         )
         return Vertical(
             Label(repository.name or "New repository", classes="card-title"),
@@ -974,7 +984,9 @@ class ConfigurationApp(App[None]):
             self._pair(
                 "Publish mode",
                 self._select(
-                    repository.publish_mode, f"{prefix}-publish-mode", ("auto", "github", "local")
+                    repository.publish_mode,
+                    f"{prefix}-publish-mode",
+                    publish_modes,
                 ),
                 "Base branch",
                 self._input(repository.base_branch, f"{prefix}-base-branch"),

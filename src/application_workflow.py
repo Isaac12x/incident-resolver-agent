@@ -23,6 +23,7 @@ from .models import (
     TaskRecord,
     TaskState,
 )
+from .source_control import ApplicationSyncProvider
 from .tools import WorkspaceTools
 from .verification_graph import VerificationGraph
 
@@ -324,11 +325,7 @@ class ApplicationWorkflow:
         return changed
 
     def requires_remote_deployment(self, repository: str) -> bool:
-        configured = self.config.repository(repository)
-        return not (
-            configured.publish_mode == "local"
-            or (configured.publish_mode == "auto" and self.engine.github.api is None)
-        )
+        return self.engine.provider_enabled_for_repository(repository)
 
     def _persist(self, task: TaskRecord) -> TaskRecord:
         self.storage.save_task(task)
@@ -362,6 +359,19 @@ class ApplicationWorkflow:
             ),
         )
 
+    async def _sync_application_providers(self, task: TaskRecord) -> None:
+        """Give each selected provider one chance to refresh the full sibling set."""
+        seen_provider_ids: set[int] = set()
+        for repository in self.repositories(task):
+            if not _value(task, repository, "pr_number"):
+                continue
+            provider = self.engine.provider_for_repository(repository)
+            if id(provider) in seen_provider_ids:
+                continue
+            seen_provider_ids.add(id(provider))
+            if isinstance(provider, ApplicationSyncProvider):
+                await provider.sync_application_pull_requests(task)
+
     async def publish(self, task: TaskRecord) -> TaskRecord:
         """Publish changed repositories, checkpointing after each successful target."""
         self.verify_workspaces(task)
@@ -387,10 +397,7 @@ class ApplicationWorkflow:
                 )
             if already_published:
                 continue
-            repo_config = self.config.repository(repository)
-            if repo_config.publish_mode == "local" or (
-                repo_config.publish_mode == "auto" and self.engine.github.api is None
-            ):
+            if not self.engine.provider_enabled_for_repository(repository):
                 sha = _commit(worktree, f"Fix incident {current.external_id}: {current.summary}")
                 reference = PullRequestReference(
                     repository=repository,
@@ -461,9 +468,8 @@ class ApplicationWorkflow:
             self._persist(current)
             self._write_group_artifact(current)
         result = self.storage.load_task(task.task_id)
-        sync = getattr(self.engine.github, "sync_application_pull_requests", None)
-        if sync and result.repositories:
-            await sync(result)
+        if result.repositories:
+            await self._sync_application_providers(result)
         return self.storage.load_task(task.task_id)
 
     def accept_deployment(

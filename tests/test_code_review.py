@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -365,6 +366,70 @@ async def test_review_repairs_republish_then_verify(restore_task_state, workflow
     result = await engine.process(task.task_id)
     assert result.state == TaskState.WAITING_FOR_REVIEW
     engine.verifier.verify.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_open_pr_refuses_existing_pr_update_in_local_mode(
+    restore_task_state, workflow, monkeypatch
+):
+    engine, task, worktree = workflow
+    engine.config.code_review.enabled = False
+    engine.config.repositories[0].publish_mode = "local"
+    engine.github.publish_enabled = False
+    task = restore_task_state(
+        engine.storage,
+        task.task_id,
+        TaskState.TESTING_LOCAL,
+        pr_number=7,
+        pr_url="https://github.test/pr/7",
+        pr_head_sha="existing-head",
+    )
+    publish = AsyncMock(side_effect=AssertionError("disabled provider was called"))
+    monkeypatch.setattr(engine, "_publish", publish)
+
+    with pytest.raises(RuntimeError, match="publishing is disabled"):
+        await _TaskLifecycle(engine, task.task_id, worktree).open_pr("fix")
+
+    updated = engine.storage.load_task(task.task_id)
+    assert updated.pr_url == "https://github.test/pr/7"
+    assert updated.pr_head_sha == "existing-head"
+    publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publish_mode", ["auto", "github"])
+async def test_open_pr_keeps_existing_github_update_when_provider_is_disabled(
+    publish_mode, restore_task_state, workflow, monkeypatch
+):
+    engine, task, worktree = workflow
+    engine.config.code_review.enabled = False
+    engine.config.repositories[0].publish_mode = publish_mode
+    engine.source_control_providers = {
+        "github": SimpleNamespace(publish_enabled=False)
+    }
+    task = restore_task_state(
+        engine.storage,
+        task.task_id,
+        TaskState.TESTING_LOCAL,
+        pr_number=7,
+        pr_url="https://github.test/pr/7",
+        pr_head_sha="existing-head",
+        branch="feature-branch",
+    )
+    reference = PullRequestReference(
+        repository=task.repository,
+        number=7,
+        branch="feature-branch",
+        head_sha="updated-head",
+        url="https://github.test/pr/7",
+    )
+    legacy_update = AsyncMock(return_value=reference)
+    monkeypatch.setattr(engine, "_update_pull_request_from_worktree", legacy_update)
+
+    result = await _TaskLifecycle(engine, task.task_id, worktree).open_pr("fix")
+
+    assert result["head_sha"] == "updated-head"
+    legacy_update.assert_awaited_once()
 
 
 @pytest.mark.asyncio

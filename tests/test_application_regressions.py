@@ -252,7 +252,8 @@ async def test_application_github_merge_event_accepts_case_changed_repository_na
 ) -> None:
     _, storage, engine, task = await _engine(tmp_path)
     task = _waiting_for_review(storage, task)
-    await engine.handle_github_event(
+    await engine.handle_source_control_event(
+        "github",
         "pull_request",
         {
             "action": "closed",
@@ -269,7 +270,8 @@ async def test_application_review_event_accepts_case_changed_repository_name(
 ) -> None:
     _, storage, engine, task = await _engine(tmp_path)
     task = _waiting_for_review(storage, task)
-    await engine.handle_github_event(
+    await engine.handle_source_control_event(
+        "github",
         "pull_request_review_comment",
         {
             "repository": {"full_name": "SHOP/API"},

@@ -5,10 +5,32 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+
+class BuiltinPublishMode(StrEnum):
+    """Built-in source-control publication modes."""
+
+    AUTO = "auto"
+    GITHUB = "github"
+    LOCAL = "local"
+
+
+BUILTIN_PUBLISH_MODES = tuple(BuiltinPublishMode)
+
+
+def normalize_provider_name(name: str) -> str:
+    """Normalize and validate a source-control provider name."""
+    normalized = name.strip().casefold()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized):
+        raise ValueError("provider name must be a non-empty provider name")
+    return normalized
+
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are the durable lead agent for one production incident. Turn incident evidence into the "
@@ -260,13 +282,71 @@ class RepositoryConfig(BaseModel):
     name: str
     clone_url: str | None = None
     local_path: Path | None = None
-    publish_mode: Literal["auto", "github", "local"] = "auto"
+    # Third-party providers may register additional names during application startup.
+    publish_mode: str | BuiltinPublishMode = BuiltinPublishMode.AUTO
     base_branch: str = "main"
     responsibility_paths: list[str] = Field(default_factory=lambda: ["."])
     incident_environments: list[str] = Field(default_factory=lambda: ["production"])
     verification_environment: str = "preview"
     project_instructions: str = "AGENTS.md"
     playwright: PlaywrightConfig = Field(default_factory=PlaywrightConfig)
+
+    @field_validator("publish_mode", mode="before")
+    @classmethod
+    def safe_publish_mode(cls, value: Any, info: ValidationInfo) -> str | BuiltinPublishMode:
+        if not isinstance(value, str):
+            raise ValueError("publish mode must be a provider name")
+        try:
+            normalized = normalize_provider_name(value)
+        except ValueError:
+            raise ValueError("publish mode must be a non-empty provider name") from None
+        try:
+            return BuiltinPublishMode(normalized)
+        except ValueError:
+            from .source_control import validate_publish_mode
+
+            context = info.context if isinstance(info.context, dict) else {}
+            validate_publish_mode(
+                normalized,
+                context=context,
+                repository=str(info.data.get("name", "")) if info.data else "",
+            )
+            return normalized
+
+    @property
+    def github_health_checkable(self) -> bool:
+        """Whether configured GitHub operations should appear in health checks."""
+        return self.publish_mode in {
+            BuiltinPublishMode.AUTO,
+            BuiltinPublishMode.GITHUB,
+        } and self.needs_github_adapter
+
+    @property
+    def needs_github_adapter(self) -> bool:
+        """Whether GitHub tooling is needed for configured repository access."""
+        return (
+            self.publish_mode == BuiltinPublishMode.GITHUB
+            or "github.com" in (self.clone_url or "")
+        )
+
+    @property
+    def clone_identity(self) -> str | None:
+        """Return the owner/repository identity encoded by a remote clone URL."""
+        value = (self.clone_url or "").strip().rstrip("/")
+        if not value:
+            return None
+        if value.startswith("git@") and ":" in value:
+            path = value.split(":", 1)[1]
+        else:
+            try:
+                parsed = urlsplit(value)
+            except ValueError:
+                return None
+            path = parsed.path if parsed.scheme and parsed.netloc else ""
+        identity = path.strip("/").removesuffix(".git")
+        if not identity or any(part in {".", ".."} for part in identity.split("/")):
+            return None
+        return identity
 
     @field_validator("name")
     @classmethod
@@ -580,6 +660,22 @@ class Config(BaseModel):
 
 
 def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True) -> Config:
+    """Load and validate configuration, discovering extensions for selected providers.
+
+    Args:
+        path: TOML configuration file path.
+        create: Whether to write generated defaults or an upgraded model back to disk.
+
+    Returns:
+        The validated configuration.
+
+    Raises:
+        ValueError: If TOML data is invalid or a selected provider cannot be validated.
+        OSError: If the configuration file cannot be read or written.
+
+    Side effects:
+        May load installed plug-ins and, when requested, write default or upgraded configuration.
+    """
     if not path.exists() or path.stat().st_size == 0:
         from .tooling import host_subscription_cli_ready
 
@@ -594,7 +690,8 @@ def load_config(path: Path = Path(".agent/config.toml"), *, create: bool = True)
             save_config(config, path)
         return config
     with path.open("rb") as handle:
-        config = Config.model_validate(tomllib.load(handle))
+        data = tomllib.load(handle)
+    config = Config.model_validate(data, context={"discover_plugins": True})
     if upgrade_model(config.model) and create:
         save_config(config, path)
     return config

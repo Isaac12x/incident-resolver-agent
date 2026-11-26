@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -65,6 +66,41 @@ def test_legacy_projection_keeps_primary_fields() -> None:
     assert _value(task, "api", "branch") == "fix/legacy"
     _update_state(task, "api", pr_number=12)
     assert task.pr_number == 12
+
+
+@pytest.mark.asyncio
+async def test_application_sync_groups_by_selected_provider() -> None:
+    task = task_with_scope()
+    task.repositories["api"].pr_number = 10
+    task.repositories["web"].pr_number = 20
+    github = SimpleNamespace(sync_application_pull_requests=AsyncMock())
+    external = SimpleNamespace(sync_application_pull_requests=AsyncMock())
+    selected = {"api": github, "web": external}
+    engine = SimpleNamespace(
+        config=Config(),
+        provider_for_repository=lambda repository: selected[repository],
+    )
+
+    await ApplicationWorkflow(engine)._sync_application_providers(task)
+
+    github.sync_application_pull_requests.assert_awaited_once_with(task)
+    external.sync_application_pull_requests.assert_awaited_once_with(task)
+
+
+@pytest.mark.asyncio
+async def test_application_sync_deduplicates_shared_provider_by_identity() -> None:
+    task = task_with_scope()
+    task.repositories["api"].pr_number = 10
+    task.repositories["web"].pr_number = 20
+    shared = SimpleNamespace(sync_application_pull_requests=AsyncMock())
+    engine = SimpleNamespace(
+        config=Config(),
+        provider_for_repository=lambda _repository: shared,
+    )
+
+    await ApplicationWorkflow(engine)._sync_application_providers(task)
+
+    shared.sync_application_pull_requests.assert_awaited_once_with(task)
 
 
 def test_integration_revision_fails_closed_for_missing_git(tmp_path: Path) -> None:
@@ -147,7 +183,10 @@ def test_replaced_member_workspace_is_rejected(tmp_path: Path) -> None:
 def test_github_application_sync_links_all_sibling_prs(tmp_path: Path) -> None:
     config = Config(
         runtime_root=tmp_path / "runtime",
-        repositories=[RepositoryConfig(name="api"), RepositoryConfig(name="web")],
+        repositories=[
+            RepositoryConfig(name="api", publish_mode="local"),
+            RepositoryConfig(name="web", publish_mode="github"),
+        ],
         applications=[ApplicationConfig(name="shop", repositories=["api", "web"])],
     )
     storage = Storage(config.runtime_root)

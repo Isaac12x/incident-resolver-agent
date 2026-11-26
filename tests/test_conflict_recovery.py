@@ -5,19 +5,20 @@ import subprocess
 import pytest
 
 from src.config import Config, RepositoryConfig
-from src.github import GitHubService
+from src.github import GitHubService, is_conflicted_pull_request
 from src.models import Incident, TaskState
+from src.source_control import WebhookDetails
 from src.storage import Storage
 from src.workflow import WorkflowEngine
 
 
 def test_conflict_recovery_requires_explicit_dirty_mergeability() -> None:
     base = {"pull_request": {"mergeable_state": "unknown"}}
-    assert not WorkflowEngine._is_conflicted_pull_request(base)
-    assert not WorkflowEngine._is_conflicted_pull_request(
+    assert not is_conflicted_pull_request(base)
+    assert not is_conflicted_pull_request(
         {"pull_request": {"mergeable": False, "mergeable_state": "blocked"}}
     )
-    assert WorkflowEngine._is_conflicted_pull_request(
+    assert is_conflicted_pull_request(
         {"pull_request": {"mergeable_state": "dirty", "head": {"sha": "head"}}}
     )
 
@@ -89,7 +90,7 @@ async def test_recovery_merges_actual_base_and_leaves_conflict_for_session(tmp_p
             "mergeable_state": "dirty",
         },
     }
-    result = await engine.handle_github_event("pull_request", payload)
+    result = await engine.handle_source_control_event("github", "pull_request", payload)
     assert result.conflict_pending
     assert result.conflict_base_branch == "main"
     assert result.conflict_recovery_attempts == 1
@@ -102,6 +103,11 @@ async def test_recovery_merges_actual_base_and_leaves_conflict_for_session(tmp_p
     resumed = await engine._recover_pull_request_conflict(
         crashed,
         ("org/repo", 7),
-        {"pull_request": {"base": {"ref": "main", "repo": {"full_name": "org/repo"}}}},
+        WebhookDetails(
+            repositories=("org/repo",),
+            target=("org/repo", 7),
+            conflict_base_branch="main",
+            conflict_base_repository="org/repo",
+        ),
     )
     assert resumed.conflict_recovery_attempts == 1

@@ -12,13 +12,96 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .config import Config, GitHubConfig
-from .models import PullRequestReference, ReviewComment, TaskRecord, VerificationResult
+from .config import BUILTIN_PUBLISH_MODES, Config, GitHubConfig
+from .models import (
+    DeploymentReference,
+    PullRequestReference,
+    ReviewComment,
+    TaskRecord,
+    VerificationResult,
+)
+from .source_control import (
+    ApplicationSyncProvider,
+    HealthCheckProvider,
+    SourceControlProvider,
+    WebhookDetails,
+)
 from .storage import Storage
 
 
 class WebhookSignatureError(PermissionError):
     pass
+
+
+def is_conflicted_pull_request(payload: dict[str, Any]) -> bool:
+    """Return whether a legacy GitHub payload explicitly reports a dirty merge state.
+
+    Args:
+        payload: Legacy GitHub-shaped pull request payload.
+
+    Returns:
+        Whether the pull request has a head SHA and dirty merge state.
+    """
+    pull_request = payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    head = pull_request.get("head") or {}
+    return bool(head.get("sha")) and str(
+        pull_request.get("mergeable_state", "")
+    ).casefold() == "dirty"
+
+
+def adapt_webhook_details(
+    provider: SourceControlProvider, event: str, payload: dict[str, Any]
+) -> WebhookDetails:
+    """Adapt the v0.4.2 GitHub-shaped payload contract to neutral event facts.
+
+    Args:
+        provider: Existing provider implementation used to resolve pull request targets.
+        event: Source-control event name.
+        payload: Legacy translated event payload.
+
+    Returns:
+        Provider-neutral event facts for workflow dispatch.
+    """
+    target = provider.repository_and_pr(payload)
+    root = payload.get("repository")
+    repository = root.get("full_name") if isinstance(root, dict) else None
+    pr_value = payload.get("pull_request")
+    pull_request = pr_value if isinstance(pr_value, dict) else {}
+    base = pull_request.get("base") or {}
+    head = pull_request.get("head") or {}
+    deployment = payload.get("deployment", payload)
+    deployment_repo = deployment.get("repository")
+    deployment_repo_name = (
+        deployment_repo.get("full_name") if isinstance(deployment_repo, dict) else None
+    )
+    status = payload.get("deployment_status", {})
+    deployment_details = None
+    if event in {"deployment", "deployment_status"}:
+        deployment_details = DeploymentReference(
+            repository=str(deployment_repo_name or (target or ("", 0))[0]),
+            environment=str(deployment.get("environment", "")),
+            sha=str(deployment.get("sha", "")),
+            url=str(status.get("environment_url") or status.get("target_url") or ""),
+            deployment_id=deployment.get("id"),
+            state=str(status.get("state", deployment.get("state", ""))),
+        )
+    repositories = tuple(
+        dict.fromkeys(str(name) for name in (repository, deployment_repo_name) if name)
+    )
+    base_repo = (base.get("repo") or {}).get("full_name") or (target or ("", 0))[0]
+    return WebhookDetails(
+        repositories=repositories,
+        target=target,
+        action=str(payload.get("action", "")),
+        merged=bool(pull_request.get("merged")),
+        conflicted=is_conflicted_pull_request(payload),
+        deployment=deployment_details,
+        conflict_base_branch=str(base.get("ref") or "").strip(),
+        conflict_base_repository=str(base_repo),
+        conflict_head_sha=str(head.get("sha") or ""),
+    )
 
 
 class GitHubCLIAdapter:
@@ -85,8 +168,7 @@ class GitHubCLIAdapter:
         repositories = [
             r
             for r in self.config.repositories
-            if r.publish_mode != "local"
-            and (r.publish_mode == "github" or "github.com" in (r.clone_url or ""))
+            if r.github_health_checkable
         ]
         return dict(await asyncio.gather(*(check(r) for r in repositories)))
 
@@ -162,17 +244,26 @@ class GitHubCLIAdapter:
             return
         from .application_workflow import _view
 
+        published = {
+            repository: state
+            for repository, state in task.repositories.items()
+            if state.pr_number
+        }
+        github_managed = {
+            repository: state
+            for repository, state in published.items()
+            if self.config.repository(repository).publish_mode in BUILTIN_PUBLISH_MODES
+        }
+        if not github_managed:
+            return
         references = []
-        for repository, state in task.repositories.items():
-            if state.pr_number:
-                references.append(
-                    f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
-                    f"(SHA `{state.pr_head_sha or ''}`)"
-                )
+        for repository, state in published.items():
+            references.append(
+                f"- `{repository}`: [PR #{state.pr_number}]({state.pr_url or ''}) "
+                f"(SHA `{state.pr_head_sha or ''}`)"
+            )
         sibling_text = "\n\n## Application pull requests\n\n" + "\n".join(references)
-        for repository, state in task.repositories.items():
-            if not state.pr_number:
-                continue
+        for repository, state in github_managed.items():
             member = _view(task, repository)
             body = self._body(member) + sibling_text
             self._api(
@@ -340,6 +431,16 @@ class GitHubService:
         self._deliveries: deque[str] = deque(maxlen=10_000)
         self._delivery_set: set[str] = set()
 
+    @property
+    def publish_enabled(self) -> bool:
+        return self.api is not None
+
+    async def check_health(self) -> dict[str, dict[str, str]]:
+        """Report GitHub CLI health through the provider boundary."""
+        if not isinstance(self.api, HealthCheckProvider):
+            return {}
+        return await self.api.check_health()
+
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> None:
         if not self.webhook_secret:
             raise WebhookSignatureError("GitHub webhook secret is not configured")
@@ -350,6 +451,15 @@ class GitHubService:
         if not hmac.compare_digest(provided, expected):
             raise WebhookSignatureError("invalid GitHub webhook signature")
 
+    def authenticate_and_translate(
+        self, headers: Mapping[str, str], body: bytes
+    ) -> tuple[str, dict[str, Any], bool]:
+        self.verify_webhook(headers, body)
+        delivery = headers.get("x-github-delivery", "")
+        if not self.accept_delivery(delivery):
+            return headers.get("x-github-event", ""), {}, True
+        return headers.get("x-github-event", ""), self.decode(body), False
+
     def accept_delivery(self, delivery_id: str) -> bool:
         if not delivery_id or delivery_id in self._delivery_set:
             return False
@@ -358,6 +468,7 @@ class GitHubService:
         self._deliveries.append(delivery_id)
         self._delivery_set.add(delivery_id)
         return True
+
 
     def review_comment(self, payload: dict[str, Any]) -> ReviewComment | None:
         comment = payload.get("comment") or payload.get("review", {})
@@ -411,7 +522,7 @@ class GitHubService:
         )
 
     async def sync_application_pull_requests(self, task: TaskRecord) -> None:
-        if self.api and hasattr(self.api, "sync_application_pull_requests"):
+        if isinstance(self.api, ApplicationSyncProvider):
             await self.api.sync_application_pull_requests(task)
 
     async def reply_to_review(self, comment: ReviewComment, message: str) -> None:

@@ -2,7 +2,60 @@
 
 ## Unreleased
 
+- Added a regression replay for GitHub conflict recovery covering dirty and unknown
+  mergeability against the pre-refactor behavior.
+
+## 0.4.3 - 2026-11-25
+
+- Accept provider-neutral webhook details for repository routing, reviews, merges, conflicts,
+  and deployments while supporting existing plug-ins that send dictionary payloads.
+- Represent built-in publish modes with enum members and preserve their TOML values.
+  Source control now handles discovery and registry checks during custom mode validation.
+- Preserve worktree updates for existing GitHub pull requests when the publisher is disabled.
+- Match the GitHub webhook result annotation to the provider tuple protocol and use the
+  configured module logger during plug-in discovery.
+- Distinguish active plug-in discovery from metadata enumeration failure during reentrant loads.
+- Validate finalized webhook routers at server construction using public FastAPI APIs.
+  Extensions must finish defining their routes before starting the server.
+- Describe the provider webhook return type as a plain tuple containing the event, payload and
+  duplicate flag. A custom provider configuration now reports when a plug-in metadata
+  failure prevented its name from being checked.
+
+## 0.4.2 - 2026-11-25
+
+- Restore the legacy `handle_github_event` workflow entry point. Log why a webhook
+  was ignored when its repository identity or task match is ambiguous.
+- Honor provider availability for explicit GitHub publication. Build webhook servers
+  from checked router snapshots so later route additions require a new server.
+- Read the entire plug-in metadata index before invoking registrars, allowing retries
+  after enumeration failures without repeating registration.
+- Route source-control webhooks to the configured repository when its local name differs
+  from the full name sent by the provider. Reject conflicting repository identities.
+- Refresh existing GitHub pull requests for local-mode application members and include
+  external providers’ pull requests in sibling links.
+- Validate repository models without loading third-party code. File-based configuration
+  discovers installed providers when a repository selects a custom publish mode.
+
+## 0.4.1 - 2026-11-25
+
 - Add a public `ee/` Enterprise licensing notice with a link to open a licensing inquiry.
+- Clarify source-control provider configuration and documentation, and deduplicate webhook
+  router registration. Reject conflicting webhook routes before mounting them and retry
+  discovery after an entry-point enumeration failure.
+- Validate repository publish modes against built-in or registered providers during config
+  construction and loading, and discover installed providers before validating custom modes.
+- Report provider startup failures with provider and repository context, roll back partial
+  registrations from failed plugin setup, and continue loading other plugins.
+- Run provider health checks through the source-control registry and exclude plugin-owned
+  GitHub clone URLs from native GitHub checks. Preserve the GitHub CLI adapter for all
+  GitHub clone URLs and include every published sibling in grouped PR descriptions.
+
+## 0.4.0 - 2026-11-25
+
+- Add per-repository source-control provider registration and webhook route mounting
+  for external packages while routing native GitHub webhooks through the provider
+  authentication and translation contract. Discover zero-argument plugin registrars
+  from the `incident_harness.plugins` entry-point group.
 - Allow editing and testing a webhook's public URL in Sources, with a reachability
   check that does not create an incident or claim to verify delivery.
 - Replace internal connector validation details with actionable form errors.

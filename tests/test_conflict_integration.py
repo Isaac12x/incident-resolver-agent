@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +15,9 @@ from src.github import GitHubService
 from src.models import Incident, ReviewComment, TaskState
 from src.storage import Storage
 from src.workflow import WorkflowEngine, _TaskLifecycle
+
+_EXPECTED_PR_HEAD = "c5cb53c6f83b8fbde768fa81ae2abbff41b79b45"
+_EXPECTED_DIRTY_PAYLOAD_SHA256 = "da511f48b5c45418ddd35830cdeaf00cd66bd133bd694d0297ad0b24b009b2e9"
 
 
 def git(path: Path, *args: str) -> str:
@@ -72,6 +77,90 @@ def _conflicted_checkout(tmp_path: Path):
     return config, storage, task, worktree, head
 
 
+def _legacy_conflict_payload(head: str, mergeable_state: str) -> dict[str, object]:
+    return {
+        "action": "synchronize",
+        "repository": {"full_name": "org/repo"},
+        "pull_request": {
+            "number": 7,
+            "head": {"sha": head},
+            "base": {"ref": "main", "repo": {"full_name": "org/repo"}},
+            "mergeable_state": mergeable_state,
+        },
+    }
+
+
+def _conflict_event_types(storage: Storage, task_id: str) -> list[str]:
+    return [
+        event.type
+        for event in storage.events(task_id)
+        if event.type.startswith("publication.conflict_")
+    ]
+
+
+def _pin_replay_git(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_DEFAULT_HASH", "sha1")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "Test")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "test@example.test")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "Test")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "test@example.test")
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2020-01-02T03:04:05+00:00")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2020-01-02T03:04:05+00:00")
+
+
+@pytest.mark.asyncio
+async def test_dirty_github_replay_matches_historical_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_replay_git(monkeypatch)
+    config, storage, task, worktree, head = _conflicted_checkout(tmp_path)
+    assert head == _EXPECTED_PR_HEAD
+    engine = WorkflowEngine(config, storage, object(), GitHubService(config.github), object())
+    payload = _legacy_conflict_payload(head, "dirty")
+    payload_digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    assert payload_digest == _EXPECTED_DIRTY_PAYLOAD_SHA256
+
+    result = await engine.handle_github_event("pull_request", payload)
+
+    assert result is not None
+    assert result.conflict_pending is True
+    assert result.conflict_merge_pending is False
+    assert result.conflict_recovery_attempts == 1
+    assert result.conflict_base_branch == "main"
+    assert _conflict_event_types(storage, task.task_id) == [
+        "publication.conflict_recovery_started",
+        "publication.conflict_recovery",
+    ]
+    assert git(worktree, "diff", "--name-only", "--diff-filter=U") == "value.txt"
+    assert git(worktree, "rev-parse", "--verify", "MERGE_HEAD")
+
+
+@pytest.mark.asyncio
+async def test_unknown_github_replay_is_inert(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _pin_replay_git(monkeypatch)
+    config, storage, task, worktree, head = _conflicted_checkout(tmp_path)
+    assert head == _EXPECTED_PR_HEAD
+    engine = WorkflowEngine(config, storage, object(), GitHubService(config.github), object())
+    before = storage.load_task(task.task_id)
+
+    result = await engine.handle_github_event(
+        "pull_request", _legacy_conflict_payload(head, "unknown")
+    )
+
+    assert result is not None
+    assert result.model_dump(mode="json") == before.model_dump(mode="json")
+    assert _conflict_event_types(storage, task.task_id) == []
+    assert git(worktree, "diff", "--name-only", "--diff-filter=U") == ""
+    assert git(worktree, "status", "--porcelain") == ""
+    assert git(worktree, "rev-parse", "HEAD") == head
+
+
 @pytest.mark.asyncio
 async def test_conflict_event_leaves_real_merge_for_agent_and_loads_skills(tmp_path: Path) -> None:
     config, storage, task, worktree, head = _conflicted_checkout(tmp_path)
@@ -87,11 +176,11 @@ async def test_conflict_event_leaves_real_merge_for_agent_and_loads_skills(tmp_p
         },
     }
 
-    recovered = await engine.handle_github_event("pull_request", payload)
+    recovered = await engine.handle_source_control_event("github", "pull_request", payload)
     assert recovered.conflict_pending
     assert recovered.conflict_recovery_attempts == 1
     assert git(worktree, "diff", "--name-only", "--diff-filter=U") == "value.txt"
-    repeated = await engine.handle_github_event("pull_request", payload)
+    repeated = await engine.handle_source_control_event("github", "pull_request", payload)
     assert repeated.conflict_recovery_attempts == 1
 
     captured: dict[str, str] = {}
@@ -170,7 +259,7 @@ async def test_stale_conflict_webhook_does_not_touch_checkout(tmp_path: Path) ->
         },
     }
 
-    result = await engine.handle_github_event("pull_request", payload)
+    result = await engine.handle_source_control_event("github", "pull_request", payload)
 
     assert not result.conflict_pending
     assert git(worktree, "diff", "--name-only", "--diff-filter=U") == ""
